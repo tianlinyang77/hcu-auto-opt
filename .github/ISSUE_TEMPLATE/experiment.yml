@@ -1,0 +1,35 @@
+name: 探针或实验
+description: 用最小成本回答一个可能改变架构的未知
+title: "[Experiment] "
+labels: ["type/experiment"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 实验类型
+      options:
+        - Stage 0 探针
+        - 测试夹具
+        - 业务优化实验
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: 唯一问题
+      description: 该实验只回答哪一个能/不能或量化问题？
+    validations:
+      required: true
+  - type: textarea
+    id: stop
+    attributes:
+      label: 通过、失败与停止条件
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: 原始数据与环境指纹位置
+    validations:
+      required: true
+

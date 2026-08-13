@@ -1,0 +1,13 @@
+{
+  "measurement": "pass",
+  "profiler": "full",
+  "hot_patch": "hot_patch",
+  "hardware_fingerprint": "replace-with-real-dcu-fingerprint",
+  "software_fingerprint": "replace-with-real-dtk-framework-image-fingerprint",
+  "timer_resolution_ns": 100.0,
+  "noise_sigma_ns": 250.0,
+  "noise_cv": 0.004,
+  "mde_ratio": 0.012,
+  "evidence_uri": "results/stage0/run-001/"
+}
+

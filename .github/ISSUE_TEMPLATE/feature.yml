@@ -1,0 +1,40 @@
+name: 功能切片
+description: 可纵向交付的工程功能
+title: "[Feature] "
+labels: ["type/feature"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 本 Issue 完成后，端到端链路多了什么能力？
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: 输入 / 输出 Contract
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 验收证据
+    validations:
+      required: true
+  - type: dropdown
+    id: resource
+    attributes:
+      label: 资源需求
+      options:
+        - 无 DCU
+        - Functional Lease
+        - Measurement Lease
+        - Topology Lease
+    validations:
+      required: true
+  - type: textarea
+    id: planb
+    attributes:
+      label: 依赖与 Plan B
+
