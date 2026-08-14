@@ -1,5 +1,11 @@
 # 四人建设计划
 
+## 正式分工前：Stage -0.5 Walking Skeleton
+
+先由 A 搭建公共脚手架，B/C/D 审核并签署各自接口，再进入并行开发。脚手架可以使用 Fake Adapter 验证 Task、Job、Worker、Artifact、Evaluation 和 Lease/Fencing 控制流，但不得把 Fake 数字当作 Stage 0 或性能成果。
+
+退出条件：空库迁移成功、三类 Worker 可注册和领任务、旧 Claim/Fencing Token 被拒绝、Baseline 不可修改、Demo 在 10 分钟内到达 `AWAITING_SIGNOFF`。详见 [Walking Skeleton](walking-skeleton.md)。
+
 ## 责任分配
 
 ### A：架构与控制面 DRI
@@ -37,7 +43,7 @@
 
 D 只消费 B 的 Harness，不实现计时底层。Registry、签核和回滚元数据由 A 负责。
 
-## 8 周里程碑
+## Stage 0 之后的 8 周里程碑
 
 | 周 | 目标 | 关键交付 / 退出条件 |
 |---|---|---|
@@ -58,4 +64,3 @@ D 只消费 B 的 Harness，不实现计时底层。Registry、签核和回滚�
 - 周三：接口合流，暴露 Contract 冲突；
 - 周五：运行一条更完整的端到端链，失败也必须保存证据；
 - 每个实验 Issue 必须区分“探针”“夹具”“业务优化成果”。
-

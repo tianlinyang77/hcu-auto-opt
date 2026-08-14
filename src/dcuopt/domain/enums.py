@@ -78,3 +78,42 @@ class ReleaseMode(StrEnum):
     OVERLAY = "overlay"
     MANUAL_ONLY = "manual_only"
 
+
+class WorkerType(StrEnum):
+    AGENT = "agent"
+    BUILD = "build"
+    GPU = "gpu"
+
+
+class WorkerState(StrEnum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+
+
+class JobState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class JobType(StrEnum):
+    PROFILE = "profile"
+    CANDIDATE_GENERATE = "candidate_generate"
+    BUILD = "build"
+    CORRECTNESS = "correctness"
+    PERFORMANCE = "performance"
+    E2E = "e2e"
+
+
+class EvaluationPhase(StrEnum):
+    CORRECTNESS = "correctness"
+    PERFORMANCE = "performance"
+    E2E = "e2e"
+
+
+class LeaseScope(StrEnum):
+    NONE = "none"
+    SHARED = "shared"
+    EXCLUSIVE = "exclusive"

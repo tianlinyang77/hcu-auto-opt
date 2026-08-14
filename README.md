@@ -2,7 +2,19 @@
 
 面向 DCU 推理工作负载的自动性能优化平台。系统从真实 Workload 出发，发现瓶颈、生成候选、隔离构建、可信评测，并把可复现证据交给人工签核。
 
-当前仓库处于 **MVP 架构骨架阶段**。第一优先级不是生成更多 Kernel，而是先通过 Stage 0，证明测试环境能够测出可信数字。
+当前仓库处于 **Walking Skeleton 阶段**。第一优先级不是生成更多 Kernel，而是先固定四人协作所需的 Contract、数据库、Worker 和安全边界，再通过 Stage 0 证明真实测试环境能够测出可信数字。
+
+## 当前可运行闭环
+
+仓库已经提供 FastAPI 控制面、PostgreSQL Job Queue、Agent/Build/GPU 三类 Worker、Baseline Epoch、Claim/Fencing Token 和 Fake Adapter。Fake Demo 可以跑到 `AWAITING_SIGNOFF`，但只验证控制流，所有 Fake 加速数字都不构成真实性能证据。
+
+```bash
+docker compose up -d --build
+docker compose run --rm api \
+  dcuopt walking-demo --api-url http://api:8000 --external-workers
+```
+
+API 文档：`http://localhost:8000/docs`。详细说明见 [Walking Skeleton](docs/walking-skeleton.md)。
 
 ## MVP 范围
 
@@ -87,6 +99,15 @@ set DCUOPT_DATABASE_URL=postgresql://dcuopt:dcuopt@localhost:5432/dcuopt
 pytest tests/integration -m postgres
 ```
 
+不使用 Docker 时，也可以分别启动控制面和内嵌 Worker Demo：
+
+```bash
+set DCUOPT_DATABASE_URL=postgresql://dcuopt:dcuopt@localhost:5432/dcuopt
+dcuopt db-migrate
+dcuopt api
+dcuopt walking-demo --api-url http://localhost:8000
+```
+
 ## 文档入口
 
 - [整体架构](docs/architecture.md)
@@ -96,6 +117,7 @@ pytest tests/integration -m postgres
 - [领域契约](docs/contracts.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
+- [Walking Skeleton](docs/walking-skeleton.md)
 - [首批 Backlog](docs/backlog.md)
 - [贡献流程](CONTRIBUTING.md)
 
@@ -106,4 +128,3 @@ pytest tests/integration -m postgres
 - KernelAgent：借鉴诊断、Roofline 和 Beam/Top-K 方法，不直接搬运 CUDA/NCU 实现。
 
 公开项目不等于可直接上线的生产控制面；DCU 工具链、可信测量、Baseline Epoch、资源 Fencing、统计裁决和发布证据仍是本项目的核心工程。
-

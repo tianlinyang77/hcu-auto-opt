@@ -15,6 +15,47 @@ services:
     volumes:
       - dcuopt-postgres:/var/lib/postgresql/data
 
+  api:
+    build: .
+    environment:
+      DCUOPT_DATABASE_URL: postgresql://dcuopt:dcuopt@postgres:5432/dcuopt
+      DCUOPT_AUTO_MIGRATE: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  agent-worker:
+    build: .
+    command: ["dcuopt", "worker", "--id", "agent-1", "--type", "agent", "--api-url", "http://api:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  build-worker:
+    build: .
+    command: ["dcuopt", "worker", "--id", "build-1", "--type", "build", "--api-url", "http://api:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  gpu-worker:
+    build: .
+    command:
+      ["dcuopt", "worker", "--id", "gpu-1", "--type", "gpu", "--resource-id", "fake-dcu-0", "--api-url", "http://api:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   dcuopt-postgres:
-
