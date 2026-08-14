@@ -1,6 +1,6 @@
-# v0.1 领域契约
+# v1 领域契约
 
-代码源定义位于 `src/dcuopt/domain/`。本文件说明跨模块不变量。
+API/Worker 版本化模型位于 `src/dcuopt/contracts/v1.py`，状态机位于 `src/dcuopt/domain/`，数据库迁移位于 `src/dcuopt/storage/sql/`。三层必须共同演进，禁止分别维护同名字段。
 
 ## 核心对象
 
@@ -36,7 +36,24 @@ benchmark_recipe:
 release_mode: hot_patch | overlay | manual_only
 ```
 
+## Job 与错误语义
+
+每个 Job 必须带全局唯一 `idempotency_key`，每次领取生成新的 `claim_token`。GPU Job 还必须带资源当前的 `fencing_token`；Claim 或 Fencing 任一过期，Heartbeat、Complete 和 Fail 均返回冲突，不接受迟到写回。
+
+`lease_scope` 明确区分资源纪律：Agent/Build 为 `none`，正确性验证为 `shared`，Profiler、Performance 和 E2E 计时为 `exclusive`。共享正确性 Job 不得借机记录或发布性能结论。
+
+错误使用稳定结构：
+
+```json
+{
+  "code": "stale_claim_token",
+  "message": "worker no longer owns this job",
+  "retryable": false
+}
+```
+
+MVP 中 `automatic_release_allowed` 在 API 和数据库层都强制为 `false`。
+
 ## Contract 解冻
 
 变更必须有 ADR、接口上下游批准、A 批准以及迁移/兼容测试。`domain/` 的 CODEOWNER 是 A，但 A 不能单方面改变 D 的判定语义或 B 的测量语义。
-

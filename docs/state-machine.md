@@ -43,3 +43,20 @@ stateDiagram-v2
 
 状态流转由控制面统一执行，并使用 expected-state 比较避免两个 Worker 同时推进同一对象。
 
+## Job 与 GPU Lease
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> RUNNING: SKIP LOCKED + Claim Token
+    RUNNING --> SUCCEEDED
+    RUNNING --> QUEUED: 可重试失败
+    RUNNING --> FAILED: 不可重试/耗尽次数
+    RUNNING --> CANCELLED: 人工取消
+    RUNNING --> FENCING: 心跳超时
+    FENCING --> HEALTH_CHECK: 清理完成
+    HEALTH_CHECK --> QUEUED: 机器恢复且可重试
+    HEALTH_CHECK --> FAILED: 机器异常或次数耗尽
+```
+
+数据库中的资源只有经过 `FENCING → HEALTH_CHECK → AVAILABLE` 才能重新领取。租约过期本身不表示 GPU 已空闲。

@@ -1,4 +1,4 @@
-# 整体架构 v0.1
+# 整体架构 v0.2 Walking Skeleton
 
 ## 1. 系统定位
 
@@ -73,10 +73,12 @@ flowchart TB
 Worker 可以在同一仓库中以不同命令启动，但部署时放入不同容器或机器权限域：
 
 ```text
-dcuopt worker agent
-dcuopt worker build
-dcuopt worker gpu
+dcuopt worker --id agent-1 --type agent
+dcuopt worker --id build-1 --type build
+dcuopt worker --id gpu-1 --type gpu --resource-id dcu-node-1
 ```
+
+Fake Adapter 的可运行闭环、API 和故障语义见 [Walking Skeleton](walking-skeleton.md)。Fake 流只用于验证接口与恢复机制，不能替代 Stage 0 实测。
 
 ## 3. 主数据流
 
@@ -154,4 +156,3 @@ stateDiagram-v2
 - 在 MVP 中自动修改驱动、系统 BLAS、通信库或整仓 `_C.so`。
 - 把单次微基准提升直接宣称为模型端到端收益。
 - 把租约 TTL 当成进程、显存和锁频已清理的证据。
-

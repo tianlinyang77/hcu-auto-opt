@@ -42,4 +42,10 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install -e ".[dev]"
       - run: pytest tests/integration -m postgres -v
-
+      - name: Run PostgreSQL-backed Walking Skeleton
+        run: |
+          dcuopt api --host 127.0.0.1 --port 8000 > /tmp/dcuopt-api.log 2>&1 &
+          api_pid=$!
+          trap 'cat /tmp/dcuopt-api.log; kill $api_pid 2>/dev/null || true' EXIT
+          curl --fail --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:8000/healthz
+          dcuopt walking-demo --api-url http://127.0.0.1:8000 --timeout 60
