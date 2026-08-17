@@ -12,7 +12,9 @@ API/Worker 版本化模型位于 `src/dcuopt/contracts/v1.py`，跨模块平台�
 | Hotspot | B | C | 包含调用路径、占比、机会评分与可补丁性 |
 | OptimizationCandidate | C | B/D/A | 绑定 round、parent、epoch、source_hash |
 | BuildArtifact | C | D/A | 内容不可变，包含 build recipe、Hash、SBOM |
-| EvaluationResult | D | A | 指明使用的 MeasurementRecord 和判定规则版本 |
+| MeasurementSeries | B | D/A | 原始样本 URI/Hash、协议、环境指纹和 Adapter 来源完整 |
+| EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
+| ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
 | ResourceLease | A/B | Worker | 携带 fencing_token；过期后不能写回 |
 | ExperimentEvidence | A/D | Registry/KB | 区分事实、复验知识和 Agent 推测 |
 

@@ -36,12 +36,20 @@ def test_fake_registry_declares_all_public_adapter_boundaries() -> None:
         "source_manager",
         "artifact_store",
     }
+    for capability in registry.available():
+        assert registry.require(capability).provenance.profile == registry.profile
 
 
 def test_missing_adapter_fails_closed() -> None:
     handlers = JobHandlers(AdapterRegistry(profile="empty-test-profile"))
     with pytest.raises(AdapterUnavailable, match="profiler"):
         handlers.handle_profile({"workload_id": "fixture"})
+
+
+def test_adapter_without_provenance_fails_closed() -> None:
+    registry = AdapterRegistry(profile="fixture", profiler=object())  # type: ignore[arg-type]
+    with pytest.raises(AdapterUnavailable, match="valid provenance"):
+        registry.require("profiler")
 
 
 def test_worker_accepts_an_injected_handler_without_using_fake_defaults() -> None:

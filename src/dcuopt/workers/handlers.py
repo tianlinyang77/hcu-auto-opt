@@ -20,7 +20,9 @@ class JobHandlers:
 
     def handle_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
         profiler = self.adapters.require("profiler")
-        return dict(profiler.profile(payload["workload_id"], self.output_dir)[0])
+        result = dict(profiler.profile(payload["workload_id"], self.output_dir)[0])
+        result["adapter_provenance"] = [profiler.provenance.model_dump(mode="json")]
+        return result
 
     def handle_candidate_generate(self, payload: dict[str, Any]) -> dict[str, Any]:
         generator = self.adapters.require("candidate_generator")
@@ -32,24 +34,43 @@ class JobHandlers:
             )
             candidates.append(candidate)
         round_id = uuid5(NAMESPACE_URL, f"dcuopt:{payload['task_id']}:round:0")
-        return {"round_id": str(round_id), "candidates": candidates, "synthetic": True}
+        return {
+            "round_id": str(round_id),
+            "candidates": candidates,
+            "adapter_provenance": [generator.provenance.model_dump(mode="json")],
+            "synthetic": True,
+        }
 
     def handle_build(self, payload: dict[str, Any]) -> dict[str, Any]:
         builder = self.adapters.require("builder")
         artifact = builder.build(payload, self.output_dir)
-        return artifact.model_dump(mode="json")
+        result = artifact.model_dump(mode="json")
+        result["metadata"]["adapter_provenance"] = [
+            builder.provenance.model_dump(mode="json")
+        ]
+        return result
 
     def handle_correctness(self, payload: dict[str, Any]) -> dict[str, Any]:
         evaluator = self.adapters.require("evaluator")
-        return dict(evaluator.correctness(payload, self.output_dir))
+        result = dict(evaluator.correctness(payload, self.output_dir))
+        result["adapter_provenance"] = [evaluator.provenance.model_dump(mode="json")]
+        return result
 
     def handle_performance(self, payload: dict[str, Any]) -> dict[str, Any]:
         harness = self.adapters.require("measurement_harness")
-        return dict(harness.run({"phase": "performance", **payload}, self.output_dir))
+        measurement = harness.run({"phase": "performance", **payload}, self.output_dir)
+        return {
+            "passed": True,
+            "measurement": measurement.model_dump(mode="json"),
+            "adapter_provenance": [harness.provenance.model_dump(mode="json")],
+            "synthetic": measurement.synthetic,
+        }
 
     def handle_e2e(self, payload: dict[str, Any]) -> dict[str, Any]:
         evaluator = self.adapters.require("evaluator")
-        return dict(evaluator.e2e(payload, self.output_dir))
+        result = dict(evaluator.e2e(payload, self.output_dir))
+        result["adapter_provenance"] = [evaluator.provenance.model_dump(mode="json")]
+        return result
 
 
 class FakeJobHandlers(JobHandlers):

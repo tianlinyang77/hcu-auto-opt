@@ -8,15 +8,29 @@ from typing import Any
 from uuid import UUID
 
 from dcuopt.contracts.platform_v1 import (
+    AdapterProvenance,
     ArtifactManifest,
     ExecutionRequest,
     ExecutionResult,
+    MeasurementSeries,
     SourceSnapshot,
     TargetSpec,
 )
 
 
+def _fake_provenance(capability: str, adapter_name: str) -> AdapterProvenance:
+    return AdapterProvenance(
+        profile="fake-v1-control-flow-only",
+        capability=capability,
+        adapter_name=adapter_name,
+        adapter_version="1",
+        implementation_kind="fake",
+    )
+
+
 class FakeProfiler:
+    provenance = _fake_provenance("profiler", "FakeProfiler")
+
     def probe(self) -> Mapping[str, Any]:
         return {
             "capability": "full",
@@ -38,6 +52,8 @@ class FakeProfiler:
 
 
 class FakeCandidateGenerator:
+    provenance = _fake_provenance("candidate_generator", "FakeCandidateGenerator")
+
     def generate(self, hotspot: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
         return [
             {
@@ -58,6 +74,8 @@ class FakeCandidateGenerator:
 
 
 class FakeBuilder:
+    provenance = _fake_provenance("builder", "FakeBuilder")
+
     def build(self, candidate: Mapping[str, Any], output_dir: Path) -> ArtifactManifest:
         digest = hashlib.sha256(
             f"artifact:{candidate['source_hash']}".encode()
@@ -81,29 +99,29 @@ class FakeBuilder:
 class FakeMeasurementHarness:
     """The only fake timing entry point; it never claims real performance."""
 
-    def run(self, plan: Mapping[str, Any], output_dir: Path) -> Mapping[str, Any]:
+    provenance = _fake_provenance("measurement_harness", "FakeMeasurementHarness")
+
+    def run(self, plan: Mapping[str, Any], output_dir: Path) -> MeasurementSeries:
         phase = plan.get("phase")
-        if phase == "performance":
-            return {
-                "passed": True,
-                "speedup_ratio": 1.08,
-                "ci_low": 1.06,
-                "ci_high": 1.10,
-                "measurement_protocol": "fake-v1-control-flow-only",
-                "synthetic": True,
-            }
-        if phase == "e2e":
-            return {
-                "passed": True,
-                "e2e_speedup_ratio": 1.04,
-                "abba_order": ["A", "B", "B", "A"],
-                "measurement_protocol": "fake-v1-control-flow-only",
-                "synthetic": True,
-            }
+        if phase in {"performance", "e2e"}:
+            return MeasurementSeries(
+                status="not_measured",
+                metric_name="latency",
+                unit="ns",
+                protocol_version="fake-v1-control-flow-only",
+                summary={
+                    "reason": "control-flow fixture; no timing samples were collected",
+                    "requested_phase": phase,
+                },
+                adapter_provenance=self.provenance,
+                synthetic=True,
+            )
         raise ValueError(f"unsupported fake measurement phase: {phase}")
 
 
 class FakeEvaluator:
+    provenance = _fake_provenance("evaluator", "FakeEvaluator")
+
     def correctness(self, plan: Mapping[str, Any], output_dir: Path) -> Mapping[str, Any]:
         passed = plan["variant"] != "fixture-invalid-fast-path"
         return {
@@ -114,10 +132,16 @@ class FakeEvaluator:
         }
 
     def e2e(self, plan: Mapping[str, Any], output_dir: Path) -> Mapping[str, Any]:
-        return FakeMeasurementHarness().run({"phase": "e2e", **plan}, output_dir)
+        return {
+            "passed": True,
+            "reason": "control-flow fixture; E2E performance was not measured",
+            "synthetic": True,
+        }
 
 
 class FakeResourceCleaner:
+    provenance = _fake_provenance("resource_cleaner", "FakeResourceCleaner")
+
     def fence(self, resource_id: str, fencing_token: int) -> Mapping[str, Any]:
         return {
             "resource_id": resource_id,
@@ -133,6 +157,8 @@ class FakeResourceCleaner:
 
 
 class FakeExecutionAdapter:
+    provenance = _fake_provenance("executor", "FakeExecutionAdapter")
+
     def execute(
         self,
         request: ExecutionRequest,
@@ -153,11 +179,14 @@ class FakeExecutionAdapter:
             stdout_uri=f"fake://execution/{request.request_id}/stdout",
             stderr_uri=f"fake://execution/{request.request_id}/stderr",
             metadata={"target_id": target.target_id, "warning": "control-flow only"},
+            adapter_provenance=self.provenance,
             synthetic=True,
         )
 
 
 class FakeSourceManager:
+    provenance = _fake_provenance("source_manager", "FakeSourceManager")
+
     def prepare_baseline(self, target: TargetSpec, output_dir: Path) -> SourceSnapshot:
         digest = hashlib.sha256(target.source_baseline.commit.encode()).hexdigest()
         return SourceSnapshot(
@@ -190,6 +219,8 @@ class FakeSourceManager:
 
 
 class FakeArtifactStore:
+    provenance = _fake_provenance("artifact_store", "FakeArtifactStore")
+
     def publish(self, manifest: ArtifactManifest, source_path: Path) -> ArtifactManifest:
         if not manifest.synthetic:
             raise ValueError("fake artifact store only accepts synthetic manifests")

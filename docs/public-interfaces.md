@@ -1,10 +1,10 @@
-# 公共接口层（platform-v1）
+# 公共接口层（platform-v1.1）
 
 ## 目的
 
 公共接口层是四条开发线之间唯一允许共享的数据和调用边界。它先解决“控制面怎样调用执行、源码、构建和评测模块”，不在本阶段实现真实 SSH、SGLang、Build 或性能测量。
 
-当前版本为 `platform-v1`，代码位于：
+当前版本为 `platform-v1.1`，代码位于：
 
 - `src/dcuopt/contracts/platform_v1.py`：跨模块数据契约；
 - `src/dcuopt/targets/`：Target Lock 加载与校验；
@@ -20,11 +20,17 @@
 | `TargetSpec` | A/B | 所有模块 | 镜像使用 digest，源码使用完整 Commit，禁止自动发布 |
 | `ExecutionRequest` | A/D | B | `argv` 是数组而不是 shell 字符串；租约执行必须带资源和 fencing token |
 | `ExecutionResult` | B | A/D | 状态、退出码、起止时间和日志 URI 完整；Fake 必须标记 synthetic |
+| `AdapterProvenance` | Adapter Owner | A/D/Registry | Profile、能力、实现名、版本和真假类型可审计 |
+| `MeasurementSeries` | B | D/A | 原始样本 URI/Hash、协议和环境指纹完整；Fake 只能是 not_measured |
+| `EvaluationRun` | D/A | Registry | 有意复测是新 Run，消息重放由 idempotency key 去重 |
+| `ExecutionAttempt` | B | A/Registry | 物理重试属于同一个 Run，并保留每次执行日志 |
 | `SourceSnapshot` | C | A/B/D | Commit、Tree Hash、Source Hash 和 Worktree 可追溯 |
 | `ArtifactManifest` | C | A/D | 内容 Hash、构建配方、SBOM/签名位置和 synthetic 标记完整 |
 | `EvidenceBundle` | D | A/Registry | 绑定 Task、Target、Baseline、Candidate、协议版本和原始证据 |
 
 所有输入模型默认 `extra=forbid`。新增或改名字段必须走 ADR、上下游 Reviewer 和兼容测试，不能在各自模块重新声明同名结构。
+
+F0.5 的证据边界和数据库升级说明见 [可信证据契约](f0-5-trust-contracts.md)。
 
 ## Target Lock
 

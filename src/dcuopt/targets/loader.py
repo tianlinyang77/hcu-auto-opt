@@ -25,7 +25,7 @@ def load_target(path: Path) -> TargetSpec:
     try:
         return TargetSpec.model_validate(raw)
     except ValidationError as exc:
-        raise TargetConfigError(f"target lock {path} violates platform-v1: {exc}") from exc
+        raise TargetConfigError(f"target lock {path} violates platform-v1.1: {exc}") from exc
 
 
 class TargetCatalog:

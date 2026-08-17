@@ -9,13 +9,64 @@ from pydantic import Field, field_validator, model_validator
 from dcuopt.contracts.v1 import ContractModel
 from dcuopt.domain.enums import LeaseScope
 
-PLATFORM_CONTRACT_VERSION = "platform-v1"
+PLATFORM_CONTRACT_VERSION = "platform-v1.1"
 SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 GIT_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
+SYNTHETIC_PERFORMANCE_CLAIM_FIELDS = frozenset(
+    {
+        "speedup_ratio",
+        "e2e_speedup_ratio",
+        "latency",
+        "throughput",
+        "ci_low",
+        "ci_high",
+    }
+)
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class AdapterProvenance(ContractModel):
+    """Identity of the concrete adapter that produced a result."""
+
+    profile: str = Field(min_length=1)
+    capability: str = Field(min_length=1)
+    adapter_name: str = Field(min_length=1)
+    adapter_version: str = Field(min_length=1)
+    implementation_kind: Literal["real", "fake"]
+    source_commit: str | None = Field(default=None, pattern=GIT_COMMIT_PATTERN)
+
+
+def _reject_fake_provenance_without_synthetic(
+    provenance: list[AdapterProvenance], synthetic: bool
+) -> None:
+    if any(item.implementation_kind == "fake" for item in provenance) and not synthetic:
+        raise ValueError("results produced by a fake adapter must be synthetic")
+
+
+def _performance_claim_fields(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        found = SYNTHETIC_PERFORMANCE_CLAIM_FIELDS.intersection(value)
+        for nested in value.values():
+            found = found.union(_performance_claim_fields(nested))
+        return found
+    if isinstance(value, list):
+        found: set[str] = set()
+        for nested in value:
+            found = found.union(_performance_claim_fields(nested))
+        return found
+    return set()
+
+
+def _reject_synthetic_performance_claims(values: dict[str, Any], synthetic: bool) -> None:
+    if not synthetic:
+        return
+    forbidden = _performance_claim_fields(values)
+    if forbidden:
+        names = ", ".join(sorted(forbidden))
+        raise ValueError(f"synthetic results cannot contain performance claims: {names}")
 
 
 class TargetBlocker(ContractModel):
@@ -179,6 +230,7 @@ class ExecutionResult(ContractModel):
     stdout_uri: str | None = None
     stderr_uri: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    adapter_provenance: AdapterProvenance
     synthetic: bool = False
 
     @model_validator(mode="after")
@@ -187,6 +239,137 @@ class ExecutionResult(ContractModel):
             raise ValueError("finished_at cannot be earlier than started_at")
         if self.status == "succeeded" and self.exit_code != 0:
             raise ValueError("successful execution requires exit_code=0")
+        _reject_fake_provenance_without_synthetic(
+            [self.adapter_provenance], self.synthetic
+        )
+        _reject_synthetic_performance_claims(self.metadata, self.synthetic)
+        return self
+
+
+class MeasurementSeries(ContractModel):
+    """One typed measurement series; raw samples stay in immutable evidence storage."""
+
+    measurement_id: UUID = Field(default_factory=uuid4)
+    status: Literal["measured", "not_measured"]
+    metric_name: str = Field(min_length=1)
+    unit: str = Field(min_length=1)
+    protocol_version: str = Field(min_length=1)
+    sample_count: int = Field(default=0, ge=0)
+    warmup_count: int = Field(default=0, ge=0)
+    process_restart_count: int = Field(default=0, ge=0)
+    raw_samples_uri: str | None = None
+    raw_samples_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    environment_fingerprint: str | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+    adapter_provenance: AdapterProvenance
+    synthetic: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def validate_series(self) -> MeasurementSeries:
+        _reject_fake_provenance_without_synthetic(
+            [self.adapter_provenance], self.synthetic
+        )
+        _reject_synthetic_performance_claims(self.summary, self.synthetic)
+        if self.status == "measured":
+            if self.adapter_provenance.implementation_kind == "fake":
+                raise ValueError("fake adapters cannot produce measured samples")
+            if self.sample_count < 1:
+                raise ValueError("measured series require at least one sample")
+            if self.raw_samples_uri is None or self.raw_samples_hash is None:
+                raise ValueError("measured series require raw sample URI and content hash")
+            if self.environment_fingerprint is None:
+                raise ValueError("measured series require an environment fingerprint")
+        else:
+            if not self.synthetic:
+                raise ValueError(
+                    "not_measured series are control-flow fixtures and must be synthetic"
+                )
+            if self.sample_count != 0:
+                raise ValueError("not_measured series cannot report samples")
+            if self.raw_samples_uri is not None or self.raw_samples_hash is not None:
+                raise ValueError("not_measured series cannot reference raw samples")
+        return self
+
+
+class EvaluationRun(ContractModel):
+    """One intentional evaluation; retries are separate ExecutionAttempt records."""
+
+    evaluation_run_id: UUID = Field(default_factory=uuid4)
+    task_id: UUID
+    candidate_id: UUID
+    round_id: UUID
+    baseline_epoch_id: UUID
+    phase: Literal["correctness", "performance", "e2e"]
+    protocol_version: str = Field(min_length=1)
+    target_fingerprint: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    passed: bool | None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    measurement: MeasurementSeries | None = None
+    evidence_uris: list[str] = Field(default_factory=list)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def validate_evaluation(self) -> EvaluationRun:
+        _reject_fake_provenance_without_synthetic(
+            self.adapter_provenance, self.synthetic
+        )
+        _reject_synthetic_performance_claims(self.metrics, self.synthetic)
+        if self.synthetic and self.phase in {"performance", "e2e"} and self.passed is not None:
+            raise ValueError("synthetic performance evaluations cannot have a pass verdict")
+        if self.measurement is not None:
+            if self.measurement.synthetic and not self.synthetic:
+                raise ValueError("synthetic measurements require a synthetic evaluation")
+            known = {
+                (
+                    item.profile,
+                    item.capability,
+                    item.adapter_name,
+                    item.adapter_version,
+                )
+                for item in self.adapter_provenance
+            }
+            measurement_producer = (
+                self.measurement.adapter_provenance.profile,
+                self.measurement.adapter_provenance.capability,
+                self.measurement.adapter_provenance.adapter_name,
+                self.measurement.adapter_provenance.adapter_version,
+            )
+            if measurement_producer not in known:
+                raise ValueError("measurement adapter provenance must be included in evaluation")
+        return self
+
+
+class ExecutionAttempt(ContractModel):
+    """One physical execution attempt belonging to an EvaluationRun."""
+
+    execution_attempt_id: UUID = Field(default_factory=uuid4)
+    evaluation_run_id: UUID
+    request_id: UUID
+    attempt_number: int = Field(ge=1)
+    status: Literal["succeeded", "failed", "timed_out", "cancelled"]
+    exit_code: int | None
+    started_at: datetime
+    finished_at: datetime
+    stdout_uri: str | None = None
+    stderr_uri: str | None = None
+    result_metadata: dict[str, Any] = Field(default_factory=dict)
+    adapter_provenance: AdapterProvenance
+    synthetic: bool = False
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> ExecutionAttempt:
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at cannot be earlier than started_at")
+        if self.status == "succeeded" and self.exit_code != 0:
+            raise ValueError("successful execution requires exit_code=0")
+        _reject_fake_provenance_without_synthetic(
+            [self.adapter_provenance], self.synthetic
+        )
+        _reject_synthetic_performance_claims(self.result_metadata, self.synthetic)
         return self
 
 
@@ -235,7 +418,17 @@ class EvidenceBundle(ContractModel):
     evidence_type: str = Field(min_length=1)
     protocol_version: str = Field(min_length=1)
     artifact_ids: list[UUID] = Field(default_factory=list)
+    measurement_ids: list[UUID] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
     raw_uris: list[str] = Field(default_factory=list)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
     synthetic: bool = False
     created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> EvidenceBundle:
+        _reject_fake_provenance_without_synthetic(
+            self.adapter_provenance, self.synthetic
+        )
+        _reject_synthetic_performance_claims(self.summary, self.synthetic)
+        return self
