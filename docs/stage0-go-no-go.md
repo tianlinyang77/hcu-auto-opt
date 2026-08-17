@@ -1,5 +1,7 @@
 # Stage 0：前置 Go/No-Go
 
+Stage 0 在最小 Framework Gate 和真实 No-op 链路之后执行；它是性能搜索与优化工程的前置闸门，不是公共接口、执行器和证据底座的前置条件。
+
 ## 三个独立闸门
 
 ### G0-M 测量可信度
@@ -59,4 +61,3 @@ Stage 0 不是简单布尔值，而是能力声明：
 ```
 
 MVP 默认 `automatic_release_allowed=false`，即使全部探针通过也只产生人工签核候选。
-

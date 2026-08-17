@@ -20,3 +20,11 @@ class Conflict(ContractError):
 
 class StaleClaimToken(ContractError):
     """A worker attempted to finish a job it no longer owns."""
+
+
+class TargetConfigError(ContractError):
+    """A target lock file is missing, malformed, or violates the platform contract."""
+
+
+class AdapterUnavailable(ContractError):
+    """A workflow requested an adapter that is not registered in this worker."""

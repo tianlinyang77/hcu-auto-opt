@@ -1,9 +1,15 @@
 # Replace placeholders with the four real GitHub usernames before protection is enabled.
 /src/dcuopt/domain/                @tianlinyang77
+/src/dcuopt/contracts/             @tianlinyang77
 /src/dcuopt/orchestrator/          @tianlinyang77
 /src/dcuopt/storage/               @tianlinyang77
 /src/dcuopt/leases.py              @tianlinyang77
+/src/dcuopt/targets/               @tianlinyang77
+/src/dcuopt/workflows/             @tianlinyang77
+/src/dcuopt/adapters/registry.py   @tianlinyang77
 /docs/adr/                         @tianlinyang77
+/docs/public-interfaces.md         @tianlinyang77
+/config/targets/                   @tianlinyang77
 
 # @person-b: measurement, profiler and DCU adapters
 /src/dcuopt/adapters/              @tianlinyang77
@@ -15,4 +21,3 @@
 
 # @person-d: correctness, statistics, model and E2E evaluation
 # /src/dcuopt/evaluation/          @person-d
-

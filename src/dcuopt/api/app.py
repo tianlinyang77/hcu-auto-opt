@@ -37,12 +37,16 @@ from dcuopt.domain.models import Stage0Evidence
 from dcuopt.orchestrator.walking import WalkingSkeletonCoordinator
 from dcuopt.stage0 import evaluate_stage0
 from dcuopt.storage.repository import PostgresRepository
+from dcuopt.workflows.interfaces import WorkflowCoordinator, WorkflowFactory
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DATABASE_URL = "postgresql://dcuopt:dcuopt@localhost:5432/dcuopt"
 
 
-def create_app(repository: PostgresRepository | None = None) -> FastAPI:
+def create_app(
+    repository: PostgresRepository | None = None,
+    workflow_factory: WorkflowFactory = WalkingSkeletonCoordinator,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         repo = repository or PostgresRepository(
@@ -85,6 +89,9 @@ def create_app(repository: PostgresRepository | None = None) -> FastAPI:
     def repo(request: Request) -> PostgresRepository:
         return request.app.state.repository
 
+    def workflow(request: Request) -> WorkflowCoordinator:
+        return workflow_factory(repo(request))
+
     @application.get("/healthz")
     def health() -> dict[str, str]:
         return {"status": "ok", "contract_version": "v1"}
@@ -122,7 +129,7 @@ def create_app(repository: PostgresRepository | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         repository = repo(request)
         baseline = repository.freeze_baseline(task_id, payload)
-        WalkingSkeletonCoordinator(repository).start_after_baseline(task_id, baseline)
+        workflow(request).start_after_baseline(task_id, baseline)
         return baseline
 
     @application.get("/v1/tasks/{task_id}/baseline", response_model=BaselineView | None)
@@ -156,7 +163,7 @@ def create_app(repository: PostgresRepository | None = None) -> FastAPI:
     @application.post("/v1/workers/{worker_id}/claim", response_model=None)
     def claim_job(worker_id: str, request: Request) -> Response | dict[str, Any]:
         repository = repo(request)
-        WalkingSkeletonCoordinator(repository).reconcile()
+        workflow(request).reconcile()
         job = repository.claim_job(worker_id)
         if job is None:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -191,7 +198,7 @@ def create_app(repository: PostgresRepository | None = None) -> FastAPI:
             job_id, payload.claim_token, payload.fencing_token, payload.result
         )
         try:
-            WalkingSkeletonCoordinator(repository).advance(job)
+            workflow(request).advance(job)
             job["workflow_advanced"] = True
         except Exception:
             LOGGER.exception("job succeeded but workflow advance will need reconciliation")
@@ -223,7 +230,7 @@ def create_app(repository: PostgresRepository | None = None) -> FastAPI:
 
     @application.post("/v1/maintenance/reconcile")
     def reconcile_workflow(request: Request) -> dict[str, Any]:
-        advanced = WalkingSkeletonCoordinator(repo(request)).reconcile()
+        advanced = workflow(request).reconcile()
         return {"advanced_job_ids": advanced}
 
     @application.get("/v1/resources")

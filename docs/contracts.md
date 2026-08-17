@@ -1,6 +1,6 @@
 # v1 领域契约
 
-API/Worker 版本化模型位于 `src/dcuopt/contracts/v1.py`，状态机位于 `src/dcuopt/domain/`，数据库迁移位于 `src/dcuopt/storage/sql/`。三层必须共同演进，禁止分别维护同名字段。
+API/Worker 版本化模型位于 `src/dcuopt/contracts/v1.py`，跨模块平台契约位于 `src/dcuopt/contracts/platform_v1.py`，状态机位于 `src/dcuopt/domain/`，数据库迁移位于 `src/dcuopt/storage/sql/`。这些边界必须共同演进，禁止分别维护同名字段。Target、执行、源码、制品和证据接口详见 [公共接口层](public-interfaces.md)。
 
 ## 核心对象
 

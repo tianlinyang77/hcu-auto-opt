@@ -21,6 +21,8 @@ class WalkingSkeletonCoordinator:
     Stage 0. Job idempotency and workflow_advanced_at make completion replayable.
     """
 
+    name = "fake-walking-v1-control-flow-only"
+
     def __init__(self, repository: PostgresRepository) -> None:
         self.repository = repository
 

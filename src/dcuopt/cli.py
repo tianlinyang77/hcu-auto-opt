@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("--host", default="0.0.0.0")
     api.add_argument("--port", type=int, default=8000)
     sub.add_parser("db-migrate", help="apply PostgreSQL schema migrations")
+    target = sub.add_parser("target-validate", help="validate and normalize a target lock")
+    target.add_argument("target", type=Path)
     worker = sub.add_parser("worker", help="run one Agent, Build, or GPU worker")
     worker.add_argument("--id", required=True, dest="worker_id")
     worker.add_argument("--type", required=True, choices=[item.value for item in WorkerType])
@@ -73,6 +76,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         PostgresRepository(database_url).migrate()
         print("PostgreSQL schema is at version 1")
+        return 0
+    if args.command == "target-validate":
+        from dcuopt.domain.errors import TargetConfigError
+        from dcuopt.targets import load_target
+
+        try:
+            target = load_target(args.target)
+        except TargetConfigError as exc:
+            print(f"target validation failed: {exc}", file=sys.stderr)
+            return 2
+        print(target.model_dump_json(indent=2))
         return 0
     if args.command == "worker":
         from dcuopt.workers.sdk import Worker

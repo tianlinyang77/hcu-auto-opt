@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -28,7 +28,7 @@ def run_walking_demo(
             raise TimeoutError("control plane did not become healthy")
         time.sleep(0.5)
 
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     task_response = client.post(
         "/v1/tasks",
         json={

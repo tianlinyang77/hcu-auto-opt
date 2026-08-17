@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -564,7 +564,7 @@ class PostgresRepository:
         return row
 
     def recover_stale_jobs(self, stale_after_seconds: int = 120) -> list[UUID]:
-        cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
         recovered: list[UUID] = []
         with self.connection() as connection:
             rows = connection.execute(

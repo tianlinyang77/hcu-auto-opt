@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,7 +19,7 @@ from dcuopt.domain.errors import ContractError, StaleFencingToken
 
 
 def utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,4 +114,3 @@ class ResourceLease:
             raise StaleFencingToken(
                 f"token {token} is stale; current fencing token is {self.fencing_token}"
             )
-
