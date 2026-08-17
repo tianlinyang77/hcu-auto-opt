@@ -1,14 +1,14 @@
 import unittest
 
-from dcuopt.domain.enums import (
+from hcuopt.domain.enums import (
     GateResult,
     HotPatchCapability,
     ProfilerCapability,
     ProjectMode,
 )
-from dcuopt.domain.errors import ContractError
-from dcuopt.domain.models import Stage0Evidence
-from dcuopt.stage0 import evaluate_stage0
+from hcuopt.domain.errors import ContractError
+from hcuopt.domain.models import Stage0Evidence
+from hcuopt.stage0 import evaluate_stage0
 
 
 def evidence(**overrides: object) -> Stage0Evidence:

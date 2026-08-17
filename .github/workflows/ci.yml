@@ -23,18 +23,18 @@ jobs:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_USER: dcuopt
-          POSTGRES_PASSWORD: dcuopt
-          POSTGRES_DB: dcuopt
+          POSTGRES_USER: hcuopt
+          POSTGRES_PASSWORD: hcuopt
+          POSTGRES_DB: hcuopt
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U dcuopt -d dcuopt"
+          --health-cmd "pg_isready -U hcuopt -d hcuopt"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 20
     env:
-      DCUOPT_DATABASE_URL: postgresql://dcuopt:dcuopt@localhost:5432/dcuopt
+      HCUOPT_DATABASE_URL: postgresql://hcuopt:hcuopt@localhost:5432/hcuopt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,8 +44,8 @@ jobs:
       - run: pytest tests/integration -m postgres -v
       - name: Run PostgreSQL-backed Walking Skeleton
         run: |
-          dcuopt api --host 127.0.0.1 --port 8000 > /tmp/dcuopt-api.log 2>&1 &
+          hcuopt api --host 127.0.0.1 --port 8000 > /tmp/hcuopt-api.log 2>&1 &
           api_pid=$!
-          trap 'cat /tmp/dcuopt-api.log; kill $api_pid 2>/dev/null || true' EXIT
+          trap 'cat /tmp/hcuopt-api.log; kill $api_pid 2>/dev/null || true' EXIT
           curl --fail --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:8000/healthz
-          dcuopt walking-demo --api-url http://127.0.0.1:8000 --timeout 60
+          hcuopt walking-demo --api-url http://127.0.0.1:8000 --timeout 60

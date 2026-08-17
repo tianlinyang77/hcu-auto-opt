@@ -6,12 +6,12 @@
 
 当前版本为 `platform-v1.1`，代码位于：
 
-- `src/dcuopt/contracts/platform_v1.py`：跨模块数据契约；
-- `src/dcuopt/targets/`：Target Lock 加载与校验；
-- `src/dcuopt/adapters/interfaces.py`：外部能力 Protocol；
-- `src/dcuopt/adapters/registry.py`：Adapter 显式注册；
-- `src/dcuopt/workflows/interfaces.py`：Workflow 注入边界；
-- `src/dcuopt/workers/handlers.py`：Job 到 Adapter 的薄路由层。
+- `src/hcuopt/contracts/platform_v1.py`：跨模块数据契约；
+- `src/hcuopt/targets/`：Target Lock 加载与校验；
+- `src/hcuopt/adapters/interfaces.py`：外部能力 Protocol；
+- `src/hcuopt/adapters/registry.py`：Adapter 显式注册；
+- `src/hcuopt/workflows/interfaces.py`：Workflow 注入边界；
+- `src/hcuopt/workers/handlers.py`：Job 到 Adapter 的薄路由层。
 
 ## 核心契约
 
@@ -37,7 +37,7 @@ F0.5 的证据边界和数据库升级说明见 [可信证据契约](f0-5-trust-
 Target Lock 是可执行配置，不是说明文档：
 
 ```bash
-dcuopt target-validate config/targets/nmz36-sglang-0.5.12.yaml
+hcuopt target-validate config/targets/nmz36-sglang-0.5.12.yaml
 ```
 
 Target Loader 会拒绝 Tag-only 镜像、digest 不一致、非完整 Git Commit、路径穿越和自动发布；`ExecutionRequest` 会拒绝不完整租约和非 digest 容器镜像。移动分支只用于说明来源，执行时始终使用锁定 Commit。

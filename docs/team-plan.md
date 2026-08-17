@@ -17,12 +17,12 @@
 - Candidate Registry、签核材料、回滚事件模型；
 - Stage 0 Go/No-Go 主持和项目停止状态。
 
-### B：DCU 测量 DRI
+### B：HCU 测量 DRI
 
 - 唯一 Measurement Harness；
 - 环境指纹、计时分辨率、σ/CV/MDE；
-- DCU Profiler Adapter 与热点数据；
-- DCU Fencing 清理和健康检查实现；
+- HCU Profiler Adapter 与热点数据；
+- HCU Fencing 清理和健康检查实现；
 - Measurement/Topology Lease 的设备执行规则。
 
 ### C：搜索和构建 DRI

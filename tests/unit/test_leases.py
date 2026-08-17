@@ -1,9 +1,9 @@
 import unittest
 
-from dcuopt.domain.enums import LeaseState
-from dcuopt.domain.errors import StaleFencingToken
-from dcuopt.domain.models import ResourceLease
-from dcuopt.leases import (
+from hcuopt.domain.enums import LeaseState
+from hcuopt.domain.errors import StaleFencingToken
+from hcuopt.domain.models import ResourceLease
+from hcuopt.leases import (
     acquire,
     begin_release,
     complete_health_check,
@@ -15,7 +15,7 @@ from dcuopt.leases import (
 
 class LeaseTests(unittest.TestCase):
     def test_normal_release_still_fences_before_available(self) -> None:
-        lease = ResourceLease(resource_id="dcu-node-1")
+        lease = ResourceLease(resource_id="hcu-node-1")
         token = acquire(lease, "worker-1")
         begin_release(lease, token)
         start_fencing(lease)
@@ -25,13 +25,13 @@ class LeaseTests(unittest.TestCase):
         self.assertIsNone(lease.owner_id)
 
     def test_expired_lease_cannot_jump_to_available(self) -> None:
-        lease = ResourceLease(resource_id="dcu-node-1")
+        lease = ResourceLease(resource_id="hcu-node-1")
         acquire(lease, "worker-1")
         mark_expired(lease)
         self.assertEqual(lease.state, LeaseState.EXPIRED)
 
     def test_old_worker_token_is_rejected_after_reacquire(self) -> None:
-        lease = ResourceLease(resource_id="dcu-node-1")
+        lease = ResourceLease(resource_id="hcu-node-1")
         old_token = acquire(lease, "worker-1")
         begin_release(lease, old_token)
         start_fencing(lease)

@@ -2,7 +2,7 @@
 
 ## 1. 系统定位
 
-本系统不是单纯的 Kernel 生成器，而是面向 DCU 推理 Workload 的可信自动优化控制面。MVP 支持配置与可热补丁 Kernel；未来可扩展融合、内存、调度和通信轨道，但所有轨道必须共享同一套基线、测量、证据和恢复规则。
+本系统不是单纯的 Kernel 生成器，而是面向 HCU 推理 Workload 的可信自动优化控制面。MVP 支持配置与可热补丁 Kernel；未来可扩展融合、内存、调度和通信轨道，但所有轨道必须共享同一套基线、测量、证据和恢复规则。
 
 核心原则：
 
@@ -73,9 +73,9 @@ flowchart TB
 Worker 可以在同一仓库中以不同命令启动，但部署时放入不同容器或机器权限域：
 
 ```text
-dcuopt worker --id agent-1 --type agent
-dcuopt worker --id build-1 --type build
-dcuopt worker --id gpu-1 --type gpu --resource-id dcu-node-1
+hcuopt worker --id agent-1 --type agent
+hcuopt worker --id build-1 --type build
+hcuopt worker --id gpu-1 --type gpu --resource-id hcu-node-1
 ```
 
 Fake Adapter 的可运行闭环、API 和故障语义见 [Walking Skeleton](walking-skeleton.md)。Fake 流只用于验证接口与恢复机制，不能替代 Stage 0 实测。
@@ -137,7 +137,7 @@ stateDiagram-v2
 |---|---|---|
 | Orchestrator | 状态流转、Job 创建、失败恢复、预算 | 具体测量与 Agent 推理 |
 | Baseline Manager | 冻结配置、硬件/软件/Workload 指纹 | 决定候选胜负 |
-| Lease Manager | 资源冲突、续租、Fencing 状态 | DCU 厂商级清理命令实现 |
+| Lease Manager | 资源冲突、续租、Fencing 状态 | HCU 厂商级清理命令实现 |
 | Profiler Adapter | 统一不同 DTK/Profiler 输出 | 候选生成 |
 | Search Controller | 轮次、父子关系、Beam/Top-K、预算 | 性能判定 |
 | Build | 隔离编译、缓存、Hash、SBOM | 运行 Agent 或直接发布 |

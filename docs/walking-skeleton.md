@@ -2,7 +2,7 @@
 
 ## 目的
 
-Walking Skeleton 先证明整套控制流可以运行、失败可以恢复、接口可以替换。它使用 Fake Adapter，**不产生真实 DCU 性能结论，也不代表 Stage 0 已通过**。
+Walking Skeleton 先证明整套控制流可以运行、失败可以恢复、接口可以替换。它使用 Fake Adapter，**不产生真实 HCU 性能结论，也不代表 Stage 0 已通过**。
 
 ```text
 Task → Fake Stage 0 → Frozen Baseline → Fake Profile
@@ -18,7 +18,7 @@ Task → Fake Stage 0 → Frozen Baseline → Fake Profile
 ```bash
 docker compose up -d --build
 docker compose run --rm api \
-  dcuopt walking-demo --api-url http://api:8000 --external-workers
+  hcuopt walking-demo --api-url http://api:8000 --external-workers
 ```
 
 API 文档位于 `http://localhost:8000/docs`。Demo 正常结束时，Task 状态为 `awaiting_signoff`，两个 Candidate 中一个为 `rejected`，一个为 `release_candidate`。Fake performance/E2E 只驱动控制流：EvaluationRun 带 `synthetic=true`，`passed` 为空，并且不包含加速比、延迟、吞吐或置信区间。

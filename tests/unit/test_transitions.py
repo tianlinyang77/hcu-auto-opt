@@ -1,8 +1,8 @@
 import unittest
 
-from dcuopt.domain.enums import CandidateState, LeaseState, TaskState
-from dcuopt.domain.errors import InvalidTransition
-from dcuopt.domain.transitions import (
+from hcuopt.domain.enums import CandidateState, LeaseState, TaskState
+from hcuopt.domain.errors import InvalidTransition
+from hcuopt.domain.transitions import (
     transition_candidate,
     transition_lease,
     transition_task,

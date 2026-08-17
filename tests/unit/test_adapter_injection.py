@@ -5,12 +5,12 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from dcuopt.adapters.registry import AdapterRegistry
-from dcuopt.api.app import create_app
-from dcuopt.domain.enums import WorkerType
-from dcuopt.domain.errors import AdapterUnavailable
-from dcuopt.workers.handlers import JobHandlers
-from dcuopt.workers.sdk import Worker
+from hcuopt.adapters.registry import AdapterRegistry
+from hcuopt.api.app import create_app
+from hcuopt.domain.enums import WorkerType
+from hcuopt.domain.errors import AdapterUnavailable
+from hcuopt.workers.handlers import JobHandlers
+from hcuopt.workers.sdk import Worker
 
 
 class RecordingHandler:

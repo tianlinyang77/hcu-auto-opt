@@ -3,13 +3,13 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dcu-auto-opt"
+name = "hcu-auto-opt"
 version = "0.2.0"
-description = "Trustworthy automated optimization control plane for DCU inference workloads"
+description = "Trustworthy automated optimization control plane for HCU inference workloads"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "DCU Auto Opt contributors"}]
+authors = [{name = "HCU Auto Opt contributors"}]
 dependencies = [
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
@@ -26,10 +26,10 @@ dev = [
 ]
 
 [project.scripts]
-dcuopt = "dcuopt.cli:main"
+hcuopt = "hcuopt.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dcuopt"]
+packages = ["src/hcuopt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

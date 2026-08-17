@@ -9,7 +9,7 @@
 
 ## Contract 变更
 
-`src/dcuopt/domain/`、数据库 Schema、事件格式和 Worker 协议属于 v0.1 Contract。
+`src/hcuopt/domain/`、数据库 Schema、事件格式和 Worker 协议属于 v0.1 Contract。
 Contract 可以演进，但必须：
 
 1. 新增或更新 ADR；
