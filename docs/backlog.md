@@ -4,7 +4,7 @@
 
 ### A
 
-- 冻结 platform-v1、Target Loader、Adapter Registry 和 Workflow 接口；
+- 冻结 platform-v1.1、Target Loader、Adapter Registry 和 Workflow 接口；
 - 接通 Contract、API、Worker 和控制面错误语义；
 - 维护公共 Fake Profile 和兼容测试。
 

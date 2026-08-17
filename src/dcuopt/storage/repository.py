@@ -11,6 +11,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from dcuopt.contracts.platform_v1 import EvaluationRun, ExecutionAttempt
 from dcuopt.contracts.v1 import (
     BaselineCreate,
     JobCreate,
@@ -28,7 +29,7 @@ from dcuopt.domain.enums import (
 )
 from dcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from dcuopt.domain.transitions import transition_candidate, transition_task
-from dcuopt.storage.migrations import migration_sql
+from dcuopt.storage.migrations import migration_plan
 
 
 class PostgresRepository:
@@ -48,7 +49,24 @@ class PostgresRepository:
 
     def migrate(self) -> None:
         with self.connection() as connection:
-            connection.execute(migration_sql())
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            applied = {
+                row["version"]
+                for row in connection.execute(
+                    "SELECT version FROM schema_migrations"
+                ).fetchall()
+            }
+            for version, sql in migration_plan():
+                if version not in applied:
+                    connection.execute(sql)
 
     def create_task(self, request: TaskCreate) -> dict[str, Any]:
         if request.automatic_release_allowed:
@@ -722,40 +740,131 @@ class PostgresRepository:
         assert row is not None
         return row
 
-    def record_evaluation(
-        self,
-        task_id: UUID,
-        candidate_id: UUID,
-        phase: str,
-        passed: bool,
-        protocol_version: str,
-        metrics: dict[str, Any],
-        evidence_uri: str | None = None,
-    ) -> dict[str, Any]:
+    def record_evaluation(self, run: EvaluationRun) -> dict[str, Any]:
+        evidence_uri = run.evidence_uris[0] if run.evidence_uris else None
+        measurement = (
+            Jsonb(run.measurement.model_dump(mode="json"))
+            if run.measurement is not None
+            else None
+        )
         with self.connection() as connection:
             row = connection.execute(
                 """
-                INSERT INTO evaluations (
-                    evaluation_id, task_id, candidate_id, phase, passed,
-                    protocol_version, metrics, evidence_uri
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (candidate_id, phase) DO UPDATE
-                SET passed = EXCLUDED.passed, metrics = EXCLUDED.metrics,
-                    evidence_uri = EXCLUDED.evidence_uri
+                INSERT INTO evaluation_runs (
+                    evaluation_run_id, task_id, candidate_id, round_id,
+                    baseline_epoch_id, phase, passed, protocol_version,
+                    target_fingerprint, idempotency_key, metrics, measurement,
+                    evidence_uri, evidence_uris, adapter_provenance, synthetic,
+                    created_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (idempotency_key) DO UPDATE
+                SET idempotency_key = EXCLUDED.idempotency_key
                 RETURNING *
                 """,
                 (
-                    uuid4(),
-                    task_id,
-                    candidate_id,
-                    phase,
-                    passed,
-                    protocol_version,
-                    Jsonb(metrics),
+                    run.evaluation_run_id,
+                    run.task_id,
+                    run.candidate_id,
+                    run.round_id,
+                    run.baseline_epoch_id,
+                    run.phase,
+                    run.passed,
+                    run.protocol_version,
+                    run.target_fingerprint,
+                    run.idempotency_key,
+                    Jsonb(run.metrics),
+                    measurement,
                     evidence_uri,
+                    Jsonb(run.evidence_uris),
+                    Jsonb(
+                        [item.model_dump(mode="json") for item in run.adapter_provenance]
+                    ),
+                    run.synthetic,
+                    run.created_at,
                 ),
             ).fetchone()
         assert row is not None
+        expected_measurement = (
+            run.measurement.model_dump(mode="json")
+            if run.measurement is not None
+            else None
+        )
+        expected_provenance = [
+            item.model_dump(mode="json") for item in run.adapter_provenance
+        ]
+        if any(
+            (
+                row["task_id"] != run.task_id,
+                row["candidate_id"] != run.candidate_id,
+                row["round_id"] != run.round_id,
+                row["baseline_epoch_id"] != run.baseline_epoch_id,
+                row["phase"] != run.phase,
+                row["protocol_version"] != run.protocol_version,
+                row["target_fingerprint"] != run.target_fingerprint,
+                row["passed"] != run.passed,
+                row["metrics"] != run.metrics,
+                row["measurement"] != expected_measurement,
+                row["evidence_uris"] != run.evidence_uris,
+                row["adapter_provenance"] != expected_provenance,
+                row["synthetic"] != run.synthetic,
+            )
+        ):
+            raise Conflict("evaluation idempotency_key was reused with different inputs")
+        return row
+
+    def record_execution_attempt(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO execution_attempts (
+                    execution_attempt_id, evaluation_run_id, request_id,
+                    attempt_number, status, exit_code, started_at, finished_at,
+                    stdout_uri, stderr_uri, result_metadata, adapter_provenance,
+                    synthetic
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (evaluation_run_id, attempt_number) DO UPDATE
+                SET attempt_number = EXCLUDED.attempt_number
+                RETURNING *
+                """,
+                (
+                    attempt.execution_attempt_id,
+                    attempt.evaluation_run_id,
+                    attempt.request_id,
+                    attempt.attempt_number,
+                    attempt.status,
+                    attempt.exit_code,
+                    attempt.started_at,
+                    attempt.finished_at,
+                    attempt.stdout_uri,
+                    attempt.stderr_uri,
+                    Jsonb(attempt.result_metadata),
+                    Jsonb(attempt.adapter_provenance.model_dump(mode="json")),
+                    attempt.synthetic,
+                ),
+            ).fetchone()
+        assert row is not None
+        expected_provenance = attempt.adapter_provenance.model_dump(mode="json")
+        if any(
+            (
+                row["request_id"] != attempt.request_id,
+                row["status"] != attempt.status,
+                row["exit_code"] != attempt.exit_code,
+                row["started_at"] != attempt.started_at,
+                row["finished_at"] != attempt.finished_at,
+                row["stdout_uri"] != attempt.stdout_uri,
+                row["stderr_uri"] != attempt.stderr_uri,
+                row["result_metadata"] != attempt.result_metadata,
+                row["adapter_provenance"] != expected_provenance,
+                row["synthetic"] != attempt.synthetic,
+            )
+        ):
+            raise Conflict("execution attempt number was reused with a different request")
         return row
 
     def list_candidates(self, task_id: UUID) -> list[dict[str, Any]]:
@@ -773,7 +882,19 @@ class PostgresRepository:
     def list_evaluations(self, task_id: UUID) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return connection.execute(
-                "SELECT * FROM evaluations WHERE task_id = %s ORDER BY created_at", (task_id,)
+                "SELECT * FROM evaluation_runs WHERE task_id = %s ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+
+    def list_execution_attempts(self, evaluation_run_id: UUID) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            return connection.execute(
+                """
+                SELECT * FROM execution_attempts
+                WHERE evaluation_run_id = %s
+                ORDER BY attempt_number
+                """,
+                (evaluation_run_id,),
             ).fetchall()
 
     def cancel_job(self, job_id: UUID, reason: str) -> dict[str, Any]:
@@ -827,7 +948,8 @@ class PostgresRepository:
                 "SELECT * FROM artifacts WHERE task_id = %s ORDER BY created_at", (task_id,)
             ).fetchall()
             evaluations = connection.execute(
-                "SELECT * FROM evaluations WHERE task_id = %s ORDER BY created_at", (task_id,)
+                "SELECT * FROM evaluation_runs WHERE task_id = %s ORDER BY created_at",
+                (task_id,),
             ).fetchall()
         return {
             "task": task,

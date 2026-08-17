@@ -9,10 +9,14 @@ from pydantic import ValidationError
 from dcuopt.adapters.fake import FakeExecutionAdapter, FakeSourceManager
 from dcuopt.cli import main
 from dcuopt.contracts.platform_v1 import (
+    PLATFORM_CONTRACT_VERSION,
+    AdapterProvenance,
     ArtifactManifest,
+    EvaluationRun,
     EvidenceBundle,
     ExecutionRequest,
     ExecutionResult,
+    MeasurementSeries,
     TargetSpec,
 )
 from dcuopt.domain.enums import LeaseScope
@@ -21,10 +25,18 @@ from dcuopt.targets import TargetCatalog, load_target
 
 ROOT = Path(__file__).parents[2]
 TARGET_PATH = ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml"
+FAKE_EXECUTOR_PROVENANCE = AdapterProvenance(
+    profile="fake-v1-control-flow-only",
+    capability="executor",
+    adapter_name="FakeExecutionAdapter",
+    adapter_version="1",
+    implementation_kind="fake",
+)
 
 
 def test_locked_target_loads_as_platform_v1() -> None:
     target = load_target(TARGET_PATH)
+    assert PLATFORM_CONTRACT_VERSION == "platform-v1.1"
     assert target.target_id == "nmz36-sglang-0.5.12"
     assert target.inference_image.python_version == "3.10"
     assert target.inference_image.immutable_reference.endswith(
@@ -74,6 +86,8 @@ def test_execution_result_rejects_false_success() -> None:
             exit_code=1,
             started_at=now,
             finished_at=now,
+            adapter_provenance=FAKE_EXECUTOR_PROVENANCE,
+            synthetic=True,
         )
 
 
@@ -92,6 +106,7 @@ def test_fake_public_boundaries_are_explicitly_synthetic(tmp_path: Path) -> None
         target_id=target.target_id,
         evidence_type="framework_smoke",
         protocol_version="fake-v1-control-flow-only",
+        adapter_provenance=[FAKE_EXECUTOR_PROVENANCE],
         synthetic=True,
     )
     artifact = ArtifactManifest(
@@ -104,3 +119,59 @@ def test_fake_public_boundaries_are_explicitly_synthetic(tmp_path: Path) -> None
     assert baseline.clean is True
     assert evidence.synthetic is True
     assert artifact.synthetic is True
+
+
+def test_fake_measurement_cannot_claim_samples_or_speedup() -> None:
+    with pytest.raises(ValidationError, match="fake adapters cannot produce measured samples"):
+        MeasurementSeries(
+            status="measured",
+            metric_name="latency",
+            unit="ns",
+            protocol_version="fake-v1-control-flow-only",
+            sample_count=1,
+            raw_samples_uri="fake://samples",
+            raw_samples_hash="sha256:" + "0" * 64,
+            environment_fingerprint="fake-environment",
+            adapter_provenance=FAKE_EXECUTOR_PROVENANCE,
+            synthetic=True,
+        )
+
+    with pytest.raises(ValidationError, match="synthetic results cannot contain"):
+        MeasurementSeries(
+            status="not_measured",
+            metric_name="latency",
+            unit="ns",
+            protocol_version="fake-v1-control-flow-only",
+            summary={"nested": {"speedup_ratio": 1.08}},
+            adapter_provenance=FAKE_EXECUTOR_PROVENANCE,
+            synthetic=True,
+        )
+
+
+def test_fake_provenance_cannot_be_published_as_real_evidence() -> None:
+    with pytest.raises(ValidationError, match="must be synthetic"):
+        EvidenceBundle(
+            task_id=uuid4(),
+            target_id="fixture",
+            evidence_type="framework_smoke",
+            protocol_version="fixture-v1",
+            adapter_provenance=[FAKE_EXECUTOR_PROVENANCE],
+            synthetic=False,
+        )
+
+
+def test_fake_performance_evaluation_has_no_pass_verdict() -> None:
+    with pytest.raises(ValidationError, match="cannot have a pass verdict"):
+        EvaluationRun(
+            task_id=uuid4(),
+            candidate_id=uuid4(),
+            round_id=uuid4(),
+            baseline_epoch_id=uuid4(),
+            phase="performance",
+            protocol_version="fake-v1-control-flow-only",
+            target_fingerprint="sha256:" + "0" * 64,
+            idempotency_key="fake-performance-run",
+            passed=True,
+            adapter_provenance=[FAKE_EXECUTOR_PROVENANCE],
+            synthetic=True,
+        )

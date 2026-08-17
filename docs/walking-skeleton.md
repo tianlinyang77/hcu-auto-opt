@@ -21,16 +21,16 @@ docker compose run --rm api \
   dcuopt walking-demo --api-url http://api:8000 --external-workers
 ```
 
-API 文档位于 `http://localhost:8000/docs`。Demo 正常结束时，Task 状态为 `awaiting_signoff`，两个 Candidate 中一个为 `rejected`，一个为 `release_candidate`。所有性能字段都带 `synthetic=true` 和 `fake-v1-control-flow-only`。
+API 文档位于 `http://localhost:8000/docs`。Demo 正常结束时，Task 状态为 `awaiting_signoff`，两个 Candidate 中一个为 `rejected`，一个为 `release_candidate`。Fake performance/E2E 只驱动控制流：EvaluationRun 带 `synthetic=true`，`passed` 为空，并且不包含加速比、延迟、吞吐或置信区间。
 
-## 已冻结的 v1 边界
+## 已冻结的 platform-v1.1 边界
 
 | 边界 | 生产者 | 消费者 | 当前替身 |
 |---|---|---|---|
 | Stage0Evidence / Hotspot | B | A、C、D | FakeProfiler |
 | Candidate / BuildArtifact | C | A、D | FakeCandidateGenerator / FakeBuilder |
-| MeasurementRecord | B | D | FakeMeasurementHarness（唯一入口） |
-| EvaluationResult | D | A | FakeEvaluator |
+| MeasurementSeries | B | D | FakeMeasurementHarness（唯一入口，只返回 not_measured） |
+| EvaluationRun / ExecutionAttempt | D/B | A | FakeEvaluator / Worker 执行记录 |
 | Task / Job / Lease / Registry | A | B、C、D | PostgreSQL + FastAPI |
 
 B、C、D 后续只替换 Adapter，不复制 Worker 的注册、Claim、Heartbeat、取消、失败重试和 Fencing 逻辑。

@@ -14,6 +14,7 @@ from dcuopt.adapters.interfaces import (
     ResourceCleaner,
     SourceManagerAdapter,
 )
+from dcuopt.contracts.platform_v1 import AdapterProvenance
 from dcuopt.domain.errors import AdapterUnavailable
 
 
@@ -79,4 +80,14 @@ class AdapterRegistry:
         adapter = getattr(self, name)
         if adapter is None:
             raise AdapterUnavailable(f"adapter {name} is unavailable in profile {self.profile}")
+        provenance = getattr(adapter, "provenance", None)
+        if not isinstance(provenance, AdapterProvenance):
+            raise AdapterUnavailable(
+                f"adapter {name} in profile {self.profile} has no valid provenance"
+            )
+        if provenance.profile != self.profile:
+            raise AdapterUnavailable(
+                f"adapter {name} provenance profile {provenance.profile} "
+                f"does not match registry profile {self.profile}"
+            )
         return adapter

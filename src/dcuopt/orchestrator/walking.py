@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 from uuid import UUID
 
+from dcuopt.contracts.platform_v1 import (
+    AdapterProvenance,
+    EvaluationRun,
+    MeasurementSeries,
+)
 from dcuopt.contracts.v1 import MEASUREMENT_PROTOCOL_VERSION, JobCreate
 from dcuopt.domain.enums import (
     CandidateState,
@@ -25,6 +32,61 @@ class WalkingSkeletonCoordinator:
 
     def __init__(self, repository: PostgresRepository) -> None:
         self.repository = repository
+
+    def _evaluation_run(
+        self,
+        job: dict[str, Any],
+        phase: str,
+        result: dict[str, Any],
+    ) -> EvaluationRun:
+        candidate_id = UUID(job["payload"]["candidate_id"])
+        candidate = self.repository.get_candidate(candidate_id)
+        baseline = self.repository.get_baseline(job["task_id"])
+        if baseline is None:
+            raise ValueError("evaluation requires a frozen baseline")
+        fingerprint_payload = {
+            "hardware": baseline["hardware_fingerprint"],
+            "software": baseline["software_fingerprint"],
+            "workload": baseline["workload_id"],
+            "configuration": baseline["configuration_hash"],
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True).encode()
+        ).hexdigest()
+        provenance = [
+            AdapterProvenance.model_validate(item)
+            for item in result["adapter_provenance"]
+        ]
+        measurement = (
+            MeasurementSeries.model_validate(result["measurement"])
+            if result.get("measurement") is not None
+            else None
+        )
+        metrics = {
+            key: value
+            for key, value in result.items()
+            if key not in {"adapter_provenance", "measurement", "passed", "synthetic"}
+        }
+        return EvaluationRun(
+            task_id=job["task_id"],
+            candidate_id=candidate_id,
+            round_id=candidate["round_id"],
+            baseline_epoch_id=candidate["baseline_epoch_id"],
+            phase=phase,
+            protocol_version=MEASUREMENT_PROTOCOL_VERSION,
+            target_fingerprint=f"sha256:{fingerprint}",
+            idempotency_key=f"job:{job['job_id']}:evaluation:{phase}",
+            passed=(
+                None
+                if bool(result["synthetic"]) and phase in {"performance", "e2e"}
+                else bool(result["passed"])
+            ),
+            metrics=metrics,
+            measurement=measurement,
+            evidence_uris=[f"fake://evaluations/{candidate_id}/{phase}"],
+            adapter_provenance=provenance,
+            synthetic=bool(result["synthetic"]),
+        )
 
     def start_after_baseline(self, task_id: UUID, baseline: dict[str, Any]) -> dict[str, Any]:
         return self.repository.enqueue_job(
@@ -144,13 +206,7 @@ class WalkingSkeletonCoordinator:
         candidate_id = UUID(job["payload"]["candidate_id"])
         result = job["result"]
         self.repository.record_evaluation(
-            task_id,
-            candidate_id,
-            "correctness",
-            bool(result["passed"]),
-            MEASUREMENT_PROTOCOL_VERSION,
-            result,
-            f"fake://evaluations/{candidate_id}/correctness",
+            self._evaluation_run(job, "correctness", result)
         )
         if result["passed"]:
             self._ensure_candidate_state(candidate_id, CandidateState.PERFORMANCE_RUNNING)
@@ -178,13 +234,7 @@ class WalkingSkeletonCoordinator:
         candidate_id = UUID(job["payload"]["candidate_id"])
         result = job["result"]
         self.repository.record_evaluation(
-            task_id,
-            candidate_id,
-            "performance",
-            bool(result["passed"]),
-            MEASUREMENT_PROTOCOL_VERSION,
-            result,
-            f"fake://evaluations/{candidate_id}/performance",
+            self._evaluation_run(job, "performance", result)
         )
         target = CandidateState.ROUND_WAITING if result["passed"] else CandidateState.REJECTED
         self._ensure_candidate_state(candidate_id, target)
@@ -223,15 +273,7 @@ class WalkingSkeletonCoordinator:
         task_id = job["task_id"]
         candidate_id = UUID(job["payload"]["candidate_id"])
         result = job["result"]
-        self.repository.record_evaluation(
-            task_id,
-            candidate_id,
-            "e2e",
-            bool(result["passed"]),
-            MEASUREMENT_PROTOCOL_VERSION,
-            result,
-            f"fake://evaluations/{candidate_id}/e2e",
-        )
+        self.repository.record_evaluation(self._evaluation_run(job, "e2e", result))
         if result["passed"]:
             self._ensure_candidate_state(candidate_id, CandidateState.RELEASE_CANDIDATE)
             self._ensure_task_state(task_id, TaskState.AWAITING_SIGNOFF)

@@ -47,7 +47,7 @@ D 只消费 B 的 Harness，不实现计时底层。Registry、签核和回滚�
 
 | 阶段 | 目标 | 关键交付 / 退出条件 |
 |---|---|---|
-| F0 | 公共接口 | platform-v1、Target Loader、Adapter/Workflow 注入、Contract 测试 |
+| F0 | 公共接口 | platform-v1.1、Target Loader、Adapter/Workflow 注入、Contract 测试 |
 | F1 | 真实 No-op 框架 | SSH/Container、固定源码、No-op Artifact、SGLang Smoke、证据归档 |
 | S0 | 能力闸门 | 分辨率、σ/CV/MDE、环境指纹；Profiler 和热补丁探针；Go/No-Go |
 | M1 | 手工候选闭环 | 手工 Candidate、隔离构建、正确性和可信性能结果 |
