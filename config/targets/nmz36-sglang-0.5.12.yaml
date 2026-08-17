@@ -1,0 +1,65 @@
+schema_version: 1
+target_id: nmz36-sglang-0.5.12
+stage0_status: pending
+automatic_release_allowed: false
+
+inference_image:
+  source_host: nmz4
+  source_address: 10.17.1.1
+  registry: 10.16.1.152:5000
+  repository: jenkins/model_test_env/sglang
+  tag: 0.5.12-ubuntu22.04-dtk26.04-py3.10-20260602-2042-prtest
+  image_id: sha256:a7e722e72275c2096db6fc9ed296d735b5fa469bca49e8b46350b51b6c9339e7
+  registry_digest: sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db
+  immutable_reference: 10.16.1.152:5000/jenkins/model_test_env/sglang@sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db
+  python_version: "3.10"
+  dtk_version: "26.04"
+  sglang_package_version: 0.5.12+das.opt1.dtk2604.torch2100.2606021957.gdad582
+
+source_baseline:
+  repository: git@github.com:HYGON-AI/sglang-das.git
+  branch: v0.5.12_dev
+  commit: dad582f28458cd0e11e0be675fbe7fcc7ab65ac1
+  branch_head_observed_at_lock: cbf025b335e43c5b8598c324660a874f6d01909e
+  resolution_rule: commit_wins_over_moving_branch
+  clean_checkout: /home/github/sglang-das
+  candidate_strategy: separate_worktree
+
+execution_host:
+  name: nmz36
+  address: 10.17.1.2
+  work_root: /home/github
+  prohibited_work_root: /data
+  accelerator:
+    device_index: 7
+    model: HYGON_DCU-3G
+    architecture: gfx938
+    numa_node: 7
+    cpu_affinity: 112-127
+    expected_sclk_mhz: 1350
+    expected_mclk_mhz: 875
+    expected_performance_level: manual
+  observed_host_environment:
+    dtk_version: 25.04-rc4
+    driver_version: 6.4.0
+
+measurement_constraints:
+  - stage0_must_run_inside_the_locked_inference_image
+  - host_dtk_results_must_not_substitute_for_container_dtk_results
+  - device_7_requires_an_exclusive_measurement_window
+  - correctness_may_use_shared_capacity_but_must_not_publish_performance
+  - baseline_checkout_must_remain_clean_and_candidates_use_separate_worktrees
+
+blockers:
+  - id: exact_image_missing_on_execution_host
+    status: open
+    detail: The locked image digest exists on nmz4 but is not present on nmz36.
+  - id: docker_storage_full
+    status: open
+    detail: nmz36 Docker Root is under the full /data filesystem; no prune or deletion is authorized.
+  - id: device_isolation_not_reserved
+    status: open
+    detail: Existing containers map all accelerator devices and may contend for device 7.
+  - id: stage0_not_measured
+    status: open
+    detail: Timer resolution, noise sigma/CV/MDE, profiler capability, and hot-patch recovery remain unmeasured.

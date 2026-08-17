@@ -43,20 +43,19 @@
 
 D 只消费 B 的 Harness，不实现计时底层。Registry、签核和回滚元数据由 A 负责。
 
-## Stage 0 之后的 8 周里程碑
+## 依赖顺序（不作为固定排期）
 
-| 周 | 目标 | 关键交付 / 退出条件 |
+| 阶段 | 目标 | 关键交付 / 退出条件 |
 |---|---|---|
-| 1 | 前置闸门 | 分辨率、σ/CV/MDE、环境指纹；Profiler 和热补丁探针；Go/No-Go |
-| 2 | 公共骨架 | Contract、PostgreSQL 队列、Worker、Baseline、Lease/Fencing、Mock 流 |
-| 3 | 夹具闭环 | RMSNorm 正确性夹具 + 大信号性能夹具，证明管道而非业务收益 |
-| 4 | 真实热点 | 冻结 Workload/Epoch，真实 Profiling、调用路径、机会评分、目标选择 |
-| 5 | 真实候选 | Apex/Agent、最小 Beam、隔离构建、正确性、可信 Kernel 结果 |
-| 6 | 轮次可信度 | Search/Holdout、Barrier、FDR/FWER、超时与失败证据 |
-| 7 | 模型与 E2E | Logits、Token smoke、自回归、ABBA、消融与归因 |
-| 8 | 恢复与交付 | Fencing 故障注入、Registry、签核材料、一键复现和限制说明 |
+| F0 | 公共接口 | platform-v1、Target Loader、Adapter/Workflow 注入、Contract 测试 |
+| F1 | 真实 No-op 框架 | SSH/Container、固定源码、No-op Artifact、SGLang Smoke、证据归档 |
+| S0 | 能力闸门 | 分辨率、σ/CV/MDE、环境指纹；Profiler 和热补丁探针；Go/No-Go |
+| M1 | 手工候选闭环 | 手工 Candidate、隔离构建、正确性和可信性能结果 |
+| M2 | 搜索轮次 | Search/Holdout、Barrier、FDR/FWER、预算和失败证据 |
+| M3 | 模型与 E2E | Logits、Token smoke、自回归、ABBA、消融与归因 |
+| M4 | 恢复与交付 | Fencing 故障注入、Registry、签核材料、一键复现和限制说明 |
 
-第 1 周未通过不得进入第 2 周的性能系统扩张。第 6～8 周允许按风险滚动调整，但不可降低 Stage 0 和正确性门槛。
+F1 未完成不运行 Stage 0；S0 未通过不投入搜索、Agent、Beam 和真实优化候选，但不得用 S0 阻止完成承载它的 F0/F1 框架。
 
 ## 周工作方式
 

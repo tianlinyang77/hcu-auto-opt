@@ -6,9 +6,11 @@ from typing import Any
 
 import httpx
 
+from dcuopt.adapters.interfaces import JobHandler
+from dcuopt.adapters.registry import AdapterRegistry
 from dcuopt.contracts.v1 import CONTRACT_VERSION
 from dcuopt.domain.enums import WorkerType
-from dcuopt.workers.handlers import FakeJobHandlers
+from dcuopt.workers.handlers import JobHandlers
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,13 +85,24 @@ class Worker:
         api_url: str,
         capabilities: dict[str, Any] | None = None,
         heartbeat_seconds: float = 15.0,
+        adapters: AdapterRegistry | None = None,
+        handlers: JobHandler | None = None,
     ) -> None:
+        if adapters is not None and handlers is not None:
+            raise ValueError("pass adapters or handlers, not both")
         self.worker_id = worker_id
         self.worker_type = worker_type
-        self.capabilities = capabilities or {}
+        self.capabilities = dict(capabilities or {})
         self.heartbeat_seconds = heartbeat_seconds
         self.client = ControlPlaneClient(api_url)
-        self.handlers = FakeJobHandlers()
+        if handlers is not None:
+            self.handlers = handlers
+            self.capabilities.setdefault("adapter_profile", "custom-handler")
+        else:
+            registry = adapters or AdapterRegistry.fake()
+            self.handlers = JobHandlers(registry)
+            self.capabilities.setdefault("adapter_profile", registry.profile)
+            self.capabilities.setdefault("adapters", list(registry.available()))
         self.stop_event = threading.Event()
         self.registered = False
 

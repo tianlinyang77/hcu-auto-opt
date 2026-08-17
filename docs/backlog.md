@@ -1,41 +1,39 @@
 # 首批 Backlog
 
-## Week 1 / P0
+## Framework Gate / P0
 
 ### A
 
-- 初始化仓库、CI、CODEOWNERS 和 ADR；
-- 定义 Stage0Evidence、Task、Candidate、Artifact、Lease；
-- 建立 Go/No-Go 记录和停止状态。
+- 冻结 platform-v1、Target Loader、Adapter Registry 和 Workflow 接口；
+- 接通 Contract、API、Worker 和控制面错误语义；
+- 维护公共 Fake Profile 和兼容测试。
 
 ### B
 
-- 实现 DCU 环境指纹；
-- 实现唯一计时 Harness 的最小版；
-- 输出分辨率、σ/CV/MDE；
-- 完成 Profiler 能力探针。
+- 实现 SSH/Container ExecutionAdapter；
+- 实现 Job 日志、超时、取消和进程生命周期；
+- 实现真实 ResourceCleaner 与 HCU/NUMA 绑定。
 
 ### C
 
-- 运行 Apex/Magpie 最小示例；
-- 完成 Triton/独立 HIP 热补丁和恢复探针；
-- 输出可用 Adapter 边界。
+- 实现 SourceManager、固定 Commit 和独立 Worktree；
+- 实现 No-op Builder、ArtifactManifest 和本地 ArtifactStore；
+- 保证 Baseline 不可修改并输出 Hash 证据。
 
 ### D
 
-- 定义 Stage 0 判定规则；
-- 定义大信号夹具；
-- 起草 MeasurementRecord、Holdout 和 ABBA 协议。
+- 定义 SGLang Workload/Smoke 接口；
+- 实现 Baseline 与 No-op 输出一致性检查；
+- 输出 EvidenceBundle 和 Framework Smoke 集成测试。
 
-## Week 2 / P0
+## Framework Gate 退出条件
 
-- PostgreSQL Schema 与 Alembic；
-- `SKIP LOCKED` Job Queue；
-- Worker 注册、心跳、领取、重试；
-- Lease/Fencing 状态机和 DCU 清理接口；
-- Baseline Epoch；
-- Artifact Store 接口；
-- Mock 端到端测试。
+- TargetSpec → SourceSnapshot → No-op Artifact → ExecutionResult → EvidenceBundle 跑通；
+- 真实 SGLang Smoke 可启动、请求、停止并保存日志；
+- 失败任务可以取消、Fencing、清理并恢复到已知状态；
+- Fake 与真实 Adapter 都通过同一组 Contract Test。
+
+完成以上条件后再进入 Stage 0 的计时、噪声、Profiler 和热补丁探针。
 
 ## GitHub Issue 模板
 
@@ -50,4 +48,3 @@
 依赖和 Plan B
 负责人 / Reviewer
 ```
-

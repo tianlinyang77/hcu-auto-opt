@@ -6,7 +6,7 @@
 
 核心原则：
 
-1. Stage 0 先于工程扩张；测量不可信就停止。
+1. 先完成最小 Framework Gate 和真实 No-op 链路；Stage 0 先于搜索与优化工程，测量不可信就停止性能工作。
 2. 控制面与执行面分离，Agent 不接触 GPU 评测环境。
 3. 正确性与计时使用不同资源池；计时必须持独占安静设备。
 4. 配置搜索先胜出并冻结 Baseline Epoch，再进行 Kernel 搜索。
@@ -84,7 +84,9 @@ Fake Adapter 的可运行闭环、API 和故障语义见 [Walking Skeleton](walk
 
 ```mermaid
 flowchart TB
+    FG["Framework Gate\n公共接口 + 真实 No-op"]
     S0{"Stage 0\n测量 + Profiler + 热补丁"}
+    FG --> S0
     S0 -- "测量失败" --> STOP["STOP\n不接受性能结论"]
     S0 -- "Profiler 失败" --> DEG["DEGRADED\n人工候选 · 禁止自动发布"]
     S0 -- "热补丁失败" --> CFG["仅配置轨道\n或更换目标"]

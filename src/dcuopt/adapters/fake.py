@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import UUID
+
+from dcuopt.contracts.platform_v1 import (
+    ArtifactManifest,
+    ExecutionRequest,
+    ExecutionResult,
+    SourceSnapshot,
+    TargetSpec,
+)
 
 
 class FakeProfiler:
@@ -48,20 +58,24 @@ class FakeCandidateGenerator:
 
 
 class FakeBuilder:
-    def build(self, candidate: Mapping[str, Any], output_dir: Path) -> Mapping[str, Any]:
-        content_hash = hashlib.sha256(
+    def build(self, candidate: Mapping[str, Any], output_dir: Path) -> ArtifactManifest:
+        digest = hashlib.sha256(
             f"artifact:{candidate['source_hash']}".encode()
         ).hexdigest()
-        return {
-            "kind": "fake_shared_object",
-            "uri": f"fake://artifacts/{content_hash}.so",
-            "content_hash": content_hash,
-            "metadata": {
+        candidate_id = candidate.get("candidate_id")
+        return ArtifactManifest(
+            candidate_id=UUID(str(candidate_id)) if candidate_id is not None else None,
+            kind="fake_shared_object",
+            uri=f"fake://artifacts/{digest}.so",
+            content_hash=f"sha256:{digest}",
+            metadata={
                 "builder": "fake-builder-v1",
                 "sbom": "fake://sbom/control-flow-only",
                 "signed": False,
             },
-        }
+            sbom_uri="fake://sbom/control-flow-only",
+            synthetic=True,
+        )
 
 
 class FakeMeasurementHarness:
@@ -116,3 +130,67 @@ class FakeResourceCleaner:
 
     def health_check(self, resource_id: str) -> Mapping[str, Any]:
         return {"resource_id": resource_id, "healthy": True, "synthetic": True}
+
+
+class FakeExecutionAdapter:
+    def execute(
+        self,
+        request: ExecutionRequest,
+        target: TargetSpec,
+        output_dir: Path,
+    ) -> ExecutionResult:
+        if request.target_id != target.target_id:
+            raise ValueError(
+                f"execution target mismatch: request={request.target_id}, target={target.target_id}"
+            )
+        now = datetime.now(timezone.utc)
+        return ExecutionResult(
+            request_id=request.request_id,
+            status="succeeded",
+            exit_code=0,
+            started_at=now,
+            finished_at=now,
+            stdout_uri=f"fake://execution/{request.request_id}/stdout",
+            stderr_uri=f"fake://execution/{request.request_id}/stderr",
+            metadata={"target_id": target.target_id, "warning": "control-flow only"},
+            synthetic=True,
+        )
+
+
+class FakeSourceManager:
+    def prepare_baseline(self, target: TargetSpec, output_dir: Path) -> SourceSnapshot:
+        digest = hashlib.sha256(target.source_baseline.commit.encode()).hexdigest()
+        return SourceSnapshot(
+            kind="baseline",
+            repository=target.source_baseline.repository,
+            commit=target.source_baseline.commit,
+            tree_hash=target.source_baseline.commit,
+            source_hash=f"sha256:{digest}",
+            worktree_uri=f"fake://source/{target.target_id}/baseline",
+            clean=True,
+        )
+
+    def create_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate_id: UUID,
+        output_dir: Path,
+    ) -> SourceSnapshot:
+        digest = hashlib.sha256(f"{baseline.source_hash}:{candidate_id}".encode()).hexdigest()
+        return SourceSnapshot(
+            kind="candidate",
+            repository=baseline.repository,
+            commit=baseline.commit,
+            tree_hash=baseline.tree_hash,
+            source_hash=f"sha256:{digest}",
+            worktree_uri=f"fake://source/candidates/{candidate_id}",
+            clean=True,
+            parent_snapshot_id=baseline.snapshot_id,
+        )
+
+
+class FakeArtifactStore:
+    def publish(self, manifest: ArtifactManifest, source_path: Path) -> ArtifactManifest:
+        if not manifest.synthetic:
+            raise ValueError("fake artifact store only accepts synthetic manifests")
+        return manifest
