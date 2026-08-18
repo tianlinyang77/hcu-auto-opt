@@ -42,6 +42,7 @@ WITH selected AS (
     WHERE state = 'queued'
       AND available_at <= now()
       AND accepted_worker_type = %(worker_type)s
+      AND (adapter_profile IS NULL OR adapter_profile = %(adapter_profile)s)
     ORDER BY priority DESC, created_at
     FOR UPDATE SKIP LOCKED
     LIMIT 1

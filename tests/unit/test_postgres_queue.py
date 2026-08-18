@@ -1,6 +1,6 @@
 import unittest
 
-from hcuopt.storage.postgres_queue import claim_jobs_sql
+from hcuopt.storage.postgres_queue import claim_for_worker_sql, claim_jobs_sql
 
 
 class PostgresQueueContractTests(unittest.TestCase):
@@ -13,7 +13,11 @@ class PostgresQueueContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             claim_jobs_sql(0)
 
+    def test_worker_claim_matches_explicit_adapter_profile(self) -> None:
+        sql = claim_for_worker_sql()
+        self.assertIn("accepted_worker_type = %(worker_type)s", sql)
+        self.assertIn("adapter_profile = %(adapter_profile)s", sql)
+
 
 if __name__ == "__main__":
     unittest.main()
-

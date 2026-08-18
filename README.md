@@ -2,13 +2,13 @@
 
 面向 HCU 推理工作负载的自动性能优化平台。系统从真实 Workload 出发，发现瓶颈、生成候选、隔离构建、可信评测，并把可复现证据交给人工签核。
 
-当前仓库处于 **Walking Skeleton 阶段**。第一优先级不是生成更多 Kernel，而是先固定四人协作所需的 Contract、数据库、Worker 和安全边界，再通过 Stage 0 证明真实测试环境能够测出可信数字。
+当前仓库已经进入 **F1 Framework Smoke 控制面阶段**。第一优先级不是生成更多 Kernel，而是先固定四人协作所需的 Contract、数据库、Worker 和安全边界，并把 Target、源码、No-op 制品、执行、输出一致性和证据串成可恢复链路；之后才通过 Stage 0 证明真实测试环境能够测出可信数字。
 
 首个实测目标已经冻结为 SGLang 0.5.12、`HYGON-AI/sglang-das` 固定 Commit 和指定 DTK 26.04 镜像；精确版本、运行拓扑及待解除阻塞见 [nmz36 Target Lock](config/targets/nmz36-sglang-0.5.12.yaml)。Target Lock 使用镜像 digest 与完整源码 Commit，禁止用同名 Tag、`latest` 或其他 0.5.12 镜像替换。
 
 ## 当前可运行闭环
 
-仓库已经提供 FastAPI 控制面、PostgreSQL Job Queue、Agent/Build/GPU 三类 Worker、Baseline Epoch、Claim/Fencing Token 和 Fake Adapter。Fake Demo 可以跑到 `AWAITING_SIGNOFF`，但只验证控制流，所有 Fake 加速数字都不构成真实性能证据。
+仓库已经提供 FastAPI 控制面、PostgreSQL Job Queue、Agent/Build/GPU 三类 Worker、Baseline Epoch、Claim/Fencing Token、Target Catalog、Adapter Profile 和 Framework Smoke Workflow。Fake Demo 与显式 `fake-v1-control-flow-only` Profile 可以跑到 `AWAITING_SIGNOFF`，但只验证控制流，不产生任何性能结论。
 
 ```bash
 docker compose up -d --build
@@ -16,7 +16,7 @@ docker compose run --rm api \
   hcuopt walking-demo --api-url http://api:8000 --external-workers
 ```
 
-API 文档：`http://localhost:8000/docs`。详细说明见 [Walking Skeleton](docs/walking-skeleton.md)。
+API 文档：`http://localhost:8000/docs`。详细说明见 [Framework Smoke 控制面](docs/framework-smoke-control-plane.md) 和 [Walking Skeleton](docs/walking-skeleton.md)。
 
 ## MVP 范围
 
@@ -118,6 +118,7 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [测量协议](docs/measurement-protocol.md)
 - [领域契约](docs/contracts.md)
 - [公共接口层](docs/public-interfaces.md)
+- [F1-A Framework Smoke 控制面](docs/framework-smoke-control-plane.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
 - [Walking Skeleton](docs/walking-skeleton.md)

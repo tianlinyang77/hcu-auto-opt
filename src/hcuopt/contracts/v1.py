@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field, model_validator
 
+from hcuopt.contracts.base import ContractModel, ReadModel
+from hcuopt.contracts.platform_v1 import (
+    AdapterProvenance,
+    ArtifactManifest,
+    EvaluationRun,
+    EvidenceBundle,
+    ExecutionAttempt,
+    ExecutionRequest,
+    ExecutionResult,
+    SourceSnapshot,
+    TargetSpec,
+)
 from hcuopt.domain.enums import (
     CandidateState,
     GateResult,
@@ -17,18 +29,11 @@ from hcuopt.domain.enums import (
     ProjectMode,
     TaskState,
     WorkerType,
+    WorkflowType,
 )
 
 CONTRACT_VERSION = "v1"
 MEASUREMENT_PROTOCOL_VERSION = "fake-v1-control-flow-only"
-
-
-class ContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class ReadModel(ContractModel):
-    model_config = ConfigDict(extra="ignore")
 
 
 class TaskCreate(ContractModel):
@@ -50,6 +55,21 @@ class TaskView(ReadModel):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class FrameworkSmokeCreate(ContractModel):
+    name: str = Field(min_length=1, max_length=200)
+    target_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    adapter_profile: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class FrameworkSmokeTaskView(TaskView):
+    workflow_type: WorkflowType
+    target_id: str
+    target_snapshot_id: UUID
+    adapter_profile: str
+    retest_count: int = 0
 
 
 class Stage0EvidenceRequest(ContractModel):
@@ -94,6 +114,7 @@ class WorkerRegister(ContractModel):
     worker_id: str = Field(min_length=1, max_length=200)
     worker_type: WorkerType
     contract_version: str = CONTRACT_VERSION
+    adapter_profile: str | None = Field(default=None, min_length=1, max_length=200)
     capabilities: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -101,6 +122,7 @@ class WorkerView(ReadModel):
     worker_id: str
     worker_type: WorkerType
     contract_version: str
+    adapter_profile: str | None = None
     capabilities: dict[str, Any]
     state: str
     registered_at: datetime
@@ -111,6 +133,7 @@ class JobCreate(ContractModel):
     task_id: UUID
     job_type: JobType
     accepted_worker_type: WorkerType
+    adapter_profile: str | None = Field(default=None, min_length=1, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str = Field(min_length=8, max_length=300)
     lease_scope: LeaseScope = LeaseScope.NONE
@@ -122,6 +145,7 @@ class JobClaim(ReadModel):
     job_id: UUID
     task_id: UUID
     job_type: JobType
+    adapter_profile: str | None = None
     state: JobState
     payload: dict[str, Any]
     lease_scope: LeaseScope
@@ -173,3 +197,105 @@ class TaskSummary(ContractModel):
 
 class ReapResult(ContractModel):
     recovered_job_ids: list[UUID]
+
+
+class AdapterProfileView(ContractModel):
+    name: str
+    implementation_kind: Literal["real", "fake"]
+    required_capabilities: list[str]
+
+
+class SourcePreparationResult(ContractModel):
+    source: SourceSnapshot
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool
+
+    @model_validator(mode="after")
+    def validate_synthetic_provenance(self) -> SourcePreparationResult:
+        if any(item.implementation_kind == "fake" for item in self.adapter_provenance):
+            if not self.synthetic:
+                raise ValueError("fake source preparation must be synthetic")
+        return self
+
+
+class NoopBuildResult(ContractModel):
+    source: SourceSnapshot
+    artifact: ArtifactManifest
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool
+
+    @model_validator(mode="after")
+    def validate_build_relationships(self) -> NoopBuildResult:
+        if self.source.kind != "candidate":
+            raise ValueError("no-op build requires a candidate source snapshot")
+        if self.artifact.source_snapshot_id != self.source.snapshot_id:
+            raise ValueError("artifact must reference the candidate source snapshot")
+        if self.artifact.synthetic != self.synthetic:
+            raise ValueError("artifact and result synthetic flags must match")
+        if any(item.implementation_kind == "fake" for item in self.adapter_provenance):
+            if not self.synthetic:
+                raise ValueError("fake no-op builds must be synthetic")
+        return self
+
+
+class FrameworkSmokeResult(ContractModel):
+    execution_request: ExecutionRequest
+    execution_result: ExecutionResult
+    execution_attempt: ExecutionAttempt
+    evaluation: EvaluationRun
+    evidence: EvidenceBundle
+    cleanup_evidence: dict[str, Any]
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool
+    no_performance_conclusion: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_framework_relationships(self) -> FrameworkSmokeResult:
+        request_id = self.execution_request.request_id
+        if self.execution_result.request_id != request_id:
+            raise ValueError("execution result must reference execution request")
+        if self.execution_attempt.request_id != request_id:
+            raise ValueError("execution attempt must reference execution request")
+        if self.execution_attempt.evaluation_run_id != self.evaluation.evaluation_run_id:
+            raise ValueError("execution attempt must belong to the evaluation run")
+        if self.evaluation.phase != "correctness":
+            raise ValueError("framework smoke is a correctness evaluation")
+        if self.evidence.task_id != self.evaluation.task_id:
+            raise ValueError("evidence and evaluation task ids must match")
+        if self.evidence.candidate_id != self.evaluation.candidate_id:
+            raise ValueError("evidence and evaluation candidate ids must match")
+        if self.evidence.baseline_epoch_id != self.evaluation.baseline_epoch_id:
+            raise ValueError("evidence and evaluation baseline ids must match")
+        values = (
+            self.execution_result.synthetic,
+            self.execution_attempt.synthetic,
+            self.evaluation.synthetic,
+            self.evidence.synthetic,
+        )
+        if any(value != self.synthetic for value in values):
+            raise ValueError("all framework smoke synthetic flags must match")
+        if any(item.implementation_kind == "fake" for item in self.adapter_provenance):
+            if not self.synthetic:
+                raise ValueError("fake framework smoke results must be synthetic")
+        return self
+
+
+class FrameworkSmokeAction(ContractModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class FrameworkSmokeSummary(ContractModel):
+    task: FrameworkSmokeTaskView
+    target: TargetSpec
+    baseline: BaselineView | None
+    source_snapshots: list[dict[str, Any]]
+    candidates: list[dict[str, Any]]
+    artifacts: list[dict[str, Any]]
+    execution_requests: list[dict[str, Any]]
+    execution_attempts: list[dict[str, Any]]
+    evaluations: list[dict[str, Any]]
+    evidence_bundles: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    adapter_mode: Literal["real", "fake"]
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+    warning: str = "Framework Smoke 只验证框架链路和输出一致性，不构成性能收益证据"

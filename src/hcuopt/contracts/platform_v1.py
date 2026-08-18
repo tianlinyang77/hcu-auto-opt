@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from pydantic import Field, field_validator, model_validator
 
-from hcuopt.contracts.v1 import ContractModel
+from hcuopt.contracts.base import ContractModel
 from hcuopt.domain.enums import LeaseScope
 
 PLATFORM_CONTRACT_VERSION = "platform-v1.1"

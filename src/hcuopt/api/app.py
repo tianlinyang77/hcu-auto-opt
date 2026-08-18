@@ -3,15 +3,23 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from hcuopt.adapters.profiles import AdapterProfileCatalog
+from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.contracts.v1 import (
+    AdapterProfileView,
     BaselineCreate,
     BaselineView,
+    FrameworkSmokeAction,
+    FrameworkSmokeCreate,
+    FrameworkSmokeSummary,
+    FrameworkSmokeTaskView,
     JobClaim,
     JobComplete,
     JobCreate,
@@ -27,16 +35,21 @@ from hcuopt.contracts.v1 import (
     WorkerView,
 )
 from hcuopt.domain.errors import (
+    AdapterUnavailable,
     Conflict,
     ContractError,
     NotFound,
     StaleClaimToken,
     StaleFencingToken,
+    TargetConfigError,
+    TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
-from hcuopt.orchestrator.walking import WalkingSkeletonCoordinator
+from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
+from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
 from hcuopt.storage.repository import PostgresRepository
+from hcuopt.targets import TargetCatalog
 from hcuopt.workflows.interfaces import WorkflowCoordinator, WorkflowFactory
 
 LOGGER = logging.getLogger(__name__)
@@ -45,8 +58,16 @@ DEFAULT_DATABASE_URL = "postgresql://hcuopt:hcuopt@localhost:5432/hcuopt"
 
 def create_app(
     repository: PostgresRepository | None = None,
-    workflow_factory: WorkflowFactory = WalkingSkeletonCoordinator,
+    workflow_factory: WorkflowFactory = WorkflowRouter,
+    target_catalog: TargetCatalog | None = None,
+    adapter_profiles: AdapterProfileCatalog | None = None,
 ) -> FastAPI:
+    default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
+    targets = target_catalog or TargetCatalog(
+        Path(os.getenv("HCUOPT_TARGET_ROOT", str(default_target_root)))
+    )
+    profiles = adapter_profiles or AdapterProfileCatalog()
+
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         repo = repository or PostgresRepository(
@@ -59,7 +80,7 @@ def create_app(
 
     application = FastAPI(
         title="HCU Auto Opt Control Plane",
-        version="0.2.0-walking-skeleton",
+        version="0.3.0-framework-smoke",
         lifespan=lifespan,
     )
 
@@ -76,9 +97,17 @@ def create_app(
         error_codes = {
             StaleClaimToken: "stale_claim_token",
             StaleFencingToken: "stale_fencing_token",
+            TargetConfigError: "target_config_error",
+            TargetNotReady: "target_not_ready",
+            AdapterUnavailable: "adapter_unavailable",
+        }
+        status_codes = {
+            TargetConfigError: 422,
+            TargetNotReady: 409,
+            AdapterUnavailable: 409,
         }
         return JSONResponse(
-            status_code=409,
+            status_code=status_codes.get(type(exc), 409),
             content={
                 "code": error_codes.get(type(exc), "contract_error"),
                 "message": str(exc),
@@ -92,9 +121,85 @@ def create_app(
     def workflow(request: Request) -> WorkflowCoordinator:
         return workflow_factory(repo(request))
 
+    def framework_workflow(request: Request) -> FrameworkSmokeCoordinator:
+        selected = workflow(request)
+        if isinstance(selected, WorkflowRouter):
+            return selected.framework_smoke
+        return FrameworkSmokeCoordinator(repo(request))
+
     @application.get("/healthz")
     def health() -> dict[str, str]:
         return {"status": "ok", "contract_version": "v1"}
+
+    @application.get("/v1/adapter-profiles", response_model=list[AdapterProfileView])
+    def list_adapter_profiles() -> list[AdapterProfileView]:
+        return profiles.list()
+
+    @application.get("/v1/targets", response_model=list[TargetSpec])
+    def list_targets() -> list[TargetSpec]:
+        return targets.list()
+
+    @application.get("/v1/targets/{target_id}", response_model=TargetSpec)
+    def get_target(target_id: str) -> TargetSpec:
+        return targets.load(target_id)
+
+    @application.post(
+        "/v1/framework-smoke/tasks",
+        response_model=FrameworkSmokeTaskView,
+        status_code=201,
+    )
+    def create_framework_smoke_task(
+        payload: FrameworkSmokeCreate, request: Request
+    ) -> dict[str, Any]:
+        target = targets.load(payload.target_id)
+        profile = profiles.require(payload.adapter_profile)
+        profile.validate_target(target)
+        return repo(request).create_framework_smoke_task(
+            payload, target, str(targets.source_path(payload.target_id))
+        )
+
+    @application.get(
+        "/v1/framework-smoke/tasks/{task_id}",
+        response_model=FrameworkSmokeTaskView,
+    )
+    def get_framework_smoke_task(
+        task_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        task = repo(request).get_task(task_id)
+        if task.get("workflow_type") != "framework_smoke":
+            raise Conflict("task is not a Framework Smoke workflow")
+        FrameworkSmokeTaskView.model_validate(task)
+        return task
+
+    @application.get(
+        "/v1/framework-smoke/tasks/{task_id}/summary",
+        response_model=FrameworkSmokeSummary,
+    )
+    def framework_smoke_summary(
+        task_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        summary = repo(request).framework_smoke_summary(task_id)
+        profile = profiles.require(summary["task"]["adapter_profile"])
+        summary["adapter_mode"] = profile.implementation_kind
+        return summary
+
+    @application.post(
+        "/v1/framework-smoke/tasks/{task_id}/cancel",
+        response_model=FrameworkSmokeTaskView,
+    )
+    def cancel_framework_smoke_task(
+        task_id: UUID, payload: FrameworkSmokeAction, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).cancel_framework_task(task_id, payload.reason)
+
+    @application.post(
+        "/v1/framework-smoke/tasks/{task_id}/retest",
+        status_code=202,
+    )
+    def retest_framework_smoke_task(
+        task_id: UUID, payload: FrameworkSmokeAction, request: Request
+    ) -> dict[str, Any]:
+        return framework_workflow(request).enqueue_retest(task_id, payload.reason)
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:
