@@ -66,7 +66,11 @@ def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
         implementation_kind="real",
         capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
     )
-    profile.validate_target(target)
+    with pytest.raises(
+        TargetNotReady,
+        match="open blockers for framework_smoke: locked_image_dependency_conflict",
+    ):
+        profile.validate_target(target)
     with pytest.raises(TargetNotReady, match="open blockers for stage0"):
         profile.validate_target(target, scope="stage0")
 
@@ -202,4 +206,6 @@ def test_framework_create_returns_stable_profile_and_target_errors() -> None:
     payload["adapter_profile"] = "real-test"
     with TestClient(real_profile_app) as client:
         response = client.post("/v1/framework-smoke/tasks", json=payload)
-    assert response.status_code == 201
+    assert response.status_code == 409
+    assert response.json()["code"] == "target_not_ready"
+    assert "locked_image_dependency_conflict" in response.json()["message"]

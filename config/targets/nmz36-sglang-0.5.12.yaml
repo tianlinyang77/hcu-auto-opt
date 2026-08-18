@@ -63,6 +63,10 @@ blockers:
     status: resolved
     detail: Verified on nmz36 on 2026-08-18; Docker Root remains /data/docker and /data has about 1.4 TiB available, so no cleanup or migration is required for F1.
     blocks: [framework_smoke, stage0, optimization, release]
+  - id: locked_image_dependency_conflict
+    status: open
+    detail: The locked image has transformers 5.6.0 with kernels 0.15.1; Transformers declares kernels >=0.12,<0.13 and SGLang fails during import. An ephemeral kernels 0.12.3 probe advances further but then model loading fails because get_rope_config is undefined. Rebuild and digest-lock a self-consistent SGLang image before another real Framework Smoke.
+    blocks: [framework_smoke, stage0, optimization, release]
   - id: device_isolation_not_reserved
     status: open
     detail: HCU 7 is currently healthy and idle, but three running containers map all accelerator devices and no F1 or Stage 0 reservation window has been recorded.

@@ -103,9 +103,19 @@ def _execution(request: ExecutionRequest) -> ExecutionResult:
 def test_default_catalog_and_runtime_registry_expose_the_same_real_profile(
     tmp_path: Path,
 ) -> None:
+    target = TARGET.model_copy(
+        update={
+            "blockers": [
+                blocker.model_copy(update={"status": "resolved"})
+                if blocker.id == "locked_image_dependency_conflict"
+                else blocker
+                for blocker in TARGET.blockers
+            ]
+        }
+    )
     profile = AdapterProfileCatalog().require(REAL_FRAMEWORK_SMOKE_PROFILE)
-    profile.validate_target(TARGET)
-    registry = build_nmz36_framework_smoke_registry(TARGET, tmp_path)
+    profile.validate_target(target)
+    registry = build_nmz36_framework_smoke_registry(target, tmp_path)
 
     assert registry.profile == REAL_FRAMEWORK_SMOKE_PROFILE
     assert set(registry.available()) == set(profile.capabilities)
