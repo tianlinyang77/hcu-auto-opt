@@ -23,6 +23,54 @@ class RecordingHandler:
         return {"handled": True}
 
 
+class CleanupRecordingHandler:
+    def __init__(self, result: dict[str, Any]) -> None:
+        self.result = result
+        self.cleanup_calls = 0
+
+    def handle(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.result
+
+    def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.cleanup_calls += 1
+        return {
+            "fence": {"fenced": True, "synthetic": True},
+            "health": {"healthy": True, "synthetic": True},
+        }
+
+
+class SuccessfulJobClient:
+    def __init__(
+        self,
+        *,
+        resource_id: str | None,
+        fencing_token: int | None,
+        job_type: str = "profile",
+    ) -> None:
+        self.resource_id = resource_id
+        self.fencing_token = fencing_token
+        self.job_type = job_type
+        self.completed: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def claim(self, worker_id: str) -> dict[str, Any]:
+        return {
+            "job_id": str(uuid4()),
+            "task_id": str(uuid4()),
+            "job_type": self.job_type,
+            "payload": {},
+            "claim_token": str(uuid4()),
+            "fencing_token": self.fencing_token,
+            "resource_id": self.resource_id,
+            "attempts": 1,
+        }
+
+    def heartbeat(self, worker_id: str, job: dict[str, Any]) -> None:
+        return None
+
+    def complete(self, job: dict[str, Any], result: dict[str, Any]) -> None:
+        self.completed.append((job, result))
+
+
 def test_fake_registry_declares_all_public_adapter_boundaries() -> None:
     registry = AdapterRegistry.fake()
     assert registry.profile == "fake-v1-control-flow-only"
@@ -193,6 +241,89 @@ def test_worker_reports_cleanup_after_stale_failure_rejection() -> None:
     assert worker.run_once() is False
     assert client.cleanup_reports[0][:2] == ("hcu-7", 9)
     assert client.cleanup_reports[0][2]["health"]["healthy"] is True
+
+
+def test_worker_finalizes_successful_resource_job_before_completion() -> None:
+    handler = CleanupRecordingHandler({"handled": True})
+    client = SuccessfulJobClient(resource_id="hcu-7", fencing_token=11)
+    worker = Worker(
+        "fixture-worker",
+        WorkerType.GPU,
+        "http://127.0.0.1:9",
+        handlers=handler,
+    )
+    worker.client = client  # type: ignore[assignment]
+    worker.registered = True
+
+    assert worker.run_once() is True
+    assert handler.cleanup_calls == 1
+    result = client.completed[0][1]
+    assert result["cleanup_evidence"]["fence"]["fenced"] is True
+    assert result["cleanup_evidence"]["health"]["healthy"] is True
+
+
+def test_worker_does_not_finalize_successful_job_without_resource() -> None:
+    handler = CleanupRecordingHandler({"handled": True})
+    client = SuccessfulJobClient(resource_id=None, fencing_token=None)
+    worker = Worker(
+        "fixture-worker",
+        WorkerType.AGENT,
+        "http://127.0.0.1:9",
+        handlers=handler,
+    )
+    worker.client = client  # type: ignore[assignment]
+    worker.registered = True
+
+    assert worker.run_once() is True
+    assert handler.cleanup_calls == 0
+    assert client.completed[0][1] == {"handled": True}
+
+
+def test_worker_preserves_handler_cleanup_evidence_without_repeating_cleanup() -> None:
+    evidence = {
+        "fence": {"fenced": True},
+        "health": {"healthy": True},
+    }
+
+    handler = CleanupRecordingHandler(
+        {"handled": True, "cleanup_evidence": evidence}
+    )
+    client = SuccessfulJobClient(
+        resource_id="hcu-7",
+        fencing_token=12,
+        job_type="framework_smoke",
+    )
+    worker = Worker(
+        "fixture-worker",
+        WorkerType.GPU,
+        "http://127.0.0.1:9",
+        handlers=handler,
+    )
+    worker.client = client  # type: ignore[assignment]
+    worker.registered = True
+
+    assert worker.run_once() is True
+    assert handler.cleanup_calls == 0
+    assert client.completed[0][1]["cleanup_evidence"] is evidence
+
+
+def test_job_handlers_clean_up_any_resource_bound_job() -> None:
+    handlers = JobHandlers(AdapterRegistry.fake())
+
+    cleanup = handlers.cleanup(
+        "profile",
+        {
+            "_job_context": {
+                "resource_id": "hcu-7",
+                "fencing_token": 13,
+            }
+        },
+    )
+
+    assert cleanup["fence"]["fenced"] is True
+    assert cleanup["fence"]["synthetic"] is True
+    assert cleanup["health"]["healthy"] is True
+    assert cleanup["health"]["synthetic"] is True
 
 
 def test_control_plane_uses_an_injected_workflow() -> None:

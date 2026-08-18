@@ -175,6 +175,20 @@ class Worker:
             if lease_lost.is_set():
                 raise RuntimeError("job lease was lost while the handler was running")
             self.client.heartbeat(self.worker_id, job)
+            cleanup_evidence = result.get("cleanup_evidence")
+            if (
+                job.get("resource_id") is not None
+                and job.get("fencing_token") is not None
+                and not (
+                    isinstance(cleanup_evidence, dict)
+                    and isinstance(cleanup_evidence.get("fence"), dict)
+                    and isinstance(cleanup_evidence.get("health"), dict)
+                )
+            ):
+                result = {
+                    **result,
+                    "cleanup_evidence": self._cleanup_job(job, payload),
+                }
             self.client.complete(job, result)
         except Exception as exc:
             LOGGER.exception("worker %s failed job %s", self.worker_id, job["job_id"])
