@@ -9,7 +9,7 @@ from pydantic import Field, field_validator, model_validator
 from hcuopt.contracts.base import ContractModel
 from hcuopt.domain.enums import LeaseScope
 
-PLATFORM_CONTRACT_VERSION = "platform-v1.1"
+PLATFORM_CONTRACT_VERSION = "platform-v1.2"
 SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 GIT_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 SYNTHETIC_PERFORMANCE_CLAIM_FIELDS = frozenset(
@@ -73,6 +73,17 @@ class TargetBlocker(ContractModel):
     id: str = Field(min_length=1, max_length=100)
     status: Literal["open", "resolved", "accepted"]
     detail: str = Field(min_length=1)
+    blocks: list[
+        Literal["framework_smoke", "stage0", "optimization", "release"]
+    ] = Field(
+        default_factory=lambda: [
+            "framework_smoke",
+            "stage0",
+            "optimization",
+            "release",
+        ],
+        min_length=1,
+    )
 
 
 class InferenceImageSpec(ContractModel):
@@ -349,6 +360,7 @@ class ExecutionAttempt(ContractModel):
     execution_attempt_id: UUID = Field(default_factory=uuid4)
     evaluation_run_id: UUID
     request_id: UUID
+    variant: Literal["legacy", "baseline", "noop"] = "legacy"
     attempt_number: int = Field(ge=1)
     status: Literal["succeeded", "failed", "timed_out", "cancelled"]
     exit_code: int | None

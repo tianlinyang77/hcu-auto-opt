@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from hcuopt.adapters.interfaces import PairedFrameworkSmokeEvaluator
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
@@ -16,10 +17,13 @@ from hcuopt.contracts.platform_v1 import (
 )
 from hcuopt.contracts.v1 import (
     FrameworkSmokeResult,
+    FrameworkSmokeVariantExecution,
     NoopBuildResult,
+    PairedFrameworkSmokeResult,
     SourcePreparationResult,
 )
 from hcuopt.domain.enums import LeaseScope
+from hcuopt.domain.errors import AdapterUnavailable, ExecutionSafetyError
 
 
 class JobHandlers:
@@ -38,10 +42,21 @@ class JobHandlers:
             return {}
         context = payload.get("_job_context", {})
         executor = self.adapters.require("executor")
-        request_id = payload.get("execution_request_id")
         cancellation: dict[str, Any] = {}
-        if request_id is not None:
-            cancellation = dict(executor.cancel(UUID(str(request_id))))
+        request_ids = {
+            str(value)
+            for value in (
+                payload.get("execution_request_id"),
+                payload.get("baseline_execution_request_id"),
+                payload.get("noop_execution_request_id"),
+            )
+            if value is not None
+        }
+        if request_ids:
+            cancellation = {
+                request_id: dict(executor.cancel(UUID(request_id)))
+                for request_id in sorted(request_ids)
+            }
         cleanup = self._resource_cleanup(
             context.get("resource_id"),
             context.get("fencing_token"),
@@ -169,6 +184,19 @@ class JobHandlers:
         executor = self.adapters.require("executor")
         evaluator = self.adapters.require("evaluator")
         cleaner = self.adapters.require("resource_cleaner")
+        if evaluator.provenance.implementation_kind == "real":
+            if not isinstance(evaluator, PairedFrameworkSmokeEvaluator):
+                raise AdapterUnavailable(
+                    "real Framework Smoke evaluator lacks the paired execution interface"
+                )
+            return self._handle_paired_framework_smoke(
+                payload,
+                target,
+                artifact,
+                executor,
+                evaluator,
+                cleaner,
+            )
         context = payload.get("_job_context", {})
         resource_id = context.get("resource_id")
         fencing_token = context.get("fencing_token")
@@ -293,6 +321,115 @@ class JobHandlers:
         )
         return result.model_dump(mode="json")
 
+    def _handle_paired_framework_smoke(
+        self,
+        payload: dict[str, Any],
+        target: TargetSpec,
+        artifact: ArtifactManifest,
+        executor: Any,
+        evaluator: PairedFrameworkSmokeEvaluator,
+        cleaner: Any,
+    ) -> dict[str, Any]:
+        context = payload.get("_job_context", {})
+        resource_id = context.get("resource_id")
+        fencing_token = context.get("fencing_token")
+        if resource_id is None or fencing_token is None:
+            raise ExecutionSafetyError(
+                "paired Framework Smoke requires an exclusive resource and fencing token"
+            )
+        self._require_live_lease(context)
+        task_id = UUID(payload["task_id"])
+        evaluation_run_id = UUID(payload["evaluation_run_id"])
+        attempt_number = int(context.get("attempt_number", 1))
+        plan = evaluator.prepare_framework_smoke(
+            target=target,
+            artifact=artifact,
+            output_dir=self.output_dir,
+            task_id=task_id,
+            evaluation_run_id=evaluation_run_id,
+            attempt_number=attempt_number,
+            baseline_request_id=UUID(payload["baseline_execution_request_id"]),
+            noop_request_id=UUID(payload["noop_execution_request_id"]),
+            resource_id=str(resource_id),
+            fencing_token=int(fencing_token),
+        )
+
+        try:
+            baseline_execution = executor.execute(
+                plan.baseline_request, target, self.output_dir
+            )
+        finally:
+            baseline_cleanup = self._resource_cleanup(
+                str(resource_id),
+                int(fencing_token),
+                target.model_dump(mode="json"),
+            )
+        self._require_live_lease(context)
+        try:
+            noop_execution = executor.execute(plan.noop_request, target, self.output_dir)
+        finally:
+            noop_cleanup = self._resource_cleanup(
+                str(resource_id),
+                int(fencing_token),
+                target.model_dump(mode="json"),
+            )
+
+        provenance = [executor.provenance, evaluator.provenance, cleaner.provenance]
+        outcome = evaluator.evaluate_framework_smoke(
+            plan,
+            task_id=task_id,
+            candidate_id=UUID(payload["candidate_id"]),
+            round_id=UUID(payload["round_id"]),
+            baseline_epoch_id=UUID(payload["baseline_epoch_id"]),
+            target=target,
+            target_fingerprint=payload["target_fingerprint"],
+            artifact=artifact,
+            evaluation_run_id=evaluation_run_id,
+            evidence_id=UUID(payload["evidence_id"]),
+            attempt_number=attempt_number,
+            baseline_execution=baseline_execution,
+            noop_execution=noop_execution,
+            baseline_cleanup=baseline_cleanup,
+            noop_cleanup=noop_cleanup,
+            adapter_provenance=provenance,
+            idempotency_key=(
+                f"{payload['task_id']}:framework-smoke:"
+                f"{payload['retest_ordinal']}:evaluation:v1"
+            ),
+        )
+        synthetic = any(item.implementation_kind == "fake" for item in provenance)
+        cleanup_evidence = {
+            **noop_cleanup,
+            "variants": {
+                "baseline": baseline_cleanup,
+                "noop": noop_cleanup,
+            },
+        }
+        result = PairedFrameworkSmokeResult(
+            executions=[
+                FrameworkSmokeVariantExecution(
+                    variant="baseline",
+                    execution_request=plan.baseline_request,
+                    execution_result=baseline_execution,
+                    execution_attempt=outcome.baseline_attempt,
+                    cleanup_evidence=baseline_cleanup,
+                ),
+                FrameworkSmokeVariantExecution(
+                    variant="noop",
+                    execution_request=plan.noop_request,
+                    execution_result=noop_execution,
+                    execution_attempt=outcome.noop_attempt,
+                    cleanup_evidence=noop_cleanup,
+                ),
+            ],
+            evaluation=outcome.artifacts.evaluation,
+            evidence=outcome.artifacts.evidence,
+            cleanup_evidence=cleanup_evidence,
+            adapter_provenance=provenance,
+            synthetic=synthetic,
+        )
+        return result.model_dump(mode="json")
+
     def _resource_cleanup(
         self,
         resource_id: str | None,
@@ -337,6 +474,12 @@ class JobHandlers:
                 "error": f"{exc.__class__.__name__}: {exc}",
             }
         return cleanup
+
+    @staticmethod
+    def _require_live_lease(context: dict[str, Any]) -> None:
+        lease_lost = context.get("lease_lost_event")
+        if lease_lost is not None and lease_lost.is_set():
+            raise ExecutionSafetyError("job lease was lost before the next container launch")
 
 
 class FakeJobHandlers(JobHandlers):

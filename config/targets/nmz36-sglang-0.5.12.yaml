@@ -54,12 +54,16 @@ blockers:
   - id: exact_image_missing_on_execution_host
     status: resolved
     detail: Verified on nmz36 on 2026-08-18; the immutable registry digest and locked image ID both match this Target Lock.
+    blocks: [framework_smoke, stage0, optimization, release]
   - id: docker_storage_full
     status: resolved
     detail: Verified on nmz36 on 2026-08-18; Docker Root remains /data/docker and /data has about 1.4 TiB available, so no cleanup or migration is required for F1.
+    blocks: [framework_smoke, stage0, optimization, release]
   - id: device_isolation_not_reserved
     status: open
     detail: HCU 7 is currently healthy and idle, but three running containers map all accelerator devices and no F1 or Stage 0 reservation window has been recorded.
+    blocks: [stage0, optimization, release]
   - id: stage0_not_measured
     status: open
     detail: Timer resolution, noise sigma/CV/MDE, profiler capability, and hot-patch recovery remain unmeasured.
+    blocks: [optimization, release]

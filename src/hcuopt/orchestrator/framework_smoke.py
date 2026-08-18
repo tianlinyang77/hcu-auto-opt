@@ -8,6 +8,7 @@ from hcuopt.contracts.v1 import (
     FrameworkSmokeResult,
     JobCreate,
     NoopBuildResult,
+    PairedFrameworkSmokeResult,
     SourcePreparationResult,
 )
 from hcuopt.domain.enums import (
@@ -122,16 +123,32 @@ class FrameworkSmokeCoordinator:
 
     def _after_framework_smoke(self, job: dict[str, Any]) -> None:
         task_id = job["task_id"]
-        result = FrameworkSmokeResult.model_validate(job["result"])
+        raw_result = job["result"]
+        if raw_result.get("result_kind", "single") == "paired":
+            result = PairedFrameworkSmokeResult.model_validate(raw_result)
+        else:
+            result = FrameworkSmokeResult.model_validate(raw_result)
         evaluation = self.repository.record_evaluation(result.evaluation)
-        self.repository.record_execution_request(
-            task_id,
-            result.evaluation.candidate_id,
-            evaluation["evaluation_run_id"],
-            result.execution_request,
-            f"job:{job['job_id']}:execution-request",
-        )
-        self.repository.record_execution_attempt(result.execution_attempt)
+        if isinstance(result, PairedFrameworkSmokeResult):
+            for execution in result.executions:
+                self.repository.record_execution_request(
+                    task_id,
+                    result.evaluation.candidate_id,
+                    evaluation["evaluation_run_id"],
+                    execution.execution_request,
+                    f"job:{job['job_id']}:execution-request:{execution.variant}",
+                    execution.variant,
+                )
+                self.repository.record_execution_attempt(execution.execution_attempt)
+        else:
+            self.repository.record_execution_request(
+                task_id,
+                result.evaluation.candidate_id,
+                evaluation["evaluation_run_id"],
+                result.execution_request,
+                f"job:{job['job_id']}:execution-request",
+            )
+            self.repository.record_execution_attempt(result.execution_attempt)
         self.repository.record_evidence_bundle(
             result.evidence,
             evaluation["evaluation_run_id"],

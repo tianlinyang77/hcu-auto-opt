@@ -17,6 +17,7 @@ FRAMEWORK_SMOKE_CAPABILITIES = frozenset(
         "resource_cleaner",
     }
 )
+REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,13 +34,22 @@ class AdapterProfile:
                 f"{', '.join(missing)}"
             )
 
-    def validate_target(self, target: TargetSpec) -> None:
+    def validate_target(
+        self,
+        target: TargetSpec,
+        *,
+        scope: str = "framework_smoke",
+    ) -> None:
         self.require_framework_smoke()
         if self.implementation_kind == "real":
-            blockers = [item.id for item in target.blockers if item.status == "open"]
+            blockers = [
+                item.id
+                for item in target.blockers
+                if item.status == "open" and scope in item.blocks
+            ]
             if blockers:
                 raise TargetNotReady(
-                    f"target {target.target_id} has open blockers for real execution: "
+                    f"target {target.target_id} has open blockers for {scope}: "
                     f"{', '.join(blockers)}"
                 )
 
@@ -60,6 +70,11 @@ class AdapterProfileCatalog:
                 AdapterProfile(
                     name="fake-v1-control-flow-only",
                     implementation_kind="fake",
+                    capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
+                ),
+                AdapterProfile(
+                    name=REAL_FRAMEWORK_SMOKE_PROFILE,
+                    implementation_kind="real",
                     capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
                 ),
             )

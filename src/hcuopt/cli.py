@@ -48,6 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--type", required=True, choices=[item.value for item in WorkerType])
     worker.add_argument("--api-url", default=os.getenv("HCUOPT_API_URL", "http://localhost:8000"))
     worker.add_argument("--resource-id")
+    worker.add_argument(
+        "--adapter-profile",
+        default="fake-v1-control-flow-only",
+        choices=("fake-v1-control-flow-only", "nmz36-framework-smoke-v1"),
+    )
+    worker.add_argument("--target-lock", type=Path)
+    worker.add_argument("--output-dir", type=Path, default=Path("results/worker"))
     demo = sub.add_parser("walking-demo", help="run the fake end-to-end control-flow demo")
     demo.add_argument("--api-url", default=os.getenv("HCUOPT_API_URL", "http://localhost:8000"))
     demo.add_argument("--timeout", type=float, default=60.0)
@@ -75,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "HCUOPT_DATABASE_URL", "postgresql://hcuopt:hcuopt@localhost:5432/hcuopt"
         )
         PostgresRepository(database_url).migrate()
-        print("PostgreSQL schema is at version 1")
+        print("PostgreSQL schema is at the latest packaged version")
         return 0
     if args.command == "target-validate":
         from hcuopt.domain.errors import TargetConfigError
@@ -89,16 +96,32 @@ def main(argv: list[str] | None = None) -> int:
         print(target.model_dump_json(indent=2))
         return 0
     if args.command == "worker":
+        from hcuopt.adapters.real_profile import build_nmz36_framework_smoke_registry
+        from hcuopt.adapters.registry import AdapterRegistry
+        from hcuopt.targets import load_target
         from hcuopt.workers.sdk import Worker
 
         capabilities = {}
         if args.resource_id:
             capabilities["resource_id"] = args.resource_id
+        if args.adapter_profile == "nmz36-framework-smoke-v1":
+            if args.target_lock is None:
+                print("real adapter profile requires --target-lock", file=sys.stderr)
+                return 2
+            target = load_target(args.target_lock)
+            adapters = build_nmz36_framework_smoke_registry(
+                target,
+                args.output_dir,
+            )
+        else:
+            adapters = AdapterRegistry.fake()
         worker = Worker(
             args.worker_id,
             WorkerType(args.type),
             args.api_url,
             capabilities=capabilities,
+            adapters=adapters,
+            output_dir=args.output_dir,
         )
         try:
             worker.run_forever()

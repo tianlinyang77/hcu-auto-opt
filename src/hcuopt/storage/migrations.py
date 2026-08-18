@@ -4,6 +4,7 @@ MIGRATIONS = {
     1: "0001_walking_skeleton.sql",
     2: "0002_evaluation_evidence.sql",
     3: "0003_framework_smoke_control_plane.sql",
+    4: "0004_framework_smoke_dual_execution.sql",
 }
 
 

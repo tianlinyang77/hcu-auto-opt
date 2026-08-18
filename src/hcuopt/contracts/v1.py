@@ -253,6 +253,7 @@ class NoopBuildResult(ContractModel):
 
 
 class FrameworkSmokeResult(ContractModel):
+    result_kind: Literal["single"] = "single"
     execution_request: ExecutionRequest
     execution_result: ExecutionResult
     execution_attempt: ExecutionAttempt
@@ -291,6 +292,103 @@ class FrameworkSmokeResult(ContractModel):
         if any(item.implementation_kind == "fake" for item in self.adapter_provenance):
             if not self.synthetic:
                 raise ValueError("fake framework smoke results must be synthetic")
+        return self
+
+
+class FrameworkSmokeVariantExecution(ContractModel):
+    variant: Literal["baseline", "noop"]
+    execution_request: ExecutionRequest
+    execution_result: ExecutionResult
+    execution_attempt: ExecutionAttempt
+    cleanup_evidence: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_variant_execution(self) -> FrameworkSmokeVariantExecution:
+        request_id = self.execution_request.request_id
+        if self.execution_result.request_id != request_id:
+            raise ValueError("variant execution result must reference its request")
+        if self.execution_attempt.request_id != request_id:
+            raise ValueError("variant execution attempt must reference its request")
+        if self.execution_attempt.variant != self.variant:
+            raise ValueError("execution attempt variant does not match its container role")
+        result_fields = (
+            "status",
+            "exit_code",
+            "started_at",
+            "finished_at",
+            "stdout_uri",
+            "stderr_uri",
+        )
+        if any(
+            getattr(self.execution_result, name)
+            != getattr(self.execution_attempt, name)
+            for name in result_fields
+        ):
+            raise ValueError("execution attempt must faithfully record its execution result")
+        if self.execution_result.synthetic != self.execution_attempt.synthetic:
+            raise ValueError("variant execution synthetic flags must match")
+        if not isinstance(self.cleanup_evidence.get("fence"), dict):
+            raise ValueError("variant execution requires fence evidence")
+        if not isinstance(self.cleanup_evidence.get("health"), dict):
+            raise ValueError("variant execution requires health evidence")
+        return self
+
+
+class PairedFrameworkSmokeResult(ContractModel):
+    result_kind: Literal["paired"] = "paired"
+    executions: list[FrameworkSmokeVariantExecution] = Field(min_length=2, max_length=2)
+    evaluation: EvaluationRun
+    evidence: EvidenceBundle
+    cleanup_evidence: dict[str, Any]
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool
+    no_performance_conclusion: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_paired_relationships(self) -> PairedFrameworkSmokeResult:
+        by_variant = {item.variant: item for item in self.executions}
+        if set(by_variant) != {"baseline", "noop"} or len(by_variant) != 2:
+            raise ValueError("paired framework smoke requires baseline and noop executions")
+        if len({item.execution_request.request_id for item in self.executions}) != 2:
+            raise ValueError("baseline and noop require distinct execution request IDs")
+        if len({item.execution_attempt.execution_attempt_id for item in self.executions}) != 2:
+            raise ValueError("baseline and noop require distinct execution attempt IDs")
+        for item in by_variant.values():
+            if item.execution_attempt.evaluation_run_id != self.evaluation.evaluation_run_id:
+                raise ValueError("variant execution must belong to the evaluation run")
+            if item.execution_result.synthetic != self.synthetic:
+                raise ValueError("paired framework smoke synthetic flags must match")
+        if self.evaluation.phase != "correctness":
+            raise ValueError("framework smoke is a correctness evaluation")
+        if self.evidence.task_id != self.evaluation.task_id:
+            raise ValueError("evidence and evaluation task ids must match")
+        if self.evidence.candidate_id != self.evaluation.candidate_id:
+            raise ValueError("evidence and evaluation candidate ids must match")
+        if self.evidence.baseline_epoch_id != self.evaluation.baseline_epoch_id:
+            raise ValueError("evidence and evaluation baseline ids must match")
+        values = (self.evaluation.synthetic, self.evidence.synthetic)
+        if any(value != self.synthetic for value in values):
+            raise ValueError("paired evaluation and evidence synthetic flags must match")
+        if any(item.implementation_kind == "fake" for item in self.adapter_provenance):
+            if not self.synthetic:
+                raise ValueError("fake paired framework smoke results must be synthetic")
+        attempt_ids = self.evidence.summary.get("execution_attempt_ids")
+        expected_attempt_ids = {
+            name: str(item.execution_attempt.execution_attempt_id)
+            for name, item in by_variant.items()
+        }
+        if attempt_ids != expected_attempt_ids:
+            raise ValueError("evidence must bind both variant execution attempts")
+        cleanup_variants = self.cleanup_evidence.get("variants")
+        expected_cleanup = {
+            name: item.cleanup_evidence for name, item in by_variant.items()
+        }
+        if cleanup_variants != expected_cleanup:
+            raise ValueError("top-level cleanup evidence must bind both variants")
+        final_cleanup = by_variant["noop"].cleanup_evidence
+        for name in ("fence", "health"):
+            if self.cleanup_evidence.get(name) != final_cleanup.get(name):
+                raise ValueError("top-level cleanup state must match final noop cleanup")
         return self
 
 

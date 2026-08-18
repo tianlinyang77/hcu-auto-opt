@@ -1192,6 +1192,7 @@ class PostgresRepository:
         evaluation_run_id: UUID,
         request: ExecutionRequest,
         idempotency_key: str,
+        variant: str = "legacy",
     ) -> dict[str, Any]:
         request_data = request.model_dump(mode="json")
         with self.connection() as connection:
@@ -1199,8 +1200,8 @@ class PostgresRepository:
                 """
                 INSERT INTO execution_requests (
                     request_id, task_id, candidate_id, evaluation_run_id,
-                    target_id, request, idempotency_key
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    target_id, request, idempotency_key, variant
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (idempotency_key) DO UPDATE
                 SET idempotency_key = EXCLUDED.idempotency_key
                 RETURNING *
@@ -1213,6 +1214,7 @@ class PostgresRepository:
                     request.target_id,
                     Jsonb(request_data),
                     idempotency_key,
+                    variant,
                 ),
             ).fetchone()
         assert row is not None
@@ -1223,6 +1225,7 @@ class PostgresRepository:
             "evaluation_run_id": evaluation_run_id,
             "target_id": request.target_id,
             "request": request_data,
+            "variant": variant,
         }
         if any(row[name] != value for name, value in expected.items()):
             raise Conflict("execution request idempotency_key was reused with different inputs")
@@ -1388,6 +1391,12 @@ class PostgresRepository:
             run_key = f"{task_id}:framework-smoke:{retest_ordinal}:v1"
             evaluation_run_id = uuid5(NAMESPACE_URL, run_key + ":evaluation")
             execution_request_id = uuid5(NAMESPACE_URL, run_key + ":request")
+            baseline_execution_request_id = uuid5(
+                NAMESPACE_URL, run_key + ":baseline:request"
+            )
+            noop_execution_request_id = uuid5(
+                NAMESPACE_URL, run_key + ":noop:request"
+            )
             evidence_id = uuid5(NAMESPACE_URL, run_key + ":evidence")
             job_id = uuid5(NAMESPACE_URL, run_key + ":job")
             payload = {
@@ -1412,6 +1421,10 @@ class PostgresRepository:
                 },
                 "evaluation_run_id": str(evaluation_run_id),
                 "execution_request_id": str(execution_request_id),
+                "baseline_execution_request_id": str(
+                    baseline_execution_request_id
+                ),
+                "noop_execution_request_id": str(noop_execution_request_id),
                 "evidence_id": str(evidence_id),
                 "retest_ordinal": retest_ordinal,
             }
@@ -1540,14 +1553,14 @@ class PostgresRepository:
                 """
                 INSERT INTO execution_attempts (
                     execution_attempt_id, evaluation_run_id, request_id,
-                    attempt_number, status, exit_code, started_at, finished_at,
+                    variant, attempt_number, status, exit_code, started_at, finished_at,
                     stdout_uri, stderr_uri, result_metadata, adapter_provenance,
                     synthetic
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s
                 )
-                ON CONFLICT (evaluation_run_id, attempt_number) DO UPDATE
+                ON CONFLICT (evaluation_run_id, variant, attempt_number) DO UPDATE
                 SET attempt_number = EXCLUDED.attempt_number
                 RETURNING *
                 """,
@@ -1555,6 +1568,7 @@ class PostgresRepository:
                     attempt.execution_attempt_id,
                     attempt.evaluation_run_id,
                     attempt.request_id,
+                    attempt.variant,
                     attempt.attempt_number,
                     attempt.status,
                     attempt.exit_code,
@@ -1572,6 +1586,7 @@ class PostgresRepository:
         if any(
             (
                 row["request_id"] != attempt.request_id,
+                row["variant"] != attempt.variant,
                 row["status"] != attempt.status,
                 row["exit_code"] != attempt.exit_code,
                 row["started_at"] != attempt.started_at,
@@ -1611,7 +1626,7 @@ class PostgresRepository:
                 """
                 SELECT * FROM execution_attempts
                 WHERE evaluation_run_id = %s
-                ORDER BY attempt_number
+                ORDER BY attempt_number, variant
                 """,
                 (evaluation_run_id,),
             ).fetchall()
@@ -1639,7 +1654,7 @@ class PostgresRepository:
                 JOIN evaluation_runs AS run
                   ON run.evaluation_run_id = attempt.evaluation_run_id
                 WHERE run.task_id = %s
-                ORDER BY run.created_at, attempt.attempt_number
+                ORDER BY run.created_at, attempt.attempt_number, attempt.variant
                 """,
                 (task_id,),
             ).fetchall()

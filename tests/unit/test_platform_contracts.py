@@ -7,6 +7,7 @@ import yaml
 from pydantic import ValidationError
 
 from hcuopt.adapters.fake import FakeExecutionAdapter, FakeSourceManager
+from hcuopt.adapters.profiles import REAL_FRAMEWORK_SMOKE_PROFILE
 from hcuopt.cli import main
 from hcuopt.contracts.platform_v1 import (
     PLATFORM_CONTRACT_VERSION,
@@ -19,7 +20,7 @@ from hcuopt.contracts.platform_v1 import (
     MeasurementSeries,
     TargetSpec,
 )
-from hcuopt.domain.enums import LeaseScope
+from hcuopt.domain.enums import LeaseScope, WorkerType
 from hcuopt.domain.errors import TargetConfigError
 from hcuopt.targets import TargetCatalog, load_target
 
@@ -36,7 +37,7 @@ FAKE_EXECUTOR_PROVENANCE = AdapterProvenance(
 
 def test_locked_target_loads_as_platform_v1() -> None:
     target = load_target(TARGET_PATH)
-    assert PLATFORM_CONTRACT_VERSION == "platform-v1.1"
+    assert PLATFORM_CONTRACT_VERSION == "platform-v1.2"
     assert target.target_id == "nmz36-sglang-0.5.12"
     assert target.inference_image.python_version == "3.10"
     assert target.inference_image.immutable_reference.endswith(
@@ -65,6 +66,93 @@ def test_target_validate_cli_returns_a_stable_error_for_missing_file(
 ) -> None:
     assert main(["target-validate", str(tmp_path / "missing.yaml")]) == 2
     assert "target validation failed" in capsys.readouterr().err
+
+
+def test_real_worker_cli_requires_a_target_lock(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = main(
+        [
+            "worker",
+            "--id",
+            "gpu-real",
+            "--type",
+            "gpu",
+            "--adapter-profile",
+            REAL_FRAMEWORK_SMOKE_PROFILE,
+        ]
+    )
+
+    assert result == 2
+    assert "requires --target-lock" in capsys.readouterr().err
+
+
+def test_real_worker_cli_wires_the_locked_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class StubWorker:
+        def __init__(
+            self,
+            worker_id,
+            worker_type,
+            api_url,
+            *,
+            capabilities,
+            adapters,
+            output_dir,
+        ) -> None:
+            observed.update(
+                {
+                    "worker_id": worker_id,
+                    "worker_type": worker_type,
+                    "api_url": api_url,
+                    "capabilities": capabilities,
+                    "adapter_profile": adapters.profile,
+                    "output_dir": output_dir,
+                }
+            )
+
+        def run_forever(self) -> None:
+            observed["ran"] = True
+
+        def stop(self) -> None:
+            observed["stopped"] = True
+
+    monkeypatch.setattr("hcuopt.workers.sdk.Worker", StubWorker)
+    output_dir = tmp_path / "worker-output"
+    result = main(
+        [
+            "worker",
+            "--id",
+            "gpu-real",
+            "--type",
+            "gpu",
+            "--api-url",
+            "http://control-plane:8000",
+            "--resource-id",
+            "hcu-7",
+            "--adapter-profile",
+            REAL_FRAMEWORK_SMOKE_PROFILE,
+            "--target-lock",
+            str(TARGET_PATH),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert result == 0
+    assert observed == {
+        "worker_id": "gpu-real",
+        "worker_type": WorkerType.GPU,
+        "api_url": "http://control-plane:8000",
+        "capabilities": {"resource_id": "hcu-7"},
+        "adapter_profile": REAL_FRAMEWORK_SMOKE_PROFILE,
+        "output_dir": output_dir,
+        "ran": True,
+    }
 
 
 def test_leased_execution_requires_resource_and_fencing_token() -> None:

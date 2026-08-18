@@ -16,11 +16,9 @@ No-op    新容器 -> 新 SGLang 进程 -> Ready -> Generate -> Stop
                                 规范化四个字段并严格比较
 ```
 
-本仓库当前公共 `FrameworkSmokeResult` 只能表达一组
-`ExecutionRequest/ExecutionResult/ExecutionAttempt`。因此本次 D1/D2 交付单 variant
-Runner、规范化、比较、证据生成和 Scripted 测试；不能把两个 SGLang 进程放进一个
-容器后声称满足了“双新容器”。D3 必须等待 A/B 通过 ADR 把公共结果扩展为 baseline
-和 noop 两组 execution，并为两个物理 attempt 提供无歧义的持久化键。
+`platform-v1.2` 已通过 ADR-0004 增加 paired 结果：Baseline 和 No-op 分别拥有
+`ExecutionRequest/ExecutionResult/ExecutionAttempt`，数据库以 `variant` 明确区分。
+真实 Profile 不再使用旧的单执行结果；旧格式只保留给 Fake 控制流 Demo。
 
 ## 两层协议
 

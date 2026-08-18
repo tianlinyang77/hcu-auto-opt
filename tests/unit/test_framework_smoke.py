@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -58,15 +59,16 @@ def test_adapter_profile_fails_closed_for_unknown_or_missing_capability() -> Non
         incomplete.require_framework_smoke()
 
 
-def test_real_profile_rejects_target_with_open_blockers() -> None:
+def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
     target = load_target(TARGET_PATH)
     profile = AdapterProfile(
         name="real-test",
         implementation_kind="real",
         capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
     )
-    with pytest.raises(TargetNotReady, match="open blockers"):
-        profile.validate_target(target)
+    profile.validate_target(target)
+    with pytest.raises(TargetNotReady, match="open blockers for stage0"):
+        profile.validate_target(target, scope="stage0")
 
 
 def test_target_catalog_lists_valid_targets_and_rejects_duplicate_ids(
@@ -150,6 +152,26 @@ def test_framework_create_returns_stable_profile_and_target_errors() -> None:
         def migrate(self) -> None:
             return None
 
+        def create_framework_smoke_task(self, payload, target, source_path):
+            now = datetime.now(timezone.utc)
+            return {
+                "task_id": uuid4(),
+                "name": payload.name,
+                "workload_id": f"framework-smoke:{target.target_id}",
+                "state": "source_preparing",
+                "project_mode": None,
+                "budget": {},
+                "automatic_release_allowed": False,
+                "version": 0,
+                "created_at": now,
+                "updated_at": now,
+                "workflow_type": "framework_smoke",
+                "target_id": target.target_id,
+                "target_snapshot_id": uuid4(),
+                "adapter_profile": payload.adapter_profile,
+                "retest_count": 0,
+            }
+
     target_catalog = TargetCatalog(TARGET_PATH.parent)
     missing_profile_app = create_app(
         repository=StubRepository(),  # type: ignore[arg-type]
@@ -180,5 +202,4 @@ def test_framework_create_returns_stable_profile_and_target_errors() -> None:
     payload["adapter_profile"] = "real-test"
     with TestClient(real_profile_app) as client:
         response = client.post("/v1/framework-smoke/tasks", json=payload)
-    assert response.status_code == 409
-    assert response.json()["code"] == "target_not_ready"
+    assert response.status_code == 201
