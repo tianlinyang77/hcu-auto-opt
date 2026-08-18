@@ -285,6 +285,12 @@ class FrameworkSmokePostgresTests(unittest.TestCase):
                 cleanup_evidence=cleanup,
             )
             self.assertEqual(failed["state"], "queued" if attempt < 3 else "failed")
+            if attempt < 3:
+                with self.repository.connection() as connection:
+                    connection.execute(
+                        "UPDATE jobs SET available_at = now() WHERE job_id = %s",
+                        (job["job_id"],),
+                    )
 
         summary = self.repository.framework_smoke_summary(task["task_id"])
         self.assertEqual(summary["task"]["state"], TaskState.REJECTED.value)
