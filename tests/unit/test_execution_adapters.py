@@ -143,8 +143,8 @@ def test_container_executor_uses_locked_identity_and_topology(tmp_path: Path) ->
     assert TARGET.inference_image.immutable_reference in command
     assert TARGET.execution_host.accelerator.cpu_affinity in command
     assert str(TARGET.execution_host.accelerator.numa_node) in command
-    assert "HIP_VISIBLE_DEVICES=0" in command
-    assert "ROCR_VISIBLE_DEVICES=7" in command
+    assert "HIP_VISIBLE_DEVICES=7" in command
+    assert not any(item.startswith("ROCR_VISIBLE_DEVICES=") for item in command)
     assert result.metadata["image_id"] == TARGET.inference_image.image_id
     assert result.metadata["registry_digest_verified"] is True
     assert result.metadata["fencing_validated_before_result"] is True
@@ -167,15 +167,15 @@ def test_container_executor_rejects_secret_environment(tmp_path: Path) -> None:
     assert runner.commands == []
 
 
-def test_container_executor_rejects_physical_index_as_filtered_hip_index(
+def test_container_executor_rejects_conflicting_hip_index(
     tmp_path: Path,
 ) -> None:
     runner = ScriptedDockerRunner()
     adapter = ContainerExecutionAdapter(runner)
     unsafe = request().model_copy(
-        update={"environment": {"HIP_VISIBLE_DEVICES": "7"}}
+        update={"environment": {"HIP_VISIBLE_DEVICES": "0"}}
     )
-    with pytest.raises(ExecutionSafetyError, match="expected 0"):
+    with pytest.raises(ExecutionSafetyError, match="expected 7"):
         adapter.execute(unsafe, TARGET, tmp_path)
     assert runner.commands == []
 
