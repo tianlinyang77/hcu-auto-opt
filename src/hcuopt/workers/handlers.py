@@ -106,24 +106,33 @@ class JobHandlers:
         builder = self.adapters.require("builder")
         artifact_store = self.adapters.require("artifact_store")
         source = source_manager.create_candidate(baseline, candidate, self.output_dir)
-        artifact = builder.build(
-            {
-                "candidate_id": str(candidate),
-                "source_hash": source.source_hash,
-                "variant": "framework-noop",
-            },
-            self.output_dir,
-        ).model_copy(
-            update={
-                "source_snapshot_id": source.snapshot_id,
-                "build_recipe": {
-                    "kind": "framework-noop",
-                    "changes": [],
-                    "purpose": "validate source-to-artifact control flow",
+        try:
+            artifact = builder.build(
+                {
+                    "candidate_id": str(candidate),
+                    "source_hash": source.source_hash,
+                    "source_snapshot": source.model_dump(mode="json"),
+                    "adapter_provenance": [
+                        source_manager.provenance.model_dump(mode="json")
+                    ],
+                    "variant": "framework-noop",
                 },
-            }
-        )
-        artifact = artifact_store.publish(artifact, self.output_dir)
+                self.output_dir,
+            )
+            artifact = artifact.model_copy(
+                update={
+                    "source_snapshot_id": source.snapshot_id,
+                    "build_recipe": {
+                        **artifact.build_recipe,
+                        "workflow_kind": "framework-noop",
+                        "changes": [],
+                        "purpose": "validate source-to-artifact control flow",
+                    },
+                }
+            )
+            artifact = artifact_store.publish(artifact, self.output_dir)
+        finally:
+            source_manager.remove_candidate(baseline, source, self.output_dir)
         provenance = [
             source_manager.provenance,
             builder.provenance,

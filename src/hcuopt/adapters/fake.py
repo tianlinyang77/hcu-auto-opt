@@ -217,6 +217,22 @@ class FakeSourceManager:
             parent_snapshot_id=baseline.snapshot_id,
         )
 
+    def remove_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate: SourceSnapshot,
+        output_dir: Path,
+    ) -> None:
+        if candidate.parent_snapshot_id != baseline.snapshot_id:
+            raise ValueError("candidate does not belong to the supplied baseline")
+
+    def recover_candidates(
+        self,
+        baseline: SourceSnapshot,
+        output_dir: Path,
+    ) -> tuple[str, ...]:
+        return ()
+
 
 class FakeArtifactStore:
     provenance = _fake_provenance("artifact_store", "FakeArtifactStore")

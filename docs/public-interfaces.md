@@ -78,4 +78,8 @@ TargetSpec → SourceSnapshot → No-op Artifact
 
 该链在 nmz36 的锁定镜像中跑通、失败可恢复、证据可归档后，才进入 Stage 0。Stage 0 拦截性能搜索和优化工程，不拦截搭建这条必要的执行框架。
 
+`SourceManagerAdapter` 还负责 Candidate Worktree 的正常回收与异常恢复；清理只能作用于
+受管 Candidate 目录，完成后必须重新校验 Baseline 未发生变化。具体语义见
+[F1-C 源码与制品证据链](f1-c-source-artifact.md)。
+
 A 线的持久化、状态、API、取消、复测与 Reconcile 已进入 F1 实现，详见 [Framework Smoke 控制面](framework-smoke-control-plane.md)。默认目录目前只发布显式 Fake Profile；真实 Profile 必须等待 #5、#6、#7 六项 Adapter 能力和 Target blocker 验收完成后再注册。

@@ -32,3 +32,15 @@ class AdapterUnavailable(ContractError):
 
 class TargetNotReady(ContractError):
     """A real workflow requested a target whose declared blockers are still open."""
+
+
+class SourceArtifactError(ContractError):
+    """The pinned-source or immutable-artifact pipeline could not proceed safely."""
+
+
+class SourceIntegrityError(SourceArtifactError):
+    """A source checkout no longer matches its recorded snapshot."""
+
+
+class ArtifactIntegrityError(SourceArtifactError):
+    """An artifact does not match its recorded content hash."""

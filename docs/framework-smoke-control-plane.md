@@ -60,3 +60,6 @@ Framework Smoke 使用独立状态链，不复用 `PROFILING`、`SEARCHING` 或 
 - #7：`EvaluatorAdapter` 和 Evidence 内容。
 
 控制面不 fork 这些实现，也不把 Profile 缺失解释成可回退 Fake。真实 Profile 只有在六项能力、Target blocker 和 Contract Test 都通过后才加入默认 Profile Catalog。
+
+#5 的确定性 Hash、No-op、Artifact Store 和清理语义见
+[F1-C 源码与制品证据链](f1-c-source-artifact.md)。

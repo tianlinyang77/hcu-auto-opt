@@ -84,6 +84,19 @@ class SourceManagerAdapter(Protocol):
         output_dir: Path,
     ) -> SourceSnapshot: ...
 
+    def remove_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate: SourceSnapshot,
+        output_dir: Path,
+    ) -> None: ...
+
+    def recover_candidates(
+        self,
+        baseline: SourceSnapshot,
+        output_dir: Path,
+    ) -> Sequence[str]: ...
+
 
 class ArtifactStoreAdapter(Protocol):
     provenance: AdapterProvenance
