@@ -20,7 +20,11 @@ class ControlPlaneClient:
         self.client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout)
 
     def register(
-        self, worker_id: str, worker_type: WorkerType, capabilities: dict[str, Any]
+        self,
+        worker_id: str,
+        worker_type: WorkerType,
+        capabilities: dict[str, Any],
+        adapter_profile: str | None = None,
     ) -> None:
         response = self.client.post(
             "/v1/workers",
@@ -28,6 +32,7 @@ class ControlPlaneClient:
                 "worker_id": worker_id,
                 "worker_type": worker_type.value,
                 "contract_version": CONTRACT_VERSION,
+                "adapter_profile": adapter_profile,
                 "capabilities": capabilities,
             },
         )
@@ -107,7 +112,12 @@ class Worker:
         self.registered = False
 
     def register(self) -> None:
-        self.client.register(self.worker_id, self.worker_type, self.capabilities)
+        self.client.register(
+            self.worker_id,
+            self.worker_type,
+            self.capabilities,
+            self.capabilities.get("adapter_profile"),
+        )
         self.registered = True
 
     def run_once(self) -> bool:
@@ -129,7 +139,14 @@ class Worker:
         try:
             self.client.heartbeat(self.worker_id, job)
             heartbeat.start()
-            result = self.handlers.handle(job["job_type"], job["payload"])
+            payload = dict(job["payload"])
+            payload["_job_context"] = {
+                "job_id": job["job_id"],
+                "attempt_number": job["attempts"],
+                "resource_id": job.get("resource_id"),
+                "fencing_token": job.get("fencing_token"),
+            }
+            result = self.handlers.handle(job["job_type"], payload)
             self.client.complete(job, result)
         except Exception as exc:
             LOGGER.exception("worker %s failed job %s", self.worker_id, job["job_id"])

@@ -17,6 +17,7 @@ from hcuopt.domain.enums import (
     LeaseScope,
     TaskState,
     WorkerType,
+    WorkflowType,
 )
 from hcuopt.storage.repository import PostgresRepository
 
@@ -122,7 +123,7 @@ class WalkingSkeletonCoordinator:
 
     def reconcile(self) -> list[UUID]:
         advanced: list[UUID] = []
-        for job in self.repository.unadvanced_succeeded_jobs():
+        for job in self.repository.unadvanced_succeeded_jobs(WorkflowType.OPTIMIZATION):
             self.advance(job)
             advanced.append(job["job_id"])
         return advanced

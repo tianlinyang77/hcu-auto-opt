@@ -32,6 +32,11 @@ class ProjectMode(StrEnum):
     CONFIG_ONLY = "config_only"
 
 
+class WorkflowType(StrEnum):
+    OPTIMIZATION = "optimization"
+    FRAMEWORK_SMOKE = "framework_smoke"
+
+
 class TaskState(StrEnum):
     CREATED = "created"
     STAGE0_PENDING = "stage0_pending"
@@ -46,6 +51,13 @@ class TaskState(StrEnum):
     AWAITING_SIGNOFF = "awaiting_signoff"
     COMPLETED = "completed"
     REJECTED = "rejected"
+    FRAMEWORK_SMOKE_PENDING = "framework_smoke_pending"
+    SOURCE_PREPARING = "source_preparing"
+    ARTIFACT_PREPARING = "artifact_preparing"
+    FRAMEWORK_EXECUTING = "framework_executing"
+    OUTPUT_VALIDATING = "output_validating"
+    FRAMEWORK_RETESTING = "framework_retesting"
+    CANCELLED = "cancelled"
 
 
 class CandidateState(StrEnum):
@@ -61,6 +73,8 @@ class CandidateState(StrEnum):
     E2E_RUNNING = "e2e_running"
     RELEASE_CANDIDATE = "release_candidate"
     REJECTED = "rejected"
+    FRAMEWORK_SMOKE_RUNNING = "framework_smoke_running"
+    FRAMEWORK_SMOKE_PASSED = "framework_smoke_passed"
 
 
 class LeaseState(StrEnum):
@@ -112,6 +126,9 @@ class JobType(StrEnum):
     CORRECTNESS = "correctness"
     PERFORMANCE = "performance"
     E2E = "e2e"
+    SOURCE_PREPARE = "source_prepare"
+    NOOP_BUILD = "noop_build"
+    FRAMEWORK_SMOKE = "framework_smoke"
 
 
 class EvaluationPhase(StrEnum):

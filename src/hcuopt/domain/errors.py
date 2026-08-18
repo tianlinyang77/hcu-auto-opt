@@ -28,3 +28,7 @@ class TargetConfigError(ContractError):
 
 class AdapterUnavailable(ContractError):
     """A workflow requested an adapter that is not registered in this worker."""
+
+
+class TargetNotReady(ContractError):
+    """A real workflow requested a target whose declared blockers are still open."""

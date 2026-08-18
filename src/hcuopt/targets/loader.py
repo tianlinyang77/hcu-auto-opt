@@ -32,7 +32,7 @@ class TargetCatalog:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
-    def load(self, target_id: str) -> TargetSpec:
+    def source_path(self, target_id: str) -> Path:
         if TARGET_ID_PATTERN.fullmatch(target_id) is None:
             raise TargetConfigError(f"invalid target id: {target_id!r}")
         matches = [
@@ -44,9 +44,34 @@ class TargetCatalog:
             raise TargetConfigError(f"target not found in {self.root}: {target_id}")
         if len(matches) > 1:
             raise TargetConfigError(f"target has both .yaml and .yml definitions: {target_id}")
-        target = load_target(matches[0])
+        return matches[0]
+
+    def load(self, target_id: str) -> TargetSpec:
+        target = load_target(self.source_path(target_id))
         if target.target_id != target_id:
             raise TargetConfigError(
                 f"target id mismatch: requested {target_id}, file declares {target.target_id}"
             )
         return target
+
+    def list(self) -> list[TargetSpec]:
+        if not self.root.is_dir():
+            raise TargetConfigError(f"target catalog directory not found: {self.root}")
+        targets: dict[str, TargetSpec] = {}
+        source_paths: dict[str, Path] = {}
+        for path in sorted((*self.root.glob("*.yaml"), *self.root.glob("*.yml"))):
+            if path.parent.resolve() != self.root:
+                raise TargetConfigError(f"target path escapes catalog root: {path}")
+            target = load_target(path)
+            if path.stem != target.target_id:
+                raise TargetConfigError(
+                    f"target id mismatch: file {path.name} declares {target.target_id}"
+                )
+            previous = source_paths.get(target.target_id)
+            if previous is not None:
+                raise TargetConfigError(
+                    f"duplicate target id {target.target_id}: {previous.name}, {path.name}"
+                )
+            targets[target.target_id] = target
+            source_paths[target.target_id] = path
+        return [targets[target_id] for target_id in sorted(targets)]
