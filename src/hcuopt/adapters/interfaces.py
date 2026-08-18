@@ -71,6 +71,8 @@ class ExecutionAdapter(Protocol):
         output_dir: Path,
     ) -> ExecutionResult: ...
 
+    def cancel(self, request_id: UUID) -> Mapping[str, Any]: ...
+
 
 class SourceManagerAdapter(Protocol):
     provenance: AdapterProvenance
@@ -106,3 +108,5 @@ class ArtifactStoreAdapter(Protocol):
 
 class JobHandler(Protocol):
     def handle(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]: ...
+
+    def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]: ...

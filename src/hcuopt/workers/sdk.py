@@ -66,7 +66,12 @@ class ControlPlaneClient:
         )
         response.raise_for_status()
 
-    def fail(self, job: dict[str, Any], exc: Exception) -> None:
+    def fail(
+        self,
+        job: dict[str, Any],
+        exc: Exception,
+        cleanup_evidence: dict[str, Any] | None = None,
+    ) -> None:
         response = self.client.post(
             f"/v1/jobs/{job['job_id']}/fail",
             json={
@@ -75,6 +80,22 @@ class ControlPlaneClient:
                 "error_code": exc.__class__.__name__,
                 "message": str(exc),
                 "retryable": True,
+                "cleanup_evidence": cleanup_evidence,
+            },
+        )
+        response.raise_for_status()
+
+    def report_cleanup(
+        self,
+        resource_id: str,
+        fencing_token: int,
+        cleanup_evidence: dict[str, Any],
+    ) -> None:
+        response = self.client.post(
+            f"/v1/resources/{resource_id}/cleanup",
+            json={
+                "fencing_token": fencing_token,
+                "cleanup_evidence": cleanup_evidence,
             },
         )
         response.raise_for_status()
@@ -130,30 +151,50 @@ class Worker:
             return False
         if job is None:
             return False
+        payload = dict(job["payload"])
+        payload["_job_context"] = {
+            "job_id": job["job_id"],
+            "attempt_number": job["attempts"],
+            "resource_id": job.get("resource_id"),
+            "fencing_token": job.get("fencing_token"),
+        }
         heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
-            args=(job, heartbeat_stop),
+            args=(job, heartbeat_stop, lease_lost, payload),
             daemon=True,
         )
         try:
             self.client.heartbeat(self.worker_id, job)
             heartbeat.start()
-            payload = dict(job["payload"])
-            payload["_job_context"] = {
-                "job_id": job["job_id"],
-                "attempt_number": job["attempts"],
-                "resource_id": job.get("resource_id"),
-                "fencing_token": job.get("fencing_token"),
-            }
             result = self.handlers.handle(job["job_type"], payload)
+            if lease_lost.is_set():
+                raise RuntimeError("job lease was lost while the handler was running")
+            self.client.heartbeat(self.worker_id, job)
+            cleanup_evidence = result.get("cleanup_evidence")
+            if (
+                job.get("resource_id") is not None
+                and job.get("fencing_token") is not None
+                and not (
+                    isinstance(cleanup_evidence, dict)
+                    and isinstance(cleanup_evidence.get("fence"), dict)
+                    and isinstance(cleanup_evidence.get("health"), dict)
+                )
+            ):
+                result = {
+                    **result,
+                    "cleanup_evidence": self._cleanup_job(job, payload),
+                }
             self.client.complete(job, result)
         except Exception as exc:
             LOGGER.exception("worker %s failed job %s", self.worker_id, job["job_id"])
+            cleanup_evidence = self._cleanup_job(job, payload)
             try:
-                self.client.fail(job, exc)
+                self.client.fail(job, exc, cleanup_evidence or None)
             except Exception:
                 LOGGER.exception("failed to report job failure")
+                self._report_cleanup_after_handler_exit(job, cleanup_evidence)
             return False
         finally:
             heartbeat_stop.set()
@@ -161,13 +202,58 @@ class Worker:
                 heartbeat.join(timeout=1)
         return True
 
-    def _heartbeat_loop(self, job: dict[str, Any], stop: threading.Event) -> None:
+    def _heartbeat_loop(
+        self,
+        job: dict[str, Any],
+        stop: threading.Event,
+        lease_lost: threading.Event,
+        payload: dict[str, Any],
+    ) -> None:
         while not stop.wait(self.heartbeat_seconds):
             try:
                 self.client.heartbeat(self.worker_id, job)
             except Exception:
                 LOGGER.exception("heartbeat failed for job %s", job["job_id"])
+                lease_lost.set()
+                self._cleanup_job(job, payload)
                 return
+
+    def _cleanup_job(
+        self, job: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        cleanup = getattr(self.handlers, "cleanup", None)
+        if not callable(cleanup):
+            return {}
+        try:
+            result = cleanup(job["job_type"], payload)
+        except Exception:
+            LOGGER.exception("cleanup failed for job %s", job["job_id"])
+            return {
+                "fence": {"fenced": False, "error": "handler cleanup raised"},
+                "health": {"healthy": False, "quarantined": True},
+            }
+        return dict(result)
+
+    def _report_cleanup_after_handler_exit(
+        self,
+        job: dict[str, Any],
+        cleanup_evidence: dict[str, Any],
+    ) -> None:
+        resource_id = job.get("resource_id")
+        fencing_token = job.get("fencing_token")
+        if not cleanup_evidence or resource_id is None or fencing_token is None:
+            return
+        try:
+            self.client.report_cleanup(
+                resource_id,
+                int(fencing_token),
+                cleanup_evidence,
+            )
+        except Exception:
+            LOGGER.exception(
+                "failed to report cleanup for quarantined resource %s",
+                resource_id,
+            )
 
     def run_forever(self, poll_seconds: float = 1.0) -> None:
         while not self.stop_event.is_set():

@@ -149,6 +149,7 @@ class FakeResourceCleaner:
             "processes_terminated": True,
             "clocks_restored": True,
             "memory_released": True,
+            "fenced": True,
             "synthetic": True,
         }
 
@@ -182,6 +183,14 @@ class FakeExecutionAdapter:
             adapter_provenance=self.provenance,
             synthetic=True,
         )
+
+    def cancel(self, request_id: UUID) -> Mapping[str, Any]:
+        return {
+            "request_id": str(request_id),
+            "cancel_requested": True,
+            "owned_execution_found": False,
+            "synthetic": True,
+        }
 
 
 class FakeSourceManager:

@@ -26,6 +26,7 @@ from hcuopt.contracts.v1 import (
     JobFail,
     JobHeartbeat,
     ReapResult,
+    ResourceCleanupReport,
     Stage0EvidenceRequest,
     Stage0ReportView,
     TaskCreate,
@@ -318,6 +319,7 @@ def create_app(
             payload.fencing_token,
             {"code": payload.error_code, "message": payload.message},
             payload.retryable,
+            payload.cleanup_evidence,
         )
 
     @application.post("/v1/jobs/{job_id}/cancel")
@@ -341,6 +343,18 @@ def create_app(
     @application.get("/v1/resources")
     def list_resources(request: Request) -> list[dict[str, Any]]:
         return repo(request).list_resources()
+
+    @application.post("/v1/resources/{resource_id}/cleanup")
+    def report_resource_cleanup(
+        resource_id: str,
+        payload: ResourceCleanupReport,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).report_resource_cleanup(
+            resource_id,
+            payload.fencing_token,
+            payload.cleanup_evidence,
+        )
 
     @application.get("/v1/leases")
     def list_leases(request: Request) -> list[dict[str, Any]]:

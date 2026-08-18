@@ -44,3 +44,15 @@ class SourceIntegrityError(SourceArtifactError):
 
 class ArtifactIntegrityError(SourceArtifactError):
     """An artifact does not match its recorded content hash."""
+
+
+class ExecutionSafetyError(ContractError):
+    """A real execution request cannot be launched without violating a safety rule."""
+
+
+class ImageIdentityError(ExecutionSafetyError):
+    """The local container image does not match the locked digest and image ID."""
+
+
+class ResourceCleanupError(ExecutionSafetyError):
+    """An owned process or container could not be fenced and cleaned safely."""

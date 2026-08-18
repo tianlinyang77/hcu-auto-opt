@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -842,18 +842,25 @@ class PostgresRepository:
         connection: Connection[dict[str, Any]],
         job: dict[str, Any],
         reason: str,
+        cleanup_evidence: dict[str, Any] | None = None,
     ) -> None:
         resource_id = job["resource_id"]
         if resource_id is None:
             return
-        evidence = {"reason": reason, "cleaner": "fake-resource-cleaner-v1", "healthy": True}
-        connection.execute(
+        evidence = {
+            "reason": reason,
+            **(cleanup_evidence or {}),
+            "healthy": _cleanup_is_healthy(cleanup_evidence),
+        }
+        fenced = connection.execute(
             """
             UPDATE resources SET state = 'fencing', updated_at = now()
             WHERE resource_id = %s AND owner_job_id = %s AND fencing_token = %s
             """,
             (resource_id, job["job_id"], job["fencing_token"]),
         )
+        if fenced.rowcount != 1:
+            return
         connection.execute(
             """
             UPDATE resources SET state = 'health_check', cleanup_evidence = %s,
@@ -864,11 +871,15 @@ class PostgresRepository:
         )
         connection.execute(
             """
-            UPDATE resources SET state = 'available', owner_job_id = NULL,
+            UPDATE resources SET state = %s, owner_job_id = NULL,
                 lease_id = NULL, expires_at = NULL, updated_at = now()
-            WHERE resource_id = %s
+            WHERE resource_id = %s AND fencing_token = %s
             """,
-            (resource_id,),
+            (
+                "available" if evidence["healthy"] else "quarantined",
+                resource_id,
+                job["fencing_token"],
+            ),
         )
 
     def complete_job(
@@ -902,7 +913,15 @@ class PostgresRepository:
                 """,
                 (Jsonb(result), job_id),
             ).fetchone()
-            self._release_resource(connection, job, "job_completed")
+            cleanup_evidence = result.get("cleanup_evidence")
+            if not isinstance(cleanup_evidence, dict):
+                cleanup_evidence = None
+            self._release_resource(
+                connection,
+                job,
+                "job_completed",
+                cleanup_evidence,
+            )
             connection.execute(
                 "INSERT INTO job_events (job_id, event_type) VALUES (%s, 'succeeded')",
                 (job_id,),
@@ -917,6 +936,7 @@ class PostgresRepository:
         fencing_token: int | None,
         error: dict[str, Any],
         retryable: bool,
+        cleanup_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.connection() as connection:
             job = self._assert_job_owner(connection, job_id, claim_token, fencing_token)
@@ -937,7 +957,12 @@ class PostgresRepository:
                 """,
                 (state, Jsonb(error), retry, retry, job_id),
             ).fetchone()
-            self._release_resource(connection, job, "job_failed")
+            self._release_resource(
+                connection,
+                job,
+                "job_failed",
+                cleanup_evidence,
+            )
             connection.execute(
                 """
                 INSERT INTO job_events (job_id, event_type, details)
@@ -1793,6 +1818,49 @@ class PostgresRepository:
             "evaluations": evaluations,
         }
 
+    def report_resource_cleanup(
+        self,
+        resource_id: str,
+        fencing_token: int,
+        cleanup_evidence: dict[str, Any],
+    ) -> dict[str, Any]:
+        healthy = _cleanup_is_healthy(cleanup_evidence)
+        evidence = {**cleanup_evidence, "healthy": healthy, "reason": "cleanup_reported"}
+        with self.connection() as connection:
+            resource = connection.execute(
+                "SELECT * FROM resources WHERE resource_id = %s FOR UPDATE",
+                (resource_id,),
+            ).fetchone()
+            if resource is None:
+                raise NotFound(f"resource not found: {resource_id}")
+            if int(resource["fencing_token"]) != fencing_token:
+                raise StaleFencingToken("resource cleanup used a stale fencing token")
+            if resource["state"] not in {
+                "fencing",
+                "health_check",
+                "quarantined",
+            }:
+                raise Conflict(
+                    f"resource cleanup cannot be reported from state {resource['state']}"
+                )
+            row = connection.execute(
+                """
+                UPDATE resources
+                SET state = %s, owner_job_id = NULL, lease_id = NULL,
+                    expires_at = NULL, cleanup_evidence = %s, updated_at = now()
+                WHERE resource_id = %s AND fencing_token = %s
+                RETURNING *
+                """,
+                (
+                    "available" if healthy else "quarantined",
+                    Jsonb(evidence),
+                    resource_id,
+                    fencing_token,
+                ),
+            ).fetchone()
+        assert row is not None
+        return row
+
     def list_resources(self) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return connection.execute("SELECT * FROM resources ORDER BY resource_id").fetchall()
@@ -1831,3 +1899,16 @@ class PostgresRepository:
                 """,
                 parameters,
             ).fetchall()
+
+
+def _cleanup_is_healthy(evidence: Mapping[str, Any] | None) -> bool:
+    if not evidence:
+        return False
+    fence = evidence.get("fence")
+    health = evidence.get("health")
+    return (
+        isinstance(fence, Mapping)
+        and isinstance(health, Mapping)
+        and fence.get("fenced") is True
+        and health.get("healthy") is True
+    )

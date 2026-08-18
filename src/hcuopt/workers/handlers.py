@@ -33,6 +33,29 @@ class JobHandlers:
             raise ValueError(f"unsupported job type: {job_type}")
         return handler(payload)
 
+    def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        context = payload.get("_job_context", {})
+        resource_id = context.get("resource_id")
+        fencing_token = context.get("fencing_token")
+        request_id = payload.get("execution_request_id")
+        if (
+            job_type != "framework_smoke"
+            and (resource_id is None or fencing_token is None)
+        ):
+            return {}
+        cancellation: dict[str, Any] | None = None
+        if request_id is not None:
+            executor = self.adapters.require("executor")
+            cancellation = dict(executor.cancel(UUID(str(request_id))))
+        cleanup = self._resource_cleanup(
+            resource_id,
+            fencing_token,
+            payload.get("target"),
+        )
+        if cancellation is not None:
+            cleanup["execution_cancel"] = cancellation
+        return cleanup
+
     def handle_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
         profiler = self.adapters.require("profiler")
         result = dict(profiler.profile(payload["workload_id"], self.output_dir)[0])
@@ -173,23 +196,30 @@ class JobHandlers:
             fencing_token=fencing_token,
             container_image=target.inference_image.immutable_reference,
         )
-        execution = executor.execute(request, target, self.output_dir)
-        verdict = dict(
-            evaluator.correctness(
-                {
-                    "variant": "framework-noop",
-                    "artifact": artifact.model_dump(mode="json"),
-                    "baseline_reference": target.source_baseline.commit,
-                },
-                self.output_dir,
+        try:
+            execution = executor.execute(request, target, self.output_dir)
+            if execution.status == "succeeded":
+                verdict = dict(
+                    evaluator.correctness(
+                        {
+                            "variant": "framework-noop",
+                            "artifact": artifact.model_dump(mode="json"),
+                            "baseline_reference": target.source_baseline.commit,
+                        },
+                        self.output_dir,
+                    )
+                )
+            else:
+                verdict = {
+                    "passed": False,
+                    "reason": f"execution ended with status {execution.status}",
+                }
+        finally:
+            cleanup = self._resource_cleanup(
+                resource_id,
+                fencing_token,
+                target.model_dump(mode="json"),
             )
-        )
-        cleanup: dict[str, Any] = {}
-        if resource_id is not None and fencing_token is not None:
-            cleanup["fence"] = dict(cleaner.fence(resource_id, int(fencing_token)))
-        cleanup["health"] = dict(
-            cleaner.health_check(resource_id or target.execution_host.name)
-        )
         passed = (
             bool(verdict["passed"])
             and execution.status == "succeeded"
@@ -268,6 +298,51 @@ class JobHandlers:
             synthetic=synthetic,
         )
         return result.model_dump(mode="json")
+
+    def _resource_cleanup(
+        self,
+        resource_id: str | None,
+        fencing_token: int | None,
+        raw_target: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        cleaner = self.adapters.require("resource_cleaner")
+        target_name = (
+            TargetSpec.model_validate(raw_target).execution_host.name
+            if raw_target is not None
+            else "unknown-target"
+        )
+        cleanup: dict[str, Any] = {}
+        if resource_id is not None and fencing_token is not None:
+            try:
+                cleanup["fence"] = dict(
+                    cleaner.fence(resource_id, int(fencing_token))
+                )
+            except Exception as exc:
+                cleanup["fence"] = {
+                    "resource_id": resource_id,
+                    "fencing_token": fencing_token,
+                    "fenced": False,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+        else:
+            cleanup["fence"] = {
+                "resource_id": resource_id,
+                "fencing_token": fencing_token,
+                "fenced": True,
+                "not_required": True,
+            }
+        try:
+            cleanup["health"] = dict(
+                cleaner.health_check(resource_id or target_name)
+            )
+        except Exception as exc:
+            cleanup["health"] = {
+                "resource_id": resource_id or target_name,
+                "healthy": False,
+                "quarantined": True,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        return cleanup
 
 
 class FakeJobHandlers(JobHandlers):
