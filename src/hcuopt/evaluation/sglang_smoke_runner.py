@@ -922,6 +922,7 @@ def _finalize_stream(handle: Any, temporary: Path, final_path: Path) -> None:
         os.fsync(handle.fileno())
         handle.close()
     os.replace(temporary, final_path)
+    final_path.chmod(0o644)
 
 
 def _atomic_write_json(path: Path, value: Any) -> None:
@@ -951,6 +952,7 @@ def _atomic_write_json(path: Path, value: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        path.chmod(0o644)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

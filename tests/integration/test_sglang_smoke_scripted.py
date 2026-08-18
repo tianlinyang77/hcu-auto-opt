@@ -72,6 +72,24 @@ def _assert_complete_variant(directory: Path) -> None:
     assert not list(directory.glob("*.tmp"))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX evidence permission semantics")
+def test_evidence_is_host_readable_under_restrictive_umask(tmp_path: Path) -> None:
+    evidence = tmp_path / "restricted-umask"
+    previous_umask = os.umask(0o077)
+    try:
+        spec = _spec(_free_port())
+        spec["seed"] = 0
+        result = runner.run_smoke(spec, evidence)
+    finally:
+        os.umask(previous_umask)
+
+    assert result["status"] == "failed"
+    _assert_complete_variant(evidence)
+    assert {
+        path.name: path.stat().st_mode & 0o777 for path in evidence.iterdir()
+    } == {name: 0o644 for name in runner._evidence_file_names()}
+
+
 def test_runner_retries_ready_generates_once_and_stops_cleanly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -357,7 +357,11 @@ def build_execution_request(
             read_only=True,
         ),
     ]
-    mounts = [*reserved_mounts, *variant.mounts]
+    mounts = [
+        *reserved_mounts,
+        *target.execution_host.runtime_mounts,
+        *variant.mounts,
+    ]
     for mount in mounts:
         _validate_absolute_posix_path(mount.source, "mount source")
         _validate_absolute_posix_path(mount.target, "mount target")

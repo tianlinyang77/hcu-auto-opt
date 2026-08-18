@@ -44,6 +44,35 @@ def test_locked_target_loads_as_platform_v1() -> None:
         "@sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db"
     )
     assert target.source_baseline.commit == "dad582f28458cd0e11e0be675fbe7fcc7ab65ac1"
+    assert [mount.model_dump() for mount in target.execution_host.runtime_mounts] == [
+        {"source": "/opt/hyhal", "target": "/opt/hyhal", "read_only": True}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("runtime_mount", "message"),
+    (
+        (
+            {"source": "/opt/hyhal", "target": "/opt/hyhal", "read_only": False},
+            "must be read-only",
+        ),
+        (
+            {"source": "/data/runtime", "target": "/opt/runtime", "read_only": True},
+            "prohibited_work_root",
+        ),
+        (
+            {"source": "/opt/../data/runtime", "target": "/opt/runtime"},
+            "clean absolute paths",
+        ),
+    ),
+)
+def test_target_rejects_unsafe_runtime_mounts(
+    runtime_mount: dict[str, object], message: str
+) -> None:
+    raw = yaml.safe_load(TARGET_PATH.read_text(encoding="utf-8"))
+    raw["execution_host"]["runtime_mounts"] = [runtime_mount]
+    with pytest.raises(ValidationError, match=message):
+        TargetSpec.model_validate(raw)
 
 
 def test_target_rejects_tag_only_or_mismatched_immutable_image() -> None:

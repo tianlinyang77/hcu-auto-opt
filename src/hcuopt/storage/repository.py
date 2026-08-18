@@ -939,6 +939,15 @@ class PostgresRepository:
         cleanup_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.connection() as connection:
+            job_reference = connection.execute(
+                "SELECT task_id FROM jobs WHERE job_id = %s", (job_id,)
+            ).fetchone()
+            if job_reference is None:
+                raise NotFound(f"job not found: {job_id}")
+            connection.execute(
+                "SELECT task_id FROM tasks WHERE task_id = %s FOR UPDATE",
+                (job_reference["task_id"],),
+            ).fetchone()
             job = self._assert_job_owner(connection, job_id, claim_token, fencing_token)
             retry = retryable and job["attempts"] < job["max_attempts"]
             state = JobState.QUEUED.value if retry else JobState.FAILED.value
@@ -970,8 +979,103 @@ class PostgresRepository:
                 """,
                 (job_id, "requeued" if retry else "failed", Jsonb(error)),
             )
+            if not retry:
+                self._reject_framework_task_after_job_failure(
+                    connection,
+                    job,
+                    error,
+                )
         assert row is not None
         return row
+
+    def _reject_framework_task_after_job_failure(
+        self,
+        connection: Connection[dict[str, Any]],
+        job: dict[str, Any],
+        error: dict[str, Any],
+    ) -> None:
+        """Atomically converge a terminal Framework Smoke job failure."""
+
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+            (job["task_id"],),
+        ).fetchone()
+        if task is None:
+            raise NotFound(f"task not found: {job['task_id']}")
+        if task["workflow_type"] != WorkflowType.FRAMEWORK_SMOKE.value:
+            return
+
+        current_task_state = TaskState(task["state"])
+        if current_task_state not in {
+            TaskState.REJECTED,
+            TaskState.CANCELLED,
+            TaskState.COMPLETED,
+        }:
+            transition_task(current_task_state, TaskState.REJECTED)
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.REJECTED.value, job["task_id"]),
+            )
+
+        candidate_id: UUID | None = None
+        candidate_target: CandidateState | None = None
+        if job["job_type"] == JobType.NOOP_BUILD.value:
+            candidate_target = CandidateState.BUILD_FAILED
+        elif job["job_type"] == JobType.FRAMEWORK_SMOKE.value:
+            candidate_target = CandidateState.REJECTED
+        if candidate_target is not None:
+            raw_candidate_id = job["payload"].get("candidate_id")
+            if raw_candidate_id is None:
+                raise Conflict(
+                    f"{job['job_type']} job is missing its candidate_id binding"
+                )
+            candidate_id = UUID(str(raw_candidate_id))
+            candidate = connection.execute(
+                "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE",
+                (candidate_id,),
+            ).fetchone()
+            if candidate is None:
+                raise NotFound(f"candidate not found: {candidate_id}")
+            current_candidate_state = CandidateState(candidate["state"])
+            if current_candidate_state not in {
+                candidate_target,
+                CandidateState.BUILD_FAILED,
+                CandidateState.REJECTED,
+            }:
+                transition_candidate(current_candidate_state, candidate_target)
+                connection.execute(
+                    """
+                    UPDATE candidates SET state = %s, updated_at = now()
+                    WHERE candidate_id = %s
+                    """,
+                    (candidate_target.value, candidate_id),
+                )
+
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, event_type, details)
+            VALUES (%s, 'framework_smoke_job_failed', %s)
+            """,
+            (
+                job["task_id"],
+                Jsonb(
+                    {
+                        "job_id": str(job["job_id"]),
+                        "job_type": job["job_type"],
+                        "candidate_id": (
+                            str(candidate_id) if candidate_id is not None else None
+                        ),
+                        "attempts": job["attempts"],
+                        "max_attempts": job["max_attempts"],
+                        "error": error,
+                    }
+                ),
+            ),
+        )
 
     def recover_stale_jobs(self, stale_after_seconds: int = 120) -> list[UUID]:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)

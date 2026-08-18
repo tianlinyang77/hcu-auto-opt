@@ -198,10 +198,14 @@ def test_execution_request_is_digest_locked_leased_and_self_contained() -> None:
     ]
     assert {mount.target for mount in request.mounts} == {
         "/opt/hcuopt/sglang_smoke_runner.py",
+        "/opt/hyhal",
         "/work/input/spec.json",
         "/work/output",
         workload.model_path,
     }
+    runtime_mount = next(mount for mount in request.mounts if mount.target == "/opt/hyhal")
+    assert runtime_mount.source == "/opt/hyhal"
+    assert runtime_mount.read_only is True
 
 
 def test_noop_request_is_bound_to_the_declared_artifact() -> None:

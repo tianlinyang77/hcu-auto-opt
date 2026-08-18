@@ -42,6 +42,10 @@ execution_host:
   observed_host_environment:
     dtk_version: 25.04-rc4
     driver_version: 6.4.0
+  runtime_mounts:
+    - source: /opt/hyhal
+      target: /opt/hyhal
+      read_only: true
 
 measurement_constraints:
   - stage0_must_run_inside_the_locked_inference_image
