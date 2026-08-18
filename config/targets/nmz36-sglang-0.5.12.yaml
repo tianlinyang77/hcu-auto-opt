@@ -52,14 +52,14 @@ measurement_constraints:
 
 blockers:
   - id: exact_image_missing_on_execution_host
-    status: open
-    detail: The locked image digest exists on nmz4 but is not present on nmz36.
+    status: resolved
+    detail: Verified on nmz36 on 2026-08-18; the immutable registry digest and locked image ID both match this Target Lock.
   - id: docker_storage_full
-    status: open
-    detail: nmz36 Docker Root is under the full /data filesystem; no prune or deletion is authorized.
+    status: resolved
+    detail: Verified on nmz36 on 2026-08-18; Docker Root remains /data/docker and /data has about 1.4 TiB available, so no cleanup or migration is required for F1.
   - id: device_isolation_not_reserved
     status: open
-    detail: Existing containers map all accelerator devices and may contend for device 7.
+    detail: HCU 7 is currently healthy and idle, but three running containers map all accelerator devices and no F1 or Stage 0 reservation window has been recorded.
   - id: stage0_not_measured
     status: open
     detail: Timer resolution, noise sigma/CV/MDE, profiler capability, and hot-patch recovery remain unmeasured.
