@@ -34,20 +34,26 @@ class JobHandlers:
         return handler(payload)
 
     def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if job_type != "framework_smoke":
-            return {}
         context = payload.get("_job_context", {})
-        executor = self.adapters.require("executor")
+        resource_id = context.get("resource_id")
+        fencing_token = context.get("fencing_token")
         request_id = payload.get("execution_request_id")
-        cancellation: dict[str, Any] = {}
+        if (
+            job_type != "framework_smoke"
+            and (resource_id is None or fencing_token is None)
+        ):
+            return {}
+        cancellation: dict[str, Any] | None = None
         if request_id is not None:
+            executor = self.adapters.require("executor")
             cancellation = dict(executor.cancel(UUID(str(request_id))))
         cleanup = self._resource_cleanup(
-            context.get("resource_id"),
-            context.get("fencing_token"),
+            resource_id,
+            fencing_token,
             payload.get("target"),
         )
-        cleanup["execution_cancel"] = cancellation
+        if cancellation is not None:
+            cleanup["execution_cancel"] = cancellation
         return cleanup
 
     def handle_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
