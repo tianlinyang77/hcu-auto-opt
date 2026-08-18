@@ -13,7 +13,7 @@ down:
 	docker compose down
 
 demo:
-	docker compose run --rm api dcuopt walking-demo --api-url http://api:8000 --external-workers
+	docker compose run --rm api hcuopt walking-demo --api-url http://api:8000 --external-workers
 
 postgres-up:
 	docker compose up -d postgres

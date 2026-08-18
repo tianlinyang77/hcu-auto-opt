@@ -44,7 +44,7 @@
 为什么现在做
 输入 / 输出 Contract
 验收证据
-是否需要 DCU / 独占租约
+是否需要 HCU / 独占租约
 依赖和 Plan B
 负责人 / Reviewer
 ```

@@ -2,24 +2,24 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_USER: dcuopt
-      POSTGRES_PASSWORD: dcuopt
-      POSTGRES_DB: dcuopt
+      POSTGRES_USER: hcuopt
+      POSTGRES_PASSWORD: hcuopt
+      POSTGRES_DB: hcuopt
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dcuopt -d dcuopt"]
+      test: ["CMD-SHELL", "pg_isready -U hcuopt -d hcuopt"]
       interval: 2s
       timeout: 3s
       retries: 20
     volumes:
-      - dcuopt-postgres:/var/lib/postgresql/data
+      - hcuopt-postgres:/var/lib/postgresql/data
 
   api:
     build: .
     environment:
-      DCUOPT_DATABASE_URL: postgresql://dcuopt:dcuopt@postgres:5432/dcuopt
-      DCUOPT_AUTO_MIGRATE: "true"
+      HCUOPT_DATABASE_URL: postgresql://hcuopt:hcuopt@postgres:5432/hcuopt
+      HCUOPT_AUTO_MIGRATE: "true"
     ports:
       - "8000:8000"
     depends_on:
@@ -37,14 +37,14 @@ services:
 
   agent-worker:
     build: .
-    command: ["dcuopt", "worker", "--id", "agent-1", "--type", "agent", "--api-url", "http://api:8000"]
+    command: ["hcuopt", "worker", "--id", "agent-1", "--type", "agent", "--api-url", "http://api:8000"]
     depends_on:
       api:
         condition: service_healthy
 
   build-worker:
     build: .
-    command: ["dcuopt", "worker", "--id", "build-1", "--type", "build", "--api-url", "http://api:8000"]
+    command: ["hcuopt", "worker", "--id", "build-1", "--type", "build", "--api-url", "http://api:8000"]
     depends_on:
       api:
         condition: service_healthy
@@ -52,10 +52,10 @@ services:
   gpu-worker:
     build: .
     command:
-      ["dcuopt", "worker", "--id", "gpu-1", "--type", "gpu", "--resource-id", "fake-dcu-0", "--api-url", "http://api:8000"]
+      ["hcuopt", "worker", "--id", "gpu-1", "--type", "gpu", "--resource-id", "fake-hcu-0", "--api-url", "http://api:8000"]
     depends_on:
       api:
         condition: service_healthy
 
 volumes:
-  dcuopt-postgres:
+  hcuopt-postgres:

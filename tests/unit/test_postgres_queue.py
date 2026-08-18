@@ -1,6 +1,6 @@
 import unittest
 
-from dcuopt.storage.postgres_queue import claim_jobs_sql
+from hcuopt.storage.postgres_queue import claim_jobs_sql
 
 
 class PostgresQueueContractTests(unittest.TestCase):

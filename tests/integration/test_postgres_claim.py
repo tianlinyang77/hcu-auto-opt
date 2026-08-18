@@ -6,19 +6,19 @@ from uuid import uuid4
 
 import pytest
 
-from dcuopt.contracts.platform_v1 import (
+from hcuopt.contracts.platform_v1 import (
     AdapterProvenance,
     EvaluationRun,
     ExecutionAttempt,
 )
-from dcuopt.contracts.v1 import (
+from hcuopt.contracts.v1 import (
     BaselineCreate,
     JobCreate,
     Stage0EvidenceRequest,
     TaskCreate,
     WorkerRegister,
 )
-from dcuopt.domain.enums import (
+from hcuopt.domain.enums import (
     GateResult,
     HotPatchCapability,
     JobType,
@@ -27,8 +27,8 @@ from dcuopt.domain.enums import (
     ProjectMode,
     WorkerType,
 )
-from dcuopt.domain.errors import Conflict, StaleClaimToken
-from dcuopt.storage.repository import PostgresRepository
+from hcuopt.domain.errors import Conflict, StaleClaimToken
+from hcuopt.storage.repository import PostgresRepository
 
 try:
     import psycopg
@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - optional until dev dependencies are in
     psycopg = None
 
 
-DATABASE_URL = os.getenv("DCUOPT_DATABASE_URL")
+DATABASE_URL = os.getenv("HCUOPT_DATABASE_URL")
 
 
 @unittest.skipUnless(DATABASE_URL and psycopg, "requires PostgreSQL and psycopg")
@@ -108,7 +108,7 @@ class PostgresClaimIntegrationTests(unittest.TestCase):
             WorkerRegister(
                 worker_id="gpu-worker",
                 worker_type=WorkerType.GPU,
-                capabilities={"resource_id": "fake-dcu-0"},
+                capabilities={"resource_id": "fake-hcu-0"},
             )
         )
         self.repository.enqueue_job(

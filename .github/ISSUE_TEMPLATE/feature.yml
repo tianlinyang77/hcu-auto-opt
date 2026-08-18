@@ -27,7 +27,7 @@ body:
     attributes:
       label: 资源需求
       options:
-        - 无 DCU
+        - 无 HCU
         - Functional Lease
         - Measurement Lease
         - Topology Lease

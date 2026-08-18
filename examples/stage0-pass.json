@@ -2,7 +2,7 @@
   "measurement": "pass",
   "profiler": "full",
   "hot_patch": "hot_patch",
-  "hardware_fingerprint": "replace-with-real-dcu-fingerprint",
+  "hardware_fingerprint": "replace-with-real-hcu-fingerprint",
   "software_fingerprint": "replace-with-real-dtk-framework-image-fingerprint",
   "timer_resolution_ns": 100.0,
   "noise_sigma_ns": 250.0,

@@ -4,7 +4,7 @@ F0.5 是 F1 真实 No-op 框架开始前的一次小范围契约修订。它不�
 Profiler 或任何性能优化，只保证后续真实执行不会覆盖复测历史，也不会把 Fake 数据误报成性能结果。
 
 公共契约修订号为 `platform-v1.1`，模块路径仍为
-`src/dcuopt/contracts/platform_v1.py`。
+`src/hcuopt/contracts/platform_v1.py`。
 
 ## 新增契约
 

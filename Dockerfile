@@ -10,4 +10,4 @@ RUN python -m pip install --no-cache-dir .
 
 USER 65532:65532
 EXPOSE 8000
-CMD ["dcuopt", "api", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["hcuopt", "api", "--host", "0.0.0.0", "--port", "8000"]

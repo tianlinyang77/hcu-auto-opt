@@ -3,18 +3,18 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from dcuopt.adapters.fake import (
+from hcuopt.adapters.fake import (
     FakeCandidateGenerator,
     FakeEvaluator,
     FakeMeasurementHarness,
 )
-from dcuopt.api.app import create_app
-from dcuopt.contracts.v1 import TaskCreate
-from dcuopt.domain.enums import CandidateState
-from dcuopt.domain.transitions import transition_candidate
-from dcuopt.orchestrator.walking import WalkingSkeletonCoordinator
-from dcuopt.storage.migrations import migration_sql
-from dcuopt.workers.handlers import FakeJobHandlers
+from hcuopt.api.app import create_app
+from hcuopt.contracts.v1 import TaskCreate
+from hcuopt.domain.enums import CandidateState
+from hcuopt.domain.transitions import transition_candidate
+from hcuopt.orchestrator.walking import WalkingSkeletonCoordinator
+from hcuopt.storage.migrations import migration_sql
+from hcuopt.workers.handlers import FakeJobHandlers
 
 
 def test_mvp_contract_rejects_unknown_input_fields() -> None:

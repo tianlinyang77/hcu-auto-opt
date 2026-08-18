@@ -6,9 +6,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from dcuopt.adapters.fake import FakeExecutionAdapter, FakeSourceManager
-from dcuopt.cli import main
-from dcuopt.contracts.platform_v1 import (
+from hcuopt.adapters.fake import FakeExecutionAdapter, FakeSourceManager
+from hcuopt.cli import main
+from hcuopt.contracts.platform_v1 import (
     PLATFORM_CONTRACT_VERSION,
     AdapterProvenance,
     ArtifactManifest,
@@ -19,9 +19,9 @@ from dcuopt.contracts.platform_v1 import (
     MeasurementSeries,
     TargetSpec,
 )
-from dcuopt.domain.enums import LeaseScope
-from dcuopt.domain.errors import TargetConfigError
-from dcuopt.targets import TargetCatalog, load_target
+from hcuopt.domain.enums import LeaseScope
+from hcuopt.domain.errors import TargetConfigError
+from hcuopt.targets import TargetCatalog, load_target
 
 ROOT = Path(__file__).parents[2]
 TARGET_PATH = ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml"

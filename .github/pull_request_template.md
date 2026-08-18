@@ -12,7 +12,7 @@
 
 ## 硬件与测量
 
-- [ ] 不需要 DCU
+- [ ] 不需要 HCU
 - [ ] 使用 Functional Lease
 - [ ] 使用 Measurement Lease，并通过唯一 Harness
 - [ ] 使用 Topology Lease
