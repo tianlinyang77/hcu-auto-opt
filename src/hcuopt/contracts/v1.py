@@ -389,6 +389,20 @@ class PairedFrameworkSmokeResult(ContractModel):
         for name in ("fence", "health"):
             if self.cleanup_evidence.get(name) != final_cleanup.get(name):
                 raise ValueError("top-level cleanup state must match final noop cleanup")
+        if self.evaluation.passed is True:
+            for name, item in by_variant.items():
+                if item.execution_result.status != "succeeded":
+                    raise ValueError(
+                        f"passed framework smoke requires successful {name} execution"
+                    )
+                if item.cleanup_evidence["fence"].get("fenced") is not True:
+                    raise ValueError(
+                        f"passed framework smoke requires successful {name} fencing"
+                    )
+                if item.cleanup_evidence["health"].get("healthy") is not True:
+                    raise ValueError(
+                        f"passed framework smoke requires healthy {name} cleanup"
+                    )
         return self
 
 

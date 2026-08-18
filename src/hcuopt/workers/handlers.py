@@ -6,6 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.interfaces import PairedFrameworkSmokeEvaluator
 from hcuopt.adapters.registry import AdapterRegistry
+from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
     EvaluationRun,
@@ -369,6 +370,10 @@ class JobHandlers:
                 str(resource_id),
                 int(fencing_token),
                 target.model_dump(mode="json"),
+            )
+        if not cleanup_is_healthy(baseline_cleanup):
+            raise ExecutionSafetyError(
+                "baseline cleanup or health check failed; refusing to launch no-op"
             )
         self._require_live_lease(context)
         try:

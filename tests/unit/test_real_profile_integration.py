@@ -162,6 +162,110 @@ def test_real_evaluator_builds_two_distinct_container_requests(tmp_path: Path) -
     assert plan.baseline_evidence_dir != plan.noop_evidence_dir
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX host paths")
+def test_real_evaluator_rejects_tampered_noop_artifact(tmp_path: Path) -> None:
+    runner_path = tmp_path / "sglang_smoke_runner.py"
+    runner_path.write_text("# fixture\n", encoding="utf-8")
+    artifact_path = tmp_path / "noop.tar"
+    artifact_path.write_bytes(b"tampered")
+    artifact = ArtifactManifest(
+        candidate_id=uuid4(),
+        kind="noop-source-archive",
+        uri=artifact_path.as_uri(),
+        content_hash="sha256:" + hashlib.sha256(b"original").hexdigest(),
+    )
+    host = TARGET.execution_host.model_copy(update={"work_root": tmp_path.as_posix()})
+    target = TARGET.model_copy(update={"execution_host": host})
+    evaluator = SGLangSmokeEvaluator(
+        workload_path=WORKLOAD,
+        runner_host_path=runner_path,
+    )
+
+    with pytest.raises(ValueError, match="content hash does not match"):
+        evaluator.prepare_framework_smoke(
+            target=target,
+            artifact=artifact,
+            output_dir=tmp_path / "results",
+            task_id=uuid4(),
+            evaluation_run_id=uuid4(),
+            attempt_number=1,
+            baseline_request_id=uuid4(),
+            noop_request_id=uuid4(),
+            resource_id="hcu-7",
+            fencing_token=1,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX symbolic links")
+def test_real_evaluator_rejects_symlinked_noop_artifact(tmp_path: Path) -> None:
+    runner_path = tmp_path / "sglang_smoke_runner.py"
+    runner_path.write_text("# fixture\n", encoding="utf-8")
+    target_path = tmp_path / "published-noop.tar"
+    target_path.write_bytes(b"noop")
+    artifact_path = tmp_path / "noop.tar"
+    artifact_path.symlink_to(target_path)
+    artifact = ArtifactManifest(
+        candidate_id=uuid4(),
+        kind="noop-source-archive",
+        uri=artifact_path.as_uri(),
+        content_hash="sha256:" + hashlib.sha256(b"noop").hexdigest(),
+    )
+    host = TARGET.execution_host.model_copy(update={"work_root": tmp_path.as_posix()})
+    target = TARGET.model_copy(update={"execution_host": host})
+    evaluator = SGLangSmokeEvaluator(
+        workload_path=WORKLOAD,
+        runner_host_path=runner_path,
+    )
+
+    with pytest.raises(ValueError, match="cannot be a symbolic link"):
+        evaluator.prepare_framework_smoke(
+            target=target,
+            artifact=artifact,
+            output_dir=tmp_path / "results",
+            task_id=uuid4(),
+            evaluation_run_id=uuid4(),
+            attempt_number=1,
+            baseline_request_id=uuid4(),
+            noop_request_id=uuid4(),
+            resource_id="hcu-7",
+            fencing_token=1,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX host paths")
+def test_real_evaluator_rejects_wrong_artifact_kind(tmp_path: Path) -> None:
+    runner_path = tmp_path / "sglang_smoke_runner.py"
+    runner_path.write_text("# fixture\n", encoding="utf-8")
+    artifact_path = tmp_path / "noop.tar"
+    artifact_path.write_bytes(b"noop")
+    artifact = ArtifactManifest(
+        candidate_id=uuid4(),
+        kind="shared-library",
+        uri=artifact_path.as_uri(),
+        content_hash="sha256:" + hashlib.sha256(b"noop").hexdigest(),
+    )
+    host = TARGET.execution_host.model_copy(update={"work_root": tmp_path.as_posix()})
+    target = TARGET.model_copy(update={"execution_host": host})
+    evaluator = SGLangSmokeEvaluator(
+        workload_path=WORKLOAD,
+        runner_host_path=runner_path,
+    )
+
+    with pytest.raises(ValueError, match="requires a no-op source archive"):
+        evaluator.prepare_framework_smoke(
+            target=target,
+            artifact=artifact,
+            output_dir=tmp_path / "results",
+            task_id=uuid4(),
+            evaluation_run_id=uuid4(),
+            attempt_number=1,
+            baseline_request_id=uuid4(),
+            noop_request_id=uuid4(),
+            resource_id="hcu-7",
+            fencing_token=1,
+        )
+
+
 def test_real_evaluator_builds_dual_attempt_evidence(tmp_path: Path) -> None:
     root = tmp_path / "attempt-0001"
     baseline_dir = root / "baseline"
@@ -411,6 +515,24 @@ def test_handler_runs_baseline_then_noop_and_returns_paired_contract(tmp_path: P
     with pytest.raises(ValidationError, match="bind both variants"):
         PairedFrameworkSmokeResult.model_validate(detached_cleanup)
 
+    unhealthy_pass = result.model_dump(mode="json")
+    unhealthy_pass["executions"][0]["cleanup_evidence"]["health"]["healthy"] = False
+    unhealthy_pass["cleanup_evidence"]["variants"]["baseline"]["health"][
+        "healthy"
+    ] = False
+    with pytest.raises(ValidationError, match="healthy baseline cleanup"):
+        PairedFrameworkSmokeResult.model_validate(unhealthy_pass)
+
+    failed_execution_pass = result.model_dump(mode="json")
+    failed_execution_pass["executions"][0]["execution_result"].update(
+        {"status": "failed", "exit_code": 1}
+    )
+    failed_execution_pass["executions"][0]["execution_attempt"].update(
+        {"status": "failed", "exit_code": 1}
+    )
+    with pytest.raises(ValidationError, match="successful baseline execution"):
+        PairedFrameworkSmokeResult.model_validate(failed_execution_pass)
+
 
 def test_handler_does_not_launch_noop_after_lease_loss(tmp_path: Path) -> None:
     lease_lost = threading.Event()
@@ -517,3 +639,100 @@ def test_handler_does_not_launch_noop_after_lease_loss(tmp_path: Path) -> None:
     )
     assert cleaner.fences == 1
     assert cleaner.health_checks == 1
+
+
+def test_handler_does_not_launch_noop_after_unhealthy_baseline_cleanup(
+    tmp_path: Path,
+) -> None:
+    candidate_id = uuid4()
+    artifact = ArtifactManifest(
+        candidate_id=candidate_id,
+        kind="noop-source-archive",
+        uri=(tmp_path / "noop.tar").as_uri(),
+        content_hash="sha256:" + "d" * 64,
+    )
+
+    class Executor:
+        provenance = _provenance("executor")
+
+        def __init__(self) -> None:
+            self.requests: list[ExecutionRequest] = []
+
+        def execute(self, request, target, output_dir):
+            self.requests.append(request)
+            return _execution(request)
+
+        def cancel(self, request_id):
+            return {"request_id": str(request_id), "owned_execution_found": False}
+
+    class Cleaner:
+        provenance = _provenance("resource_cleaner")
+
+        def fence(self, resource_id, fencing_token):
+            return {"resource_id": resource_id, "fenced": False}
+
+        def health_check(self, resource_id):
+            return {"resource_id": resource_id, "healthy": False}
+
+    class Evaluator:
+        provenance = _provenance("evaluator")
+
+        def prepare_framework_smoke(self, **values):
+            common = {
+                "target_id": TARGET.target_id,
+                "argv": ["python", "runner.py"],
+                "working_directory": "/",
+                "lease_scope": LeaseScope.EXCLUSIVE,
+                "resource_id": values["resource_id"],
+                "fencing_token": values["fencing_token"],
+                "container_image": TARGET.inference_image.immutable_reference,
+            }
+            return SimpleNamespace(
+                baseline_request=ExecutionRequest(
+                    request_id=values["baseline_request_id"], **common
+                ),
+                noop_request=ExecutionRequest(
+                    request_id=values["noop_request_id"], **common
+                ),
+            )
+
+        def evaluate_framework_smoke(self, plan, **values):
+            raise AssertionError("no-op evaluation must not run after unhealthy cleanup")
+
+    executor = Executor()
+    handlers = JobHandlers(
+        AdapterRegistry(
+            profile=REAL_FRAMEWORK_SMOKE_PROFILE,
+            executor=executor,
+            evaluator=Evaluator(),
+            resource_cleaner=Cleaner(),
+        ),
+        tmp_path,
+    )
+    payload = {
+        "task_id": str(uuid4()),
+        "candidate_id": str(candidate_id),
+        "round_id": str(uuid4()),
+        "baseline_epoch_id": str(uuid4()),
+        "target": TARGET.model_dump(mode="json"),
+        "target_fingerprint": _target_fingerprint(),
+        "artifact": artifact.model_dump(mode="json"),
+        "evaluation_run_id": str(uuid4()),
+        "baseline_execution_request_id": str(uuid4()),
+        "noop_execution_request_id": str(uuid4()),
+        "evidence_id": str(uuid4()),
+        "retest_ordinal": 0,
+        "_job_context": {
+            "attempt_number": 1,
+            "resource_id": "hcu-7",
+            "fencing_token": 6,
+        },
+    }
+
+    with pytest.raises(ExecutionSafetyError, match="refusing to launch no-op"):
+        handlers.handle_framework_smoke(payload)
+
+    assert len(executor.requests) == 1
+    assert executor.requests[0].request_id == UUID(
+        payload["baseline_execution_request_id"]
+    )

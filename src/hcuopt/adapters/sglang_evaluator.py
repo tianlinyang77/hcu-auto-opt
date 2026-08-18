@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -117,7 +118,22 @@ class SGLangSmokeEvaluator:
         spec_path = input_dir / "spec.json"
         write_workload_spec(spec_path, workload)
 
-        artifact_path = file_uri_to_path(artifact.uri).resolve(strict=True)
+        if artifact.kind != "noop-source-archive":
+            raise ValueError("Framework Smoke requires a no-op source archive")
+        if artifact.candidate_id is None:
+            raise ValueError("no-op artifact must identify its candidate")
+        artifact_source = file_uri_to_path(artifact.uri)
+        if artifact_source.is_symlink():
+            raise ValueError("no-op artifact cannot be a symbolic link")
+        artifact_path = artifact_source.resolve(strict=True)
+        if not artifact_path.is_file():
+            raise ValueError("no-op artifact must be a regular file")
+        actual_artifact_hash = _sha256_file(artifact_path)
+        if actual_artifact_hash != artifact.content_hash:
+            raise ValueError(
+                "no-op artifact content hash does not match ArtifactManifest: "
+                f"{actual_artifact_hash} != {artifact.content_hash}"
+            )
         runner_path = self.runner_host_path.resolve(strict=True)
         baseline = SmokeVariantSpec(
             name="baseline",
@@ -306,3 +322,11 @@ class SGLangSmokeEvaluator:
             baseline_error=baseline_error,
             noop_error=noop_error,
         )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
