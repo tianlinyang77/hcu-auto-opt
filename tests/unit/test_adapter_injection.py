@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -73,6 +74,125 @@ def test_worker_rejects_ambiguous_injection() -> None:
             adapters=AdapterRegistry.fake(),
             handlers=RecordingHandler(),
         )
+
+
+def test_worker_cancels_and_reports_cleanup_when_heartbeat_loses_lease() -> None:
+    cleanup_called = threading.Event()
+
+    class BlockingHandler:
+        def handle(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+            assert cleanup_called.wait(timeout=2)
+            return {"handled": True}
+
+        def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+            cleanup_called.set()
+            return {
+                "fence": {"fenced": True},
+                "health": {"healthy": True},
+            }
+
+    class LeaseLosingClient:
+        def __init__(self) -> None:
+            self.heartbeats = 0
+            self.cleanup_reports = []
+            self.failures = []
+            self.completed = []
+
+        def claim(self, worker_id: str) -> dict[str, Any]:
+            return {
+                "job_id": str(uuid4()),
+                "task_id": str(uuid4()),
+                "job_type": "framework_smoke",
+                "payload": {"execution_request_id": str(uuid4())},
+                "claim_token": str(uuid4()),
+                "fencing_token": 7,
+                "resource_id": "hcu-7",
+                "attempts": 1,
+            }
+
+        def heartbeat(self, worker_id: str, job: dict[str, Any]) -> None:
+            self.heartbeats += 1
+            if self.heartbeats > 1:
+                raise RuntimeError("lease lost")
+
+        def report_cleanup(self, resource_id, fencing_token, cleanup_evidence) -> None:
+            self.cleanup_reports.append((resource_id, fencing_token, cleanup_evidence))
+
+        def complete(self, job, result) -> None:
+            self.completed.append((job, result))
+
+        def fail(self, job, exc, cleanup_evidence=None) -> None:
+            self.failures.append((job, exc, cleanup_evidence))
+
+    handler = BlockingHandler()
+    client = LeaseLosingClient()
+    worker = Worker(
+        "fixture-worker",
+        WorkerType.GPU,
+        "http://127.0.0.1:9",
+        heartbeat_seconds=0.01,
+        handlers=handler,
+    )
+    worker.client = client  # type: ignore[assignment]
+    worker.registered = True
+
+    assert worker.run_once() is False
+    assert cleanup_called.is_set()
+    assert client.completed == []
+    assert client.cleanup_reports == []
+    assert client.failures
+    assert client.failures[0][2]["fence"]["fenced"] is True
+
+
+def test_worker_reports_cleanup_after_stale_failure_rejection() -> None:
+    class Handler:
+        def handle(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("fixture execution failure")
+
+        def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "fence": {"fenced": True},
+                "health": {"healthy": True},
+            }
+
+    class StaleFailureClient:
+        def __init__(self) -> None:
+            self.cleanup_reports = []
+
+        def claim(self, worker_id: str) -> dict[str, Any]:
+            return {
+                "job_id": str(uuid4()),
+                "task_id": str(uuid4()),
+                "job_type": "framework_smoke",
+                "payload": {"execution_request_id": str(uuid4())},
+                "claim_token": str(uuid4()),
+                "fencing_token": 9,
+                "resource_id": "hcu-7",
+                "attempts": 1,
+            }
+
+        def heartbeat(self, worker_id: str, job: dict[str, Any]) -> None:
+            return None
+
+        def fail(self, job, exc, cleanup_evidence=None) -> None:
+            raise RuntimeError("claim is already stale")
+
+        def report_cleanup(self, resource_id, fencing_token, cleanup_evidence) -> None:
+            self.cleanup_reports.append((resource_id, fencing_token, cleanup_evidence))
+
+    client = StaleFailureClient()
+    worker = Worker(
+        "fixture-worker",
+        WorkerType.GPU,
+        "http://127.0.0.1:9",
+        handlers=Handler(),
+    )
+    worker.client = client  # type: ignore[assignment]
+    worker.registered = True
+
+    assert worker.run_once() is False
+    assert client.cleanup_reports[0][:2] == ("hcu-7", 9)
+    assert client.cleanup_reports[0][2]["health"]["healthy"] is True
 
 
 def test_control_plane_uses_an_injected_workflow() -> None:

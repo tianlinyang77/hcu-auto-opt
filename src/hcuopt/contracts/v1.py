@@ -172,6 +172,20 @@ class JobFail(ContractModel):
     error_code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     retryable: bool = True
+    cleanup_evidence: dict[str, Any] | None = None
+
+
+class ResourceCleanupReport(ContractModel):
+    fencing_token: int = Field(ge=1)
+    cleanup_evidence: dict[str, Any]
+
+    @model_validator(mode="after")
+    def require_fence_and_health(self) -> ResourceCleanupReport:
+        if not isinstance(self.cleanup_evidence.get("fence"), dict):
+            raise ValueError("cleanup_evidence requires fence evidence")
+        if not isinstance(self.cleanup_evidence.get("health"), dict):
+            raise ValueError("cleanup_evidence requires health evidence")
+        return self
 
 
 class CandidateView(ReadModel):

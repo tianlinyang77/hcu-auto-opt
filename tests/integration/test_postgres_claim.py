@@ -27,7 +27,7 @@ from hcuopt.domain.enums import (
     ProjectMode,
     WorkerType,
 )
-from hcuopt.domain.errors import Conflict, StaleClaimToken
+from hcuopt.domain.errors import Conflict, StaleClaimToken, StaleFencingToken
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -61,6 +61,34 @@ class PostgresClaimIntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.connection.close()
+
+    def _claim_exclusive_gpu_job(self, suffix: str) -> dict:
+        task = self.repository.create_task(
+            TaskCreate(
+                name=f"gpu-fixture-{suffix}",
+                workload_id="fixture",
+                idempotency_key=f"gpu-task-{suffix}",
+            )
+        )
+        self.repository.register_worker(
+            WorkerRegister(
+                worker_id="gpu-worker",
+                worker_type=WorkerType.GPU,
+                capabilities={"resource_id": "fake-hcu-0"},
+            )
+        )
+        self.repository.enqueue_job(
+            JobCreate(
+                task_id=task["task_id"],
+                job_type=JobType.PROFILE,
+                accepted_worker_type=WorkerType.GPU,
+                lease_scope=LeaseScope.EXCLUSIVE,
+                idempotency_key=f"gpu-job-{suffix}",
+            )
+        )
+        job = self.repository.claim_job("gpu-worker")
+        assert job is not None
+        return job
 
     def test_claim_is_atomic_and_returns_distinct_jobs(self) -> None:
         task = self.repository.create_task(
@@ -101,28 +129,21 @@ class PostgresClaimIntegrationTests(unittest.TestCase):
         self.assertEqual(len(set(claimed)), 2)
 
     def test_worker_loss_fences_gpu_and_rejects_old_claim(self) -> None:
-        task = self.repository.create_task(
-            TaskCreate(name="gpu-fixture", workload_id="fixture", idempotency_key="gpu-task")
-        )
-        self.repository.register_worker(
-            WorkerRegister(
-                worker_id="gpu-worker",
-                worker_type=WorkerType.GPU,
-                capabilities={"resource_id": "fake-hcu-0"},
-            )
-        )
-        self.repository.enqueue_job(
-            JobCreate(
-                task_id=task["task_id"],
-                job_type=JobType.PROFILE,
-                accepted_worker_type=WorkerType.GPU,
-                lease_scope=LeaseScope.EXCLUSIVE,
-                idempotency_key="gpu-job-fixture",
-            )
-        )
-        first = self.repository.claim_job("gpu-worker")
-        assert first is not None
+        first = self._claim_exclusive_gpu_job("worker-loss")
         self.repository.recover_stale_jobs(stale_after_seconds=0)
+        resource = self.repository.list_resources()[0]
+        self.assertEqual(resource["state"], "quarantined")
+        self.assertIsNone(self.repository.claim_job("gpu-worker"))
+        self.repository.report_resource_cleanup(
+            "fake-hcu-0",
+            first["fencing_token"],
+            {
+                "fence": {"fenced": True, "reason": "integration fixture"},
+                "health": {"healthy": True, "reason": "integration fixture"},
+            },
+        )
+        resource = self.repository.list_resources()[0]
+        self.assertEqual(resource["state"], "available")
         second = self.repository.claim_job("gpu-worker")
         assert second is not None
         self.assertGreater(second["fencing_token"], first["fencing_token"])
@@ -133,6 +154,66 @@ class PostgresClaimIntegrationTests(unittest.TestCase):
                 first["fencing_token"],
                 {"late": True},
             )
+
+    def test_failed_cleanup_keeps_resource_quarantined(self) -> None:
+        first = self._claim_exclusive_gpu_job("failed-cleanup")
+        self.repository.recover_stale_jobs(stale_after_seconds=0)
+
+        resource = self.repository.report_resource_cleanup(
+            "fake-hcu-0",
+            first["fencing_token"],
+            {
+                "fence": {"fenced": False, "reason": "container remained"},
+                "health": {"healthy": False, "reason": "device check failed"},
+            },
+        )
+
+        self.assertEqual(resource["state"], "quarantined")
+        self.assertFalse(resource["cleanup_evidence"]["healthy"])
+        self.assertIsNone(self.repository.claim_job("gpu-worker"))
+
+    def test_cleanup_rejects_stale_fencing_token(self) -> None:
+        first = self._claim_exclusive_gpu_job("stale-cleanup")
+        self.repository.recover_stale_jobs(stale_after_seconds=0)
+        self.repository.report_resource_cleanup(
+            "fake-hcu-0",
+            first["fencing_token"],
+            {
+                "fence": {"fenced": True},
+                "health": {"healthy": True},
+            },
+        )
+        second = self.repository.claim_job("gpu-worker")
+        assert second is not None
+
+        with self.assertRaises(StaleFencingToken):
+            self.repository.report_resource_cleanup(
+                "fake-hcu-0",
+                first["fencing_token"],
+                {
+                    "fence": {"fenced": True},
+                    "health": {"healthy": True},
+                },
+            )
+        resource = self.repository.list_resources()[0]
+        self.assertEqual(resource["state"], "active")
+        self.assertEqual(resource["fencing_token"], second["fencing_token"])
+
+    def test_cleanup_cannot_release_an_active_job(self) -> None:
+        active = self._claim_exclusive_gpu_job("active-cleanup")
+
+        with self.assertRaises(Conflict):
+            self.repository.report_resource_cleanup(
+                "fake-hcu-0",
+                active["fencing_token"],
+                {
+                    "fence": {"fenced": True},
+                    "health": {"healthy": True},
+                },
+            )
+        resource = self.repository.list_resources()[0]
+        self.assertEqual(resource["state"], "active")
+        self.assertEqual(resource["owner_job_id"], active["job_id"])
 
     def test_frozen_baseline_rejects_in_place_update(self) -> None:
         task = self.repository.create_task(

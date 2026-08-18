@@ -142,6 +142,7 @@ def test_openapi_exposes_framework_smoke_control_plane() -> None:
     assert "/v1/framework-smoke/tasks/{task_id}/summary" in paths
     assert "/v1/framework-smoke/tasks/{task_id}/cancel" in paths
     assert "/v1/framework-smoke/tasks/{task_id}/retest" in paths
+    assert "/v1/resources/{resource_id}/cleanup" in paths
 
 
 def test_framework_create_returns_stable_profile_and_target_errors() -> None:
