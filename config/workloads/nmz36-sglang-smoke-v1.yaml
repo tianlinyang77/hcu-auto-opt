@@ -1,0 +1,22 @@
+protocol_version: sglang-smoke-v1
+workload_id: nmz36-sglang-smoke-v1
+target_id: nmz36-sglang-0.5.12
+model_path: /public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct
+served_model_name: hcuopt-smoke
+host: 127.0.0.1
+port: 30000
+tensor_parallel_size: 1
+prompt: The capital of France is
+temperature: 0.0
+max_new_tokens: 8
+sampling_seed: 0
+stream: false
+ready_path: /health_generate
+generate_path: /generate
+ready_timeout_seconds: 300.0
+ready_poll_interval_seconds: 1.0
+request_timeout_seconds: 60.0
+stop_grace_seconds: 10.0
+execution_timeout_seconds: 420
+python_executable: python
+server_module: sglang.launch_server
