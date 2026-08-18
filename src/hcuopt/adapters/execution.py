@@ -36,10 +36,8 @@ SECRET_ENVIRONMENT_NAME = re.compile(
     r"(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
     re.IGNORECASE,
 )
-HCU_VISIBILITY_VARIABLES = (
-    "HIP_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-)
+PHYSICAL_HCU_VISIBILITY_VARIABLE = "ROCR_VISIBLE_DEVICES"
+LOGICAL_HCU_VISIBILITY_VARIABLE = "HIP_VISIBLE_DEVICES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,14 +477,22 @@ class ContainerExecutionAdapter:
                     f"secrets cannot be embedded in ExecutionRequest.environment: {key}"
                 )
         if request.lease_scope is not LeaseScope.NONE:
-            device = str(target.execution_host.accelerator.device_index)
-            for key in HCU_VISIBILITY_VARIABLES:
+            visibility = {
+                PHYSICAL_HCU_VISIBILITY_VARIABLE: str(
+                    target.execution_host.accelerator.device_index
+                ),
+                # ROCR first selects the physical HCU. HIP then addresses that
+                # filtered device set, where the sole leased device is index 0.
+                LOGICAL_HCU_VISIBILITY_VARIABLE: "0",
+            }
+            for key, expected in visibility.items():
                 declared = environment.get(key)
-                if declared is not None and declared != device:
+                if declared is not None and declared != expected:
                     raise ExecutionSafetyError(
-                        f"{key}={declared} conflicts with locked HCU {device}"
+                        f"{key}={declared} conflicts with locked HCU mapping; "
+                        f"expected {expected}"
                     )
-                environment[key] = device
+                environment[key] = expected
         return environment
 
     @staticmethod
