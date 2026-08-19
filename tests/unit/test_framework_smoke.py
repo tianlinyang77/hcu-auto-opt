@@ -61,6 +61,16 @@ def test_adapter_profile_fails_closed_for_unknown_or_missing_capability() -> Non
 
 def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
     target = load_target(TARGET_PATH)
+    framework_blocked = target.model_copy(
+        update={
+            "blockers": [
+                blocker.model_copy(update={"status": "open"})
+                if blocker.id == "locked_image_dependency_conflict"
+                else blocker
+                for blocker in target.blockers
+            ]
+        }
+    )
     profile = AdapterProfile(
         name="real-test",
         implementation_kind="real",
@@ -70,7 +80,7 @@ def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
         TargetNotReady,
         match="open blockers for framework_smoke: locked_image_dependency_conflict",
     ):
-        profile.validate_target(target)
+        profile.validate_target(framework_blocked)
     with pytest.raises(TargetNotReady, match="open blockers for stage0"):
         profile.validate_target(target, scope="stage0")
 
@@ -151,7 +161,7 @@ def test_openapi_exposes_framework_smoke_control_plane() -> None:
     assert "/v1/resources/{resource_id}/cleanup" in paths
 
 
-def test_framework_create_returns_stable_profile_and_target_errors() -> None:
+def test_framework_create_returns_stable_profile_and_target_errors(tmp_path: Path) -> None:
     class StubRepository:
         def migrate(self) -> None:
             return None
@@ -176,7 +186,14 @@ def test_framework_create_returns_stable_profile_and_target_errors() -> None:
                 "retest_count": 0,
             }
 
-    target_catalog = TargetCatalog(TARGET_PATH.parent)
+    raw_target = yaml.safe_load(TARGET_PATH.read_text(encoding="utf-8"))
+    for blocker in raw_target["blockers"]:
+        if blocker["id"] == "locked_image_dependency_conflict":
+            blocker["status"] = "open"
+    (tmp_path / TARGET_PATH.name).write_text(
+        yaml.safe_dump(raw_target, sort_keys=False), encoding="utf-8"
+    )
+    target_catalog = TargetCatalog(tmp_path)
     missing_profile_app = create_app(
         repository=StubRepository(),  # type: ignore[arg-type]
         target_catalog=target_catalog,

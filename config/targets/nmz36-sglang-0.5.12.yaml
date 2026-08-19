@@ -4,17 +4,17 @@ stage0_status: pending
 automatic_release_allowed: false
 
 inference_image:
-  source_host: nmz4
-  source_address: 10.17.1.1
+  source_host: nmz36
+  source_address: 10.17.1.2
   registry: 10.16.1.152:5000
   repository: jenkins/model_test_env/sglang
-  tag: 0.5.12-ubuntu22.04-dtk26.04-py3.10-20260602-2042-prtest
-  image_id: sha256:a7e722e72275c2096db6fc9ed296d735b5fa469bca49e8b46350b51b6c9339e7
-  registry_digest: sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db
-  immutable_reference: 10.16.1.152:5000/jenkins/model_test_env/sglang@sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db
+  tag: 0.5.12-ubuntu22.04-dtk26.04-py3.10-hcuopt-f1-20260819-dad582-minimal1
+  image_id: sha256:16fd28e795d55585657efe9a30ead1e2a457c8268e4fd21b53e8137fd9964012
+  registry_digest: sha256:a959b1d27fa7fada705bcb619331b0bc9a41bd67a7c2462b515a77718f108f1c
+  immutable_reference: 10.16.1.152:5000/jenkins/model_test_env/sglang@sha256:a959b1d27fa7fada705bcb619331b0bc9a41bd67a7c2462b515a77718f108f1c
   python_version: "3.10"
   dtk_version: "26.04"
-  sglang_package_version: 0.5.12+das.opt1.dtk2604.torch2100.2606021957.gdad582
+  sglang_package_version: 0.5.12+das.opt1.dtk2604.torch2100.2606021957.gdad582.hcuopt1
 
 source_baseline:
   repository: git@github.com:HYGON-AI/sglang-das.git
@@ -64,8 +64,8 @@ blockers:
     detail: Verified on nmz36 on 2026-08-18; Docker Root remains /data/docker and /data has about 1.4 TiB available, so no cleanup or migration is required for F1.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: locked_image_dependency_conflict
-    status: open
-    detail: The locked image has transformers 5.6.0 with kernels 0.15.1; Transformers declares kernels >=0.12,<0.13 and SGLang fails during import. An ephemeral kernels 0.12.3 probe advances further but then model loading fails because get_rope_config is undefined. Rebuild and digest-lock a self-consistent SGLang image before another real Framework Smoke.
+    status: resolved
+    detail: Resolved on nmz36 on 2026-08-19. The digest-locked minimal wheel image pins kernels 0.12.3 and apache-tvm-ffi 0.1.9, includes only the get_rope_config repair, and passed the real cookbook-aligned Baseline/No-op Framework Smoke with equivalent output and healthy cleanup.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: device_isolation_not_reserved
     status: open

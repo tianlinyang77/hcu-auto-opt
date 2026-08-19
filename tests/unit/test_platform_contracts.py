@@ -41,7 +41,7 @@ def test_locked_target_loads_as_platform_v1() -> None:
     assert target.target_id == "nmz36-sglang-0.5.12"
     assert target.inference_image.python_version == "3.10"
     assert target.inference_image.immutable_reference.endswith(
-        "@sha256:ee8eb5a76e9a4060ef2ffcbb9fa0da09aed2132c35592d1e723454a770dd38db"
+        "@sha256:a959b1d27fa7fada705bcb619331b0bc9a41bd67a7c2462b515a77718f108f1c"
     )
     assert target.source_baseline.commit == "dad582f28458cd0e11e0be675fbe7fcc7ab65ac1"
     assert [mount.model_dump() for mount in target.execution_host.runtime_mounts] == [
