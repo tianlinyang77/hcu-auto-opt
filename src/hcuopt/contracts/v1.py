@@ -8,6 +8,7 @@ from pydantic import Field, model_validator
 
 from hcuopt.contracts.base import ContractModel, ReadModel
 from hcuopt.contracts.platform_v1 import (
+    SHA256_PATTERN,
     AdapterProvenance,
     ArtifactManifest,
     EvaluationRun,
@@ -20,6 +21,7 @@ from hcuopt.contracts.platform_v1 import (
 )
 from hcuopt.domain.enums import (
     CandidateState,
+    FrameworkSmokeDecision,
     GateResult,
     HotPatchCapability,
     JobState,
@@ -27,6 +29,9 @@ from hcuopt.domain.enums import (
     LeaseScope,
     ProfilerCapability,
     ProjectMode,
+    Stage0ProbeType,
+    Stage0RunMode,
+    Stage0RunState,
     TaskState,
     WorkerType,
     WorkflowType,
@@ -52,6 +57,7 @@ class TaskView(ReadModel):
     project_mode: ProjectMode | None
     budget: dict[str, Any]
     automatic_release_allowed: bool
+    stage0_authority: Literal["none", "synthetic", "formal"] = "none"
     version: int
     created_at: datetime
     updated_at: datetime
@@ -72,7 +78,29 @@ class FrameworkSmokeTaskView(TaskView):
     retest_count: int = 0
 
 
+class FrameworkSmokeSignoffRequest(ContractModel):
+    decision: FrameworkSmokeDecision
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence_bundle_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class FrameworkSmokeSignoffView(ReadModel):
+    signoff_id: UUID
+    task_id: UUID
+    decision: FrameworkSmokeDecision
+    actor: str
+    reason: str
+    evidence_bundle_id: UUID
+    idempotency_key: str
+    task_state: TaskState
+    created_at: datetime
+
+
 class Stage0EvidenceRequest(ContractModel):
+    """Legacy Fake Demo input; it can never authorize a real Stage 0 run."""
+
     measurement: GateResult
     profiler: ProfilerCapability
     hot_patch: HotPatchCapability
@@ -83,6 +111,91 @@ class Stage0EvidenceRequest(ContractModel):
     noise_cv: float | None = Field(default=None, ge=0)
     mde_ratio: float | None = Field(default=None, ge=0)
     evidence_uri: str | None = None
+    synthetic: Literal[True] = True
+
+
+class Stage0RunCreate(ContractModel):
+    name: str = Field(min_length=1, max_length=200)
+    workload_id: str = Field(min_length=1, max_length=200)
+    target_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    adapter_profile: str = Field(min_length=1, max_length=200)
+    mode: Stage0RunMode
+    protocol_version: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    budget: dict[str, Any] = Field(default_factory=dict)
+
+
+class Stage0RunView(ReadModel):
+    stage0_run_id: UUID
+    task_id: UUID
+    target_snapshot_id: UUID
+    adapter_profile: str
+    mode: Stage0RunMode
+    state: Stage0RunState
+    protocol_version: str
+    idempotency_key: str
+    report: dict[str, Any] | None = None
+    created_at: datetime
+    finalized_at: datetime | None = None
+
+
+class Stage0ProbeResult(ContractModel):
+    stage0_run_id: UUID
+    target_snapshot_id: UUID
+    probe_type: Stage0ProbeType
+    protocol_version: str = Field(min_length=1, max_length=200)
+    raw_evidence_uri: str | None = None
+    raw_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: bool = False
+    cleanup_evidence: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def enforce_evidence_origin(self) -> Stage0ProbeResult:
+        if any(
+            item.implementation_kind == "fake" for item in self.adapter_provenance
+        ) and not self.synthetic:
+            raise ValueError("fake Stage 0 probes must be synthetic")
+        if not self.synthetic and (
+            self.raw_evidence_uri is None or self.raw_evidence_hash is None
+        ):
+            raise ValueError("real Stage 0 probes require raw evidence URI and SHA256")
+        if self.cleanup_evidence is not None:
+            if not isinstance(self.cleanup_evidence.get("fence"), dict):
+                raise ValueError("Stage 0 cleanup evidence requires fence evidence")
+            if not isinstance(self.cleanup_evidence.get("health"), dict):
+                raise ValueError("Stage 0 cleanup evidence requires health evidence")
+        return self
+
+
+class Stage0ProbeView(ReadModel):
+    probe_record_id: UUID
+    stage0_run_id: UUID
+    job_id: UUID
+    task_id: UUID
+    target_snapshot_id: UUID
+    probe_type: Stage0ProbeType
+    protocol_version: str
+    raw_evidence_uri: str | None
+    raw_evidence_hash: str | None
+    summary: dict[str, Any]
+    adapter_provenance: list[AdapterProvenance]
+    synthetic: bool
+    lease_id: UUID | None
+    resource_id: str | None
+    fencing_token: int | None
+    cleanup_evidence: dict[str, Any] | None
+    created_at: datetime
+
+
+class Stage0RunSummary(ContractModel):
+    run: Stage0RunView
+    task: TaskView
+    target: TargetSpec
+    probes: list[Stage0ProbeView]
+    jobs: list[dict[str, Any]]
+    events: list[dict[str, Any]]
 
 
 class Stage0ReportView(ReadModel):
@@ -90,6 +203,7 @@ class Stage0ReportView(ReadModel):
     mode: ProjectMode
     reasons: list[str]
     automatic_release_allowed: bool = False
+    evidence_authority: Literal["synthetic_control_flow_only", "formal"]
 
 
 class BaselineCreate(ContractModel):
@@ -150,6 +264,7 @@ class JobClaim(ReadModel):
     payload: dict[str, Any]
     lease_scope: LeaseScope
     claim_token: UUID
+    lease_id: UUID | None = None
     resource_id: str | None = None
     fencing_token: int | None = None
     attempts: int

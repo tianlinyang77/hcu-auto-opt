@@ -35,6 +35,34 @@ class ProjectMode(StrEnum):
 class WorkflowType(StrEnum):
     OPTIMIZATION = "optimization"
     FRAMEWORK_SMOKE = "framework_smoke"
+    STAGE0 = "stage0"
+
+
+class FrameworkSmokeDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class Stage0RunMode(StrEnum):
+    DRY_RUN = "dry_run"
+    FORMAL = "formal"
+
+
+class Stage0RunState(StrEnum):
+    COLLECTING = "collecting"
+    READY = "ready"
+    FINALIZED = "finalized"
+    FAILED = "failed"
+
+
+class Stage0ProbeType(StrEnum):
+    FINGERPRINT = "fingerprint"
+    TIMER = "timer"
+    NOISE = "noise"
+    KNOWN_SIGNAL = "known_signal"
+    NULL_SIGNAL = "null_signal"
+    PROFILER = "profiler"
+    HOTPATCH = "hotpatch"
 
 
 class TaskState(StrEnum):
@@ -129,6 +157,7 @@ class JobType(StrEnum):
     SOURCE_PREPARE = "source_prepare"
     NOOP_BUILD = "noop_build"
     FRAMEWORK_SMOKE = "framework_smoke"
+    STAGE0_PROBE = "stage0_probe"
 
 
 class EvaluationPhase(StrEnum):

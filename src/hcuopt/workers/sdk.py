@@ -159,6 +159,7 @@ class Worker:
         payload["_job_context"] = {
             "job_id": job["job_id"],
             "attempt_number": job["attempts"],
+            "lease_id": job.get("lease_id"),
             "resource_id": job.get("resource_id"),
             "fencing_token": job.get("fencing_token"),
             "lease_lost_event": lease_lost,

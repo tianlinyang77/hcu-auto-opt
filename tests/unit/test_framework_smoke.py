@@ -8,14 +8,16 @@ from fastapi.testclient import TestClient
 
 from hcuopt.adapters.profiles import (
     FRAMEWORK_SMOKE_CAPABILITIES,
+    STAGE0_CAPABILITIES,
     AdapterProfile,
     AdapterProfileCatalog,
 )
 from hcuopt.api.app import create_app
 from hcuopt.contracts.v1 import FrameworkSmokeResult
-from hcuopt.domain.enums import CandidateState, TaskState
+from hcuopt.domain.enums import CandidateState, JobType, TaskState
 from hcuopt.domain.errors import AdapterUnavailable, TargetConfigError, TargetNotReady
 from hcuopt.domain.transitions import transition_candidate, transition_task
+from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.targets import TargetCatalog, load_target
 from hcuopt.workers.handlers import FakeJobHandlers
 
@@ -74,7 +76,7 @@ def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
     profile = AdapterProfile(
         name="real-test",
         implementation_kind="real",
-        capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
+        capabilities=FRAMEWORK_SMOKE_CAPABILITIES | STAGE0_CAPABILITIES,
     )
     with pytest.raises(
         TargetNotReady,
@@ -158,6 +160,10 @@ def test_openapi_exposes_framework_smoke_control_plane() -> None:
     assert "/v1/framework-smoke/tasks/{task_id}/summary" in paths
     assert "/v1/framework-smoke/tasks/{task_id}/cancel" in paths
     assert "/v1/framework-smoke/tasks/{task_id}/retest" in paths
+    assert "/v1/framework-smoke/tasks/{task_id}/signoff" in paths
+    assert "/v1/stage0-runs" in paths
+    assert "/v1/stage0-runs/{stage0_run_id}" in paths
+    assert "/v1/stage0-runs/{stage0_run_id}/finalize" in paths
     assert "/v1/resources/{resource_id}/cleanup" in paths
 
 
@@ -226,3 +232,91 @@ def test_framework_create_returns_stable_profile_and_target_errors(tmp_path: Pat
     assert response.status_code == 409
     assert response.json()["code"] == "target_not_ready"
     assert "locked_image_dependency_conflict" in response.json()["message"]
+
+
+def test_formal_stage0_rejects_fake_profile_before_creating_a_run() -> None:
+    class StubRepository:
+        def migrate(self) -> None:
+            return None
+
+    app = create_app(repository=StubRepository())  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/stage0-runs",
+            json={
+                "name": "formal fixture",
+                "workload_id": "fixture",
+                "target_id": "nmz36-sglang-0.5.12",
+                "adapter_profile": "fake-v1-control-flow-only",
+                "mode": "formal",
+                "protocol_version": "fixture-v1",
+                "idempotency_key": "formal-stage0-fake-profile",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert "real Adapter Profile" in response.json()["message"]
+
+
+def test_stage0_run_rejects_profile_without_stage0_capability() -> None:
+    class StubRepository:
+        def migrate(self) -> None:
+            return None
+
+    framework_only = AdapterProfile(
+        name="framework-only",
+        implementation_kind="real",
+        capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
+    )
+    app = create_app(
+        repository=StubRepository(),  # type: ignore[arg-type]
+        adapter_profiles=AdapterProfileCatalog((framework_only,)),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/stage0-runs",
+            json={
+                "name": "capability boundary fixture",
+                "workload_id": "fixture",
+                "target_id": "nmz36-sglang-0.5.12",
+                "adapter_profile": "framework-only",
+                "mode": "dry_run",
+                "protocol_version": "fixture-v1",
+                "idempotency_key": "stage0-missing-capability",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "adapter_unavailable"
+    assert "stage0_probe" in response.json()["message"]
+
+
+def test_router_reconcile_dispatches_recovery_by_job_type() -> None:
+    stage0_job_id = uuid4()
+    optimization_job_id = uuid4()
+
+    class StubRepository:
+        def unadvanced_succeeded_jobs(self):
+            return [
+                {"job_id": stage0_job_id, "job_type": JobType.STAGE0_PROBE.value},
+                {"job_id": optimization_job_id, "job_type": JobType.PROFILE.value},
+            ]
+
+    class RecordingCoordinator:
+        def __init__(self) -> None:
+            self.jobs: list[dict] = []
+
+        def advance(self, job: dict) -> None:
+            self.jobs.append(job)
+
+    router = WorkflowRouter(StubRepository())  # type: ignore[arg-type]
+    stage0 = RecordingCoordinator()
+    walking = RecordingCoordinator()
+    router.stage0 = stage0  # type: ignore[assignment]
+    router.walking = walking  # type: ignore[assignment]
+    router.framework_smoke = RecordingCoordinator()  # type: ignore[assignment]
+
+    assert router.reconcile() == [stage0_job_id, optimization_job_id]
+    assert [job["job_id"] for job in stage0.jobs] == [stage0_job_id]
+    assert [job["job_id"] for job in walking.jobs] == [optimization_job_id]

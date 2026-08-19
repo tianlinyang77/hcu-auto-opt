@@ -25,23 +25,31 @@ from hcuopt.contracts.platform_v1 import (
 from hcuopt.contracts.v1 import (
     BaselineCreate,
     FrameworkSmokeCreate,
+    FrameworkSmokeSignoffRequest,
     JobCreate,
     Stage0EvidenceRequest,
+    Stage0ProbeResult,
+    Stage0RunCreate,
     TaskCreate,
     WorkerRegister,
 )
 from hcuopt.domain.enums import (
     CandidateState,
+    FrameworkSmokeDecision,
     JobState,
     JobType,
     LeaseScope,
     ProjectMode,
+    Stage0ProbeType,
+    Stage0RunMode,
+    Stage0RunState,
     TaskState,
     WorkerType,
     WorkflowType,
 )
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from hcuopt.domain.transitions import transition_candidate, transition_task
+from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
 from hcuopt.storage.migrations import migration_plan
 
 
@@ -156,6 +164,161 @@ class PostgresRepository:
     ) -> dict[str, Any]:
         with self.connection() as connection:
             return self._upsert_target_snapshot(connection, target, source_path)
+
+    def create_stage0_run(
+        self,
+        request: Stage0RunCreate,
+        target: TargetSpec,
+        source_path: str,
+    ) -> dict[str, Any]:
+        task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
+        run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
+        with self.connection() as connection:
+            snapshot = self._upsert_target_snapshot(connection, target, source_path)
+            task = connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, name, workload_id, idempotency_key, state, budget,
+                    automatic_release_allowed, workflow_type, target_id,
+                    target_snapshot_id, adapter_profile
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, FALSE, %s, %s, %s, %s
+                )
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    task_id,
+                    request.name,
+                    request.workload_id,
+                    request.idempotency_key,
+                    TaskState.STAGE0_PENDING.value,
+                    Jsonb(request.budget),
+                    WorkflowType.STAGE0.value,
+                    target.target_id,
+                    snapshot["target_snapshot_id"],
+                    request.adapter_profile,
+                ),
+            ).fetchone()
+            if task is None:
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE idempotency_key = %s FOR UPDATE",
+                    (request.idempotency_key,),
+                ).fetchone()
+                assert task is not None
+            expected_task = {
+                "name": request.name,
+                "workload_id": request.workload_id,
+                "budget": request.budget,
+                "workflow_type": WorkflowType.STAGE0.value,
+                "target_id": target.target_id,
+                "target_snapshot_id": snapshot["target_snapshot_id"],
+                "adapter_profile": request.adapter_profile,
+            }
+            if any(task[name] != value for name, value in expected_task.items()):
+                raise Conflict("Stage 0 idempotency_key was reused with different inputs")
+
+            run = connection.execute(
+                """
+                INSERT INTO stage0_runs (
+                    stage0_run_id, task_id, target_snapshot_id, adapter_profile,
+                    mode, protocol_version, idempotency_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    run_id,
+                    task["task_id"],
+                    snapshot["target_snapshot_id"],
+                    request.adapter_profile,
+                    request.mode.value,
+                    request.protocol_version,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            if run is None:
+                run = connection.execute(
+                    "SELECT * FROM stage0_runs WHERE idempotency_key = %s FOR UPDATE",
+                    (request.idempotency_key,),
+                ).fetchone()
+                assert run is not None
+            expected_run = {
+                "task_id": task["task_id"],
+                "target_snapshot_id": snapshot["target_snapshot_id"],
+                "adapter_profile": request.adapter_profile,
+                "mode": request.mode.value,
+                "protocol_version": request.protocol_version,
+            }
+            if any(run[name] != value for name, value in expected_run.items()):
+                raise Conflict("Stage 0 idempotency_key was reused with a different run")
+
+            lease_scope = (
+                LeaseScope.EXCLUSIVE
+                if request.mode is Stage0RunMode.FORMAL
+                else LeaseScope.NONE
+            )
+            for probe_type in sorted(REQUIRED_STAGE0_PROBES, key=lambda item: item.value):
+                job_id = uuid5(
+                    NAMESPACE_URL,
+                    f"hcuopt:{run['stage0_run_id']}:{probe_type.value}:v1",
+                )
+                payload = {
+                    "stage0_run_id": str(run["stage0_run_id"]),
+                    "task_id": str(task["task_id"]),
+                    "probe_type": probe_type.value,
+                    "target_snapshot_id": str(snapshot["target_snapshot_id"]),
+                    "target_fingerprint": snapshot["target_fingerprint"],
+                    "target": target.model_dump(mode="json"),
+                    "protocol_version": request.protocol_version,
+                    "mode": request.mode.value,
+                }
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, task_id, job_type, accepted_worker_type,
+                        adapter_profile, lease_scope, payload, idempotency_key,
+                        priority, max_attempts
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, 3)
+                    ON CONFLICT (idempotency_key) DO NOTHING
+                    """,
+                    (
+                        job_id,
+                        task["task_id"],
+                        JobType.STAGE0_PROBE.value,
+                        WorkerType.GPU.value,
+                        request.adapter_profile,
+                        lease_scope.value,
+                        Jsonb(payload),
+                        f"{run['stage0_run_id']}:{probe_type.value}:v1",
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                SELECT %s, 'stage0_run_created', %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM task_events
+                    WHERE task_id = %s AND event_type = 'stage0_run_created'
+                )
+                """,
+                (
+                    task["task_id"],
+                    Jsonb(
+                        {
+                            "stage0_run_id": str(run["stage0_run_id"]),
+                            "target_snapshot_id": str(snapshot["target_snapshot_id"]),
+                            "mode": request.mode.value,
+                            "protocol_version": request.protocol_version,
+                            "probe_types": sorted(
+                                item.value for item in REQUIRED_STAGE0_PROBES
+                            ),
+                        }
+                    ),
+                    task["task_id"],
+                ),
+            )
+        return run
 
     def create_framework_smoke_task(
         self,
@@ -337,6 +500,7 @@ class PostgresRepository:
                 "mode": mode.value,
                 "reasons": list(reasons),
                 "automatic_release_allowed": False,
+                "evidence_authority": "synthetic_control_flow_only",
             }
             connection.execute(
                 """
@@ -352,10 +516,333 @@ class PostgresRepository:
             connection.execute(
                 """
                 UPDATE tasks
-                SET state = %s, project_mode = %s, version = version + 1, updated_at = now()
+                SET state = %s, project_mode = %s, stage0_authority = 'synthetic',
+                    version = version + 1, updated_at = now()
                 WHERE task_id = %s
                 """,
                 (target.value, mode.value, task_id),
+            )
+        return report
+
+    def get_stage0_run(self, stage0_run_id: UUID) -> dict[str, Any]:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s",
+                (stage0_run_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+        return row
+
+    def list_stage0_probe_records(
+        self, stage0_run_id: UUID
+    ) -> list[dict[str, Any]]:
+        with self.connection() as connection:
+            return connection.execute(
+                """
+                SELECT * FROM stage0_probe_records
+                WHERE stage0_run_id = %s ORDER BY created_at, probe_type
+                """,
+                (stage0_run_id,),
+            ).fetchall()
+
+    def stage0_run_summary(self, stage0_run_id: UUID) -> dict[str, Any]:
+        run = self.get_stage0_run(stage0_run_id)
+        task = self.get_task(run["task_id"])
+        target = self.get_target_snapshot(task["task_id"])
+        with self.connection() as connection:
+            jobs = connection.execute(
+                "SELECT * FROM jobs WHERE task_id = %s ORDER BY created_at",
+                (task["task_id"],),
+            ).fetchall()
+        return {
+            "run": run,
+            "task": task,
+            "target": target["specification"],
+            "probes": self.list_stage0_probe_records(stage0_run_id),
+            "jobs": jobs,
+            "events": self.list_task_events(task["task_id"]),
+        }
+
+    def record_stage0_probe(
+        self,
+        job: Mapping[str, Any],
+        result: Stage0ProbeResult,
+    ) -> dict[str, Any]:
+        job_id = UUID(str(job["job_id"]))
+        task_id = UUID(str(job["task_id"]))
+        payload = job["payload"]
+        if job["job_type"] != JobType.STAGE0_PROBE.value:
+            raise Conflict("only Stage 0 probe jobs can produce probe records")
+        if job["state"] != JobState.SUCCEEDED.value:
+            raise Conflict("Stage 0 probe evidence requires a succeeded job")
+        if Stage0ProbeResult.model_validate(job.get("result")) != result:
+            raise Conflict("Stage 0 probe record must match the completed job result")
+        with self.connection() as connection:
+            run = connection.execute(
+                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s FOR UPDATE",
+                (result.stage0_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(f"Stage 0 run not found: {result.stage0_run_id}")
+            expected = {
+                "stage0_run_id": str(run["stage0_run_id"]),
+                "task_id": str(run["task_id"]),
+                "target_snapshot_id": str(run["target_snapshot_id"]),
+                "probe_type": result.probe_type.value,
+                "protocol_version": run["protocol_version"],
+            }
+            if any(str(payload.get(name)) != value for name, value in expected.items()):
+                raise Conflict("Stage 0 probe job payload does not match its run")
+            if task_id != run["task_id"]:
+                raise Conflict("Stage 0 probe job belongs to a different task")
+            if result.target_snapshot_id != run["target_snapshot_id"]:
+                raise Conflict("Stage 0 probe result targets a different snapshot")
+            if result.protocol_version != run["protocol_version"]:
+                raise Conflict("Stage 0 probe protocol version changed during the run")
+            if run["state"] in {
+                Stage0RunState.FINALIZED.value,
+                Stage0RunState.FAILED.value,
+            }:
+                raise Conflict("terminal Stage 0 runs cannot accept probe records")
+
+            if run["mode"] == Stage0RunMode.FORMAL.value:
+                if result.synthetic or any(
+                    item.implementation_kind != "real"
+                    for item in result.adapter_provenance
+                ):
+                    raise Conflict("formal Stage 0 requires real probe provenance")
+                if job["lease_scope"] != LeaseScope.EXCLUSIVE.value:
+                    raise Conflict("formal Stage 0 probes require an exclusive lease")
+                if any(
+                    job.get(name) is None
+                    for name in ("lease_id", "resource_id", "fencing_token")
+                ):
+                    raise Conflict("formal Stage 0 probes require lease and fencing identity")
+                if not _cleanup_is_healthy(result.cleanup_evidence):
+                    raise Conflict("formal Stage 0 probes require healthy fenced cleanup")
+            if any(
+                item.profile != run["adapter_profile"]
+                for item in result.adapter_provenance
+            ):
+                raise Conflict("Stage 0 probe provenance does not match the run profile")
+
+            provenance = [
+                item.model_dump(mode="json") for item in result.adapter_provenance
+            ]
+            row = connection.execute(
+                """
+                INSERT INTO stage0_probe_records (
+                    probe_record_id, stage0_run_id, job_id, task_id,
+                    target_snapshot_id, probe_type, protocol_version,
+                    raw_evidence_uri, raw_evidence_hash, summary,
+                    adapter_provenance, synthetic, lease_id, resource_id,
+                    fencing_token, cleanup_evidence
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (stage0_run_id, probe_type) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    uuid4(),
+                    result.stage0_run_id,
+                    job_id,
+                    task_id,
+                    result.target_snapshot_id,
+                    result.probe_type.value,
+                    result.protocol_version,
+                    result.raw_evidence_uri,
+                    result.raw_evidence_hash,
+                    Jsonb(result.summary),
+                    Jsonb(provenance),
+                    result.synthetic,
+                    job.get("lease_id"),
+                    job.get("resource_id"),
+                    job.get("fencing_token"),
+                    Jsonb(result.cleanup_evidence)
+                    if result.cleanup_evidence is not None
+                    else None,
+                ),
+            ).fetchone()
+            created = row is not None
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM stage0_probe_records
+                    WHERE stage0_run_id = %s AND probe_type = %s
+                    """,
+                    (result.stage0_run_id, result.probe_type.value),
+                ).fetchone()
+                assert row is not None
+            expected_row = {
+                "job_id": job_id,
+                "task_id": task_id,
+                "target_snapshot_id": result.target_snapshot_id,
+                "protocol_version": result.protocol_version,
+                "raw_evidence_uri": result.raw_evidence_uri,
+                "raw_evidence_hash": result.raw_evidence_hash,
+                "summary": result.summary,
+                "adapter_provenance": provenance,
+                "synthetic": result.synthetic,
+                "lease_id": job.get("lease_id"),
+                "resource_id": job.get("resource_id"),
+                "fencing_token": job.get("fencing_token"),
+                "cleanup_evidence": result.cleanup_evidence,
+            }
+            if any(row[name] != value for name, value in expected_row.items()):
+                raise Conflict("Stage 0 probe type was replayed with different evidence")
+
+            if created:
+                connection.execute(
+                    """
+                    INSERT INTO task_events (task_id, event_type, details)
+                    VALUES (%s, 'stage0_probe_recorded', %s)
+                    """,
+                    (
+                        task_id,
+                        Jsonb(
+                            {
+                                "stage0_run_id": str(result.stage0_run_id),
+                                "job_id": str(job_id),
+                                "probe_type": result.probe_type.value,
+                                "synthetic": result.synthetic,
+                            }
+                        ),
+                    ),
+                )
+            recorded = connection.execute(
+                """
+                SELECT count(*) AS count FROM stage0_probe_records
+                WHERE stage0_run_id = %s
+                """,
+                (result.stage0_run_id,),
+            ).fetchone()
+            assert recorded is not None
+            if int(recorded["count"]) == len(REQUIRED_STAGE0_PROBES):
+                connection.execute(
+                    """
+                    UPDATE stage0_runs SET state = %s
+                    WHERE stage0_run_id = %s AND state = %s
+                    """,
+                    (
+                        Stage0RunState.READY.value,
+                        result.stage0_run_id,
+                        Stage0RunState.COLLECTING.value,
+                    ),
+                )
+        return row
+
+    def finalize_stage0_run(self, stage0_run_id: UUID) -> dict[str, Any]:
+        with self.connection() as connection:
+            run = connection.execute(
+                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s FOR UPDATE",
+                (stage0_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+            if run["state"] == Stage0RunState.FINALIZED.value:
+                assert run["report"] is not None
+                return run["report"]
+            if run["mode"] != Stage0RunMode.FORMAL.value:
+                raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
+            if run["state"] != Stage0RunState.READY.value:
+                raise Conflict("Stage 0 probe barrier is not ready")
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+                (run["task_id"],),
+            ).fetchone()
+            assert task is not None
+            if task["state"] != TaskState.STAGE0_PENDING.value:
+                raise Conflict("formal Stage 0 requires a stage0_pending task")
+            records = connection.execute(
+                """
+                SELECT * FROM stage0_probe_records
+                WHERE stage0_run_id = %s ORDER BY probe_type
+                """,
+                (stage0_run_id,),
+            ).fetchall()
+            probes = {
+                Stage0ProbeType(row["probe_type"]): row["summary"] for row in records
+            }
+            evidence = evidence_from_probe_summaries(
+                probes,
+                evidence_uri=f"stage0://runs/{stage0_run_id}",
+            )
+            decision = evaluate_stage0(evidence)
+            target_state = (
+                TaskState.STOPPED_MEASUREMENT
+                if decision.mode is ProjectMode.STOPPED_MEASUREMENT
+                else TaskState.DEGRADED
+                if decision.mode
+                in {ProjectMode.DEGRADED_MANUAL_INTAKE, ProjectMode.CONFIG_ONLY}
+                else TaskState.BASELINE_PENDING
+            )
+            transition_task(TaskState(task["state"]), target_state)
+            report = {
+                "task_id": str(task["task_id"]),
+                "mode": decision.mode.value,
+                "reasons": list(decision.reasons),
+                "automatic_release_allowed": False,
+                "evidence_authority": "formal",
+            }
+            aggregate = {
+                "source": "target-bound-stage0-run",
+                "stage0_run_id": str(stage0_run_id),
+                "target_snapshot_id": str(run["target_snapshot_id"]),
+                "protocol_version": run["protocol_version"],
+                "measurement": evidence.measurement.value,
+                "profiler": evidence.profiler.value,
+                "hot_patch": evidence.hot_patch.value,
+                "hardware_fingerprint": evidence.hardware_fingerprint,
+                "software_fingerprint": evidence.software_fingerprint,
+                "timer_resolution_ns": evidence.timer_resolution_ns,
+                "noise_sigma_ns": evidence.noise_sigma_ns,
+                "noise_cv": evidence.noise_cv,
+                "mde_ratio": evidence.mde_ratio,
+                "probe_record_ids": [str(row["probe_record_id"]) for row in records],
+                "synthetic": False,
+            }
+            connection.execute(
+                """
+                INSERT INTO stage0_evidence (task_id, stage0_run_id, evidence, report)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (task["task_id"], stage0_run_id, Jsonb(aggregate), Jsonb(report)),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, project_mode = %s, stage0_authority = 'formal',
+                    version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (target_state.value, decision.mode.value, task["task_id"]),
+            )
+            connection.execute(
+                """
+                UPDATE stage0_runs
+                SET state = %s, report = %s, finalized_at = now()
+                WHERE stage0_run_id = %s
+                """,
+                (Stage0RunState.FINALIZED.value, Jsonb(report), stage0_run_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'stage0_finalized', %s)
+                """,
+                (
+                    task["task_id"],
+                    Jsonb(
+                        {
+                            "stage0_run_id": str(stage0_run_id),
+                            "mode": decision.mode.value,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
             )
         return report
 
@@ -717,6 +1204,7 @@ class PostgresRepository:
                 )
                 return None
 
+            lease_id: UUID | None = None
             resource_id: str | None = None
             fencing_token: int | None = None
             if (
@@ -742,6 +1230,7 @@ class PostgresRepository:
                     ).fetchone()
                 if resource is None:
                     return None
+                lease_id = uuid4()
                 resource_id = resource["resource_id"]
                 fencing_token = int(resource["fencing_token"]) + 1
                 connection.execute(
@@ -752,18 +1241,26 @@ class PostgresRepository:
                         updated_at = now()
                     WHERE resource_id = %s
                     """,
-                    (job["job_id"], uuid4(), fencing_token, resource_id),
+                    (job["job_id"], lease_id, fencing_token, resource_id),
                 )
             claimed = connection.execute(
                 """
                 UPDATE jobs
                 SET state = 'running', claimed_by = %s, claim_token = %s,
                     claimed_at = now(), heartbeat_at = now(), attempts = attempts + 1,
-                    resource_id = %s, fencing_token = %s, updated_at = now()
+                    lease_id = %s, resource_id = %s, fencing_token = %s,
+                    updated_at = now()
                 WHERE job_id = %s AND state = 'queued'
                 RETURNING *
                 """,
-                (worker_id, claim_token, resource_id, fencing_token, job["job_id"]),
+                (
+                    worker_id,
+                    claim_token,
+                    lease_id,
+                    resource_id,
+                    fencing_token,
+                    job["job_id"],
+                ),
             ).fetchone()
             connection.execute(
                 "UPDATE workers SET last_heartbeat_at = now() WHERE worker_id = %s",
@@ -959,7 +1456,8 @@ class PostgresRepository:
                         WHEN %s THEN now() + interval '1 second' ELSE available_at
                     END,
                     claimed_by = NULL, claim_token = NULL, claimed_at = NULL,
-                    heartbeat_at = NULL, resource_id = NULL, fencing_token = NULL,
+                    heartbeat_at = NULL, lease_id = NULL, resource_id = NULL,
+                    fencing_token = NULL,
                     finished_at = CASE WHEN %s THEN NULL ELSE now() END, updated_at = now()
                 WHERE job_id = %s
                 RETURNING *
@@ -985,8 +1483,45 @@ class PostgresRepository:
                     job,
                     error,
                 )
+                self._fail_stage0_run_after_job_failure(connection, job, error)
         assert row is not None
         return row
+
+    def _fail_stage0_run_after_job_failure(
+        self,
+        connection: Connection[dict[str, Any]],
+        job: dict[str, Any],
+        error: dict[str, Any],
+    ) -> None:
+        if job["job_type"] != JobType.STAGE0_PROBE.value:
+            return
+        run_id = job["payload"].get("stage0_run_id")
+        if run_id is None:
+            return
+        connection.execute(
+            """
+            UPDATE stage0_runs SET state = %s
+            WHERE stage0_run_id = %s AND state IN ('collecting', 'ready')
+            """,
+            (Stage0RunState.FAILED.value, run_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, event_type, details)
+            VALUES (%s, 'stage0_probe_job_failed', %s)
+            """,
+            (
+                job["task_id"],
+                Jsonb(
+                    {
+                        "stage0_run_id": str(run_id),
+                        "job_id": str(job["job_id"]),
+                        "probe_type": job["payload"].get("probe_type"),
+                        "error": error,
+                    }
+                ),
+            ),
+        )
 
     def _reject_framework_task_after_job_failure(
         self,
@@ -1097,8 +1632,8 @@ class PostgresRepository:
                     """
                     UPDATE jobs
                     SET state = %s, claimed_by = NULL, claim_token = NULL,
-                        claimed_at = NULL, heartbeat_at = NULL, resource_id = NULL,
-                        fencing_token = NULL, available_at = now(),
+                        claimed_at = NULL, heartbeat_at = NULL, lease_id = NULL,
+                        resource_id = NULL, fencing_token = NULL, available_at = now(),
                         last_error = %s, finished_at = CASE WHEN %s THEN NULL ELSE now() END,
                         updated_at = now()
                     WHERE job_id = %s
@@ -1794,6 +2329,186 @@ class PostgresRepository:
         assert row is not None
         return row
 
+    def signoff_framework_task(
+        self,
+        task_id: UUID,
+        request: FrameworkSmokeSignoffRequest,
+    ) -> dict[str, Any]:
+        with self.connection() as connection:
+            replay = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state
+                FROM framework_smoke_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                WHERE signoff.idempotency_key = %s
+                FOR UPDATE OF signoff, task
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            expected = {
+                "task_id": task_id,
+                "decision": request.decision.value,
+                "actor": request.actor,
+                "reason": request.reason,
+                "evidence_bundle_id": request.evidence_bundle_id,
+            }
+            if replay is not None:
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict("signoff idempotency_key was reused with different inputs")
+                return replay
+
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise NotFound(f"task not found: {task_id}")
+            if task["workflow_type"] != WorkflowType.FRAMEWORK_SMOKE.value:
+                raise Conflict("task is not a Framework Smoke workflow")
+            # A concurrent identical request may have committed while this request
+            # waited for the task lock. Re-read the durable decision before checking
+            # the now-terminal task state.
+            replay = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state
+                FROM framework_smoke_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                WHERE signoff.idempotency_key = %s
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            if replay is not None:
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict("signoff idempotency_key was reused with different inputs")
+                return replay
+            if task["state"] != TaskState.AWAITING_SIGNOFF.value:
+                raise Conflict("Framework Smoke signoff requires awaiting_signoff")
+            previous = connection.execute(
+                "SELECT * FROM framework_smoke_signoffs WHERE task_id = %s",
+                (task_id,),
+            ).fetchone()
+            if previous is not None:
+                raise Conflict("Framework Smoke task already has a signoff decision")
+            evidence = connection.execute(
+                """
+                SELECT bundle.*, run.passed AS evaluation_passed
+                FROM evidence_bundles AS bundle
+                JOIN evaluation_runs AS run
+                  ON run.evaluation_run_id = bundle.evaluation_run_id
+                WHERE bundle.evidence_id = %s
+                FOR UPDATE OF bundle, run
+                """,
+                (request.evidence_bundle_id,),
+            ).fetchone()
+            if evidence is None:
+                raise NotFound(
+                    f"evidence bundle not found: {request.evidence_bundle_id}"
+                )
+            if evidence["task_id"] != task_id:
+                raise Conflict("signoff evidence belongs to a different task")
+            if evidence["evaluation_passed"] is not True:
+                raise Conflict("signoff evidence must bind a passed Framework Smoke run")
+            latest_evidence = connection.execute(
+                """
+                SELECT evidence_id FROM evidence_bundles
+                WHERE task_id = %s ORDER BY created_at DESC, evidence_id DESC LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            assert latest_evidence is not None
+            if latest_evidence["evidence_id"] != request.evidence_bundle_id:
+                raise Conflict("signoff must bind the latest Framework Smoke evidence")
+
+            target_state = (
+                TaskState.COMPLETED
+                if request.decision is FrameworkSmokeDecision.APPROVED
+                else TaskState.REJECTED
+            )
+            transition_task(TaskState(task["state"]), target_state)
+            signoff_id = uuid4()
+            row = connection.execute(
+                """
+                INSERT INTO framework_smoke_signoffs (
+                    signoff_id, task_id, decision, actor, reason,
+                    evidence_bundle_id, idempotency_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    signoff_id,
+                    task_id,
+                    request.decision.value,
+                    request.actor,
+                    request.reason,
+                    request.evidence_bundle_id,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            if row is None:
+                # This can only be a global idempotency-key race with another task;
+                # same-task requests are serialized by the task row lock above.
+                replay = connection.execute(
+                    """
+                    SELECT signoff.*, task.state AS task_state
+                    FROM framework_smoke_signoffs AS signoff
+                    JOIN tasks AS task ON task.task_id = signoff.task_id
+                    WHERE signoff.idempotency_key = %s
+                    """,
+                    (request.idempotency_key,),
+                ).fetchone()
+                if replay is not None and all(
+                    replay[name] == value for name, value in expected.items()
+                ):
+                    return replay
+                raise Conflict("signoff idempotency_key was reused with different inputs")
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (target_state.value, task_id),
+            )
+            if (
+                request.decision is FrameworkSmokeDecision.REJECTED
+                and evidence["candidate_id"] is not None
+            ):
+                candidate = connection.execute(
+                    "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE",
+                    (evidence["candidate_id"],),
+                ).fetchone()
+                if candidate is not None and candidate["state"] != CandidateState.REJECTED.value:
+                    transition_candidate(
+                        CandidateState(candidate["state"]), CandidateState.REJECTED
+                    )
+                    connection.execute(
+                        """
+                        UPDATE candidates SET state = %s, updated_at = now()
+                        WHERE candidate_id = %s
+                        """,
+                        (CandidateState.REJECTED.value, evidence["candidate_id"]),
+                    )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'framework_smoke_signed_off', %s)
+                """,
+                (
+                    task_id,
+                    Jsonb(
+                        {
+                            "signoff_id": str(signoff_id),
+                            "decision": request.decision.value,
+                            "actor": request.actor,
+                            "reason": request.reason,
+                            "evidence_bundle_id": str(request.evidence_bundle_id),
+                        }
+                    ),
+                ),
+            )
+            row["task_state"] = target_state.value
+        return row
+
     def cancel_framework_task(self, task_id: UUID, reason: str) -> dict[str, Any]:
         with self.connection() as connection:
             task = connection.execute(
@@ -1824,7 +2539,8 @@ class PostgresRepository:
                 UPDATE jobs
                 SET state = 'cancelled', last_error = %s, claimed_by = NULL,
                     claim_token = NULL, claimed_at = NULL, heartbeat_at = NULL,
-                    resource_id = NULL, fencing_token = NULL, finished_at = now(),
+                    lease_id = NULL, resource_id = NULL, fencing_token = NULL,
+                    finished_at = now(),
                     updated_at = now()
                 WHERE task_id = %s AND state IN ('queued', 'running')
                 """,
@@ -1893,7 +2609,8 @@ class PostgresRepository:
                 """
                 UPDATE jobs
                 SET state = 'cancelled', last_error = %s, claimed_by = NULL,
-                    claim_token = NULL, resource_id = NULL, fencing_token = NULL,
+                    claim_token = NULL, lease_id = NULL, resource_id = NULL,
+                    fencing_token = NULL,
                     finished_at = now(), updated_at = now()
                 WHERE job_id = %s RETURNING *
                 """,

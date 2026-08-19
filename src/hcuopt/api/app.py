@@ -18,6 +18,8 @@ from hcuopt.contracts.v1 import (
     BaselineView,
     FrameworkSmokeAction,
     FrameworkSmokeCreate,
+    FrameworkSmokeSignoffRequest,
+    FrameworkSmokeSignoffView,
     FrameworkSmokeSummary,
     FrameworkSmokeTaskView,
     JobClaim,
@@ -29,12 +31,16 @@ from hcuopt.contracts.v1 import (
     ResourceCleanupReport,
     Stage0EvidenceRequest,
     Stage0ReportView,
+    Stage0RunCreate,
+    Stage0RunSummary,
+    Stage0RunView,
     TaskCreate,
     TaskSummary,
     TaskView,
     WorkerRegister,
     WorkerView,
 )
+from hcuopt.domain.enums import Stage0RunMode
 from hcuopt.domain.errors import (
     AdapterUnavailable,
     Conflict,
@@ -81,7 +87,7 @@ def create_app(
 
     application = FastAPI(
         title="HCU Auto Opt Control Plane",
-        version="0.3.0-framework-smoke",
+        version="0.4.0-stage0-control-plane",
         lifespan=lifespan,
     )
 
@@ -201,6 +207,58 @@ def create_app(
         task_id: UUID, payload: FrameworkSmokeAction, request: Request
     ) -> dict[str, Any]:
         return framework_workflow(request).enqueue_retest(task_id, payload.reason)
+
+    @application.post(
+        "/v1/framework-smoke/tasks/{task_id}/signoff",
+        response_model=FrameworkSmokeSignoffView,
+    )
+    def signoff_framework_smoke_task(
+        task_id: UUID,
+        payload: FrameworkSmokeSignoffRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).signoff_framework_task(task_id, payload)
+
+    @application.post("/v1/stage0-runs", response_model=Stage0RunView, status_code=201)
+    def create_stage0_run(
+        payload: Stage0RunCreate, request: Request
+    ) -> dict[str, Any]:
+        target = targets.load(payload.target_id)
+        profile = profiles.require(payload.adapter_profile)
+        profile.require_stage0()
+        if (
+            payload.mode is Stage0RunMode.FORMAL
+            and profile.implementation_kind != "real"
+        ):
+            raise Conflict("formal Stage 0 requires a real Adapter Profile")
+        profile.validate_target(
+            target,
+            scope=(
+                "stage0"
+                if payload.mode is Stage0RunMode.FORMAL
+                else "framework_smoke"
+            ),
+        )
+        return repo(request).create_stage0_run(
+            payload, target, str(targets.source_path(payload.target_id))
+        )
+
+    @application.get(
+        "/v1/stage0-runs/{stage0_run_id}", response_model=Stage0RunSummary
+    )
+    def get_stage0_run(
+        stage0_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).stage0_run_summary(stage0_run_id)
+
+    @application.post(
+        "/v1/stage0-runs/{stage0_run_id}/finalize",
+        response_model=Stage0ReportView,
+    )
+    def finalize_stage0_run(
+        stage0_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).finalize_stage0_run(stage0_run_id)
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:
