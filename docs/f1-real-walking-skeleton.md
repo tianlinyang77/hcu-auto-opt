@@ -59,3 +59,19 @@ hcuopt worker --id f1-gpu --type gpu --resource-id hcu-7 \
 Target blocker 按作用域处理：镜像身份和磁盘可用性会阻止 Framework Smoke；设备安静
 窗口和 Stage 0 测量状态只阻止后续计时、优化和发布。任何结果固定为
 `performance_conclusion=not_measured`。
+
+## D 线真机验收
+
+项目 Owner 已临时放行 HCU 7 用于 F1 功能 Smoke；每次运行仍必须即时确认设备空闲。
+显式 Target Lock 测试会顺序执行 Baseline/No-op 两个新容器，复核严格等价、证据哈希和
+最终显存及受管容器清理状态：
+
+```bash
+HCUOPT_RUN_TARGET_LOCK=1 \
+HCUOPT_F1D_OUTPUT_DIR=/home/github/hcu-auto-opt-results/f1d-acceptance \
+PYTHONPATH=src \
+python -m pytest -q tests/integration/test_f1d_target_lock.py
+```
+
+该测试不得与 Stage 0 或性能测量同时运行，也不得停止现有非受管容器。失败时保留
+`HCUOPT_F1D_OUTPUT_DIR` 下已经产生的证据，并先检查 HCU 7 和受管容器清理状态。
