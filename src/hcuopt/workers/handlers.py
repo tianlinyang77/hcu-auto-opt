@@ -22,8 +22,9 @@ from hcuopt.contracts.v1 import (
     NoopBuildResult,
     PairedFrameworkSmokeResult,
     SourcePreparationResult,
+    Stage0ProbeResult,
 )
-from hcuopt.domain.enums import LeaseScope
+from hcuopt.domain.enums import LeaseScope, Stage0ProbeType
 from hcuopt.domain.errors import AdapterUnavailable, ExecutionSafetyError
 
 
@@ -125,6 +126,28 @@ class JobHandlers:
         result = dict(evaluator.e2e(payload, self.output_dir))
         result["adapter_provenance"] = [evaluator.provenance.model_dump(mode="json")]
         return result
+
+    def handle_stage0_probe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        target = TargetSpec.model_validate(payload["target"])
+        if payload.get("target_fingerprint") is None:
+            raise ExecutionSafetyError("Stage 0 probe requires the immutable target fingerprint")
+        probe = self.adapters.require("stage0_probe")
+        output = probe.run_probe(payload, self.output_dir)
+        result = Stage0ProbeResult(
+            stage0_run_id=UUID(payload["stage0_run_id"]),
+            target_snapshot_id=UUID(payload["target_snapshot_id"]),
+            probe_type=Stage0ProbeType(payload["probe_type"]),
+            protocol_version=payload["protocol_version"],
+            raw_evidence_uri=output.raw_evidence_uri,
+            raw_evidence_hash=output.raw_evidence_hash,
+            summary=output.summary,
+            adapter_provenance=[probe.provenance],
+            synthetic=output.synthetic,
+            cleanup_evidence=output.cleanup_evidence,
+        )
+        if target.target_id != payload["target"]["target_id"]:
+            raise ExecutionSafetyError("Stage 0 target payload drifted during validation")
+        return result.model_dump(mode="json")
 
     def handle_source_prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
         target = TargetSpec.model_validate(payload["target"])

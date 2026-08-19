@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from hcuopt.measurement.models import MeasurementPlan, RawSample
-from hcuopt.measurement.timers import HostClock
+from hcuopt.measurement.timers import DeviceTimer, HostClock
 
 
 class SampledWorkload(Protocol):
@@ -20,6 +20,8 @@ def collect_samples(
     *,
     clock: HostClock,
     workload_factory: Callable[[int], SampledWorkload],
+    device_timer: DeviceTimer | None = None,
+    before_sample: Callable[[], None] | None = None,
 ) -> list[RawSample]:
     """Collect raw host-monotonic samples across explicit restart groups."""
 
@@ -30,10 +32,14 @@ def collect_samples(
             workload.synchronize()
             workload.warmup()
         for sample_ordinal in range(plan.repeat_count):
+            if before_sample is not None:
+                before_sample()
             workload.synchronize()
             started = clock.now_ns()
+            started_ticks = device_timer.read_ticks() if device_timer is not None else None
             workload.run_batch(plan.batched_loop_count)
             workload.synchronize()
+            finished_ticks = device_timer.read_ticks() if device_timer is not None else None
             finished = clock.now_ns()
             samples.append(
                 RawSample(
@@ -42,6 +48,8 @@ def collect_samples(
                     started_monotonic_ns=started,
                     finished_monotonic_ns=finished,
                     batch_iterations=plan.batched_loop_count,
+                    started_device_ticks=started_ticks,
+                    finished_device_ticks=finished_ticks,
                 )
             )
     return samples

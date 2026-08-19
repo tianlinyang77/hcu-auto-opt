@@ -13,6 +13,7 @@ from hcuopt.adapters.interfaces import (
     ProfilerAdapter,
     ResourceCleaner,
     SourceManagerAdapter,
+    Stage0ProbeAdapter,
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.domain.errors import AdapterUnavailable
@@ -27,6 +28,7 @@ class AdapterRegistry:
     candidate_generator: CandidateGenerator | None = None
     builder: BuilderAdapter | None = None
     measurement_harness: MeasurementHarness | None = None
+    stage0_probe: Stage0ProbeAdapter | None = None
     evaluator: EvaluatorAdapter | None = None
     resource_cleaner: ResourceCleaner | None = None
     executor: ExecutionAdapter | None = None
@@ -66,6 +68,7 @@ class AdapterRegistry:
             "candidate_generator",
             "builder",
             "measurement_harness",
+            "stage0_probe",
             "evaluator",
             "resource_cleaner",
             "executor",
