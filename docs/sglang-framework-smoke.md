@@ -38,6 +38,19 @@ No-op    新容器 -> 新 SGLang 进程 -> Ready -> Generate -> Stop
 - `max_new_tokens=8`
 - `sampling_seed=0`
 - 非流式响应
+- 服务入口：`sglang serve`
+- Attention Backend：`fa3`
+- `page-size=64`
+- `mem-fraction-static=0.85`
+- `trust-remote-code=true`
+
+这些启动参数参考 `HYGON-AI/inference-cookbook-das` Commit
+`2a7f431301e41e6ea1f377129bf5ba3e43ae299f`。其中 `CONTRIBUTING.md` 明确要求
+使用 `sglang serve` 而不是已废弃的 `python -m sglang.launch_server`，
+`docs/model-deployment/sglang/qwen3.5.md` 提供 Qwen/HCU 上 `fa3 + page-size 64`
+的公开部署参考。Cookbook 没有覆盖本项目的精确组合
+`SGLang 0.5.12 + Qwen2.5-0.5B + HYGON_DCU-3G`，因此它是配置来源，不是本项目
+兼容性结论的替代品；最终结论仍由 Target Lock 环境实测给出。
 
 锁定的 SGLang commit 接受的参数名是 `sampling_seed`，不是 `seed`。`seed` 会作为未知
 参数导致请求失败。`sampling_seed` 只有在 SGLang 确定性推理模式下才保证生效；首版
@@ -47,12 +60,16 @@ Baseline/No-op 输出的严格比较，而不是假定 seed 能消除所有差�
 服务命令由 Runner 固定组装，不经过 shell：
 
 ```bash
-python -m sglang.launch_server \
+sglang serve \
   --model-path /public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct \
   --served-model-name hcuopt-smoke \
   --host 127.0.0.1 \
   --port 30000 \
-  --tp-size 1
+  --tp-size 1 \
+  --trust-remote-code \
+  --attention-backend fa3 \
+  --page-size 64 \
+  --mem-fraction-static 0.85
 ```
 
 请求为：

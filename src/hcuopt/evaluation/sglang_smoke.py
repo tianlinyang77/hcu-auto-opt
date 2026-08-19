@@ -74,8 +74,18 @@ class SGLangWorkloadSpec(ContractModel):
     request_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     stop_grace_seconds: float = Field(default=10.0, gt=0, le=120)
     execution_timeout_seconds: int = Field(default=420, ge=1, le=86_400)
-    python_executable: Literal["python"] = "python"
-    server_module: Literal["sglang.launch_server"] = "sglang.launch_server"
+    runner_python_executable: Literal["python"] = "python"
+    server_entrypoint: Literal["sglang"] = "sglang"
+    server_subcommand: Literal["serve"] = "serve"
+    trust_remote_code: Literal[True] = True
+    attention_backend: Literal["fa3"] = "fa3"
+    page_size: Literal[64] = 64
+    mem_fraction_static: Literal[0.85] = 0.85
+    cookbook_repository: Literal[
+        "https://github.com/HYGON-AI/inference-cookbook-das"
+    ] = "https://github.com/HYGON-AI/inference-cookbook-das"
+    cookbook_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    cookbook_paths: list[str] = Field(min_length=1)
 
     @field_validator("model_path")
     @classmethod
@@ -96,6 +106,15 @@ class SGLangWorkloadSpec(ContractModel):
             raise ValueError("framework smoke requires stream=false")
         return value
 
+    @field_validator("cookbook_paths")
+    @classmethod
+    def validate_cookbook_paths(cls, values: list[str]) -> list[str]:
+        for value in values:
+            path = PurePosixPath(value)
+            if not value or path.is_absolute() or ".." in path.parts:
+                raise ValueError("cookbook_paths must contain clean relative paths")
+        return values
+
     @model_validator(mode="after")
     def validate_timeout_budget(self) -> SGLangWorkloadSpec:
         required = (
@@ -111,9 +130,8 @@ class SGLangWorkloadSpec(ContractModel):
 
     def server_argv(self) -> list[str]:
         return [
-            self.python_executable,
-            "-m",
-            self.server_module,
+            self.server_entrypoint,
+            self.server_subcommand,
             "--model-path",
             self.model_path,
             "--served-model-name",
@@ -124,6 +142,13 @@ class SGLangWorkloadSpec(ContractModel):
             str(self.port),
             "--tp-size",
             str(self.tensor_parallel_size),
+            "--trust-remote-code",
+            "--attention-backend",
+            self.attention_backend,
+            "--page-size",
+            str(self.page_size),
+            "--mem-fraction-static",
+            str(self.mem_fraction_static),
         ]
 
     def request_payload(self) -> dict[str, Any]:
@@ -374,7 +399,7 @@ def build_execution_request(
     values: dict[str, Any] = {
         "target_id": target.target_id,
         "argv": [
-            workload.python_executable,
+            workload.runner_python_executable,
             variant.runner_container_path,
             "--spec",
             variant.spec_container_path,

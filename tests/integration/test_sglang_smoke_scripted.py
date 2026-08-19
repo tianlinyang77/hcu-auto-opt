@@ -44,8 +44,19 @@ def _spec(port: int, **updates: Any) -> dict[str, Any]:
         "request_timeout_seconds": 2.0,
         "stop_grace_seconds": 0.5,
         "execution_timeout_seconds": 8,
-        "python_executable": "python",
-        "server_module": "sglang.launch_server",
+        "runner_python_executable": "python",
+        "server_entrypoint": "sglang",
+        "server_subcommand": "serve",
+        "trust_remote_code": True,
+        "attention_backend": "fa3",
+        "page_size": 64,
+        "mem_fraction_static": 0.85,
+        "cookbook_repository": "https://github.com/HYGON-AI/inference-cookbook-das",
+        "cookbook_commit": "2a7f431301e41e6ea1f377129bf5ba3e43ae299f",
+        "cookbook_paths": [
+            "CONTRIBUTING.md",
+            "docs/model-deployment/sglang/qwen3.5.md",
+        ],
     }
     value.update(updates)
     return value
