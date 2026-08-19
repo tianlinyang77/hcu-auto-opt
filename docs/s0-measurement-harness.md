@@ -21,6 +21,10 @@ the server-side Barrier remains fail-closed.
 3. Start a worker with the distinct `nmz36-stage0-measurement-v1` profile, supplying the
    locked-image workload callable, HCU device-timer implementation, telemetry collector,
    and explicit MeasurementPlan. There is intentionally no fallback host-only timer.
+   For a container pinned to physical HCU 7, set `ROCR_VISIBLE_DEVICES=7` only. ROCR then
+   exposes that physical device as logical device 0; adding `HIP_VISIBLE_DEVICES=7` after
+   that remapping hides the only visible device. `TorchCudaEventTimer` uses a synchronized
+   `torch.cuda.Event` origin and records device-relative nanosecond ticks from it.
 4. For each Formal Job, require `lease_scope=exclusive`, `lease_id`, `resource_id=hcu-7`,
    fencing token, and a live heartbeat. Capture pre/post HCU telemetry and background
    process state in the evidence.

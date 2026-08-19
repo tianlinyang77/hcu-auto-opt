@@ -5,7 +5,12 @@ import pytest
 from hcuopt.measurement.fixtures import KnownSignalFixture, NullSignalFixture
 from hcuopt.measurement.models import MeasurementPlan
 from hcuopt.measurement.sampling import collect_samples
-from hcuopt.measurement.timers import CalibrationError, calibrate_device_timer
+from hcuopt.measurement.timers import (
+    CalibrationError,
+    DeviceTimerUnavailableError,
+    TorchCudaEventTimer,
+    calibrate_device_timer,
+)
 
 
 class ScriptedClock:
@@ -37,6 +42,48 @@ class Workload:
 
     def run_batch(self, iterations: int) -> None:
         self.batches.append(iterations)
+
+
+class FakeEvent:
+    def __init__(self, cuda: FakeCuda) -> None:
+        self._cuda = cuda
+        self.tick = 0
+
+    def record(self) -> None:
+        self._cuda.next_tick += 1
+        self.tick = self._cuda.next_tick
+
+    def elapsed_time(self, other: FakeEvent) -> float:
+        return float(other.tick - self.tick)
+
+
+class FakeCuda:
+    def __init__(self, *, available: bool = True, device_count: int = 1) -> None:
+        self.available = available
+        self.count = device_count
+        self.next_tick = 0
+        self.selected_devices: list[int] = []
+
+    def is_available(self) -> bool:
+        return self.available
+
+    def device_count(self) -> int:
+        return self.count
+
+    def set_device(self, index: int) -> None:
+        self.selected_devices.append(index)
+
+    def synchronize(self) -> None:
+        return None
+
+    def Event(self, *, enable_timing: bool) -> FakeEvent:
+        assert enable_timing is True
+        return FakeEvent(self)
+
+
+class FakeTorch:
+    def __init__(self, cuda: FakeCuda) -> None:
+        self.cuda = cuda
 
 
 def _plan() -> MeasurementPlan:
@@ -84,6 +131,20 @@ def test_device_timer_calibration_rejects_non_monotonic_ticks() -> None:
             ScriptedDeviceTimer([5, 5]),
             sample_count=2,
         )
+
+
+def test_torch_cuda_event_timer_exposes_a_monotonic_device_time_axis() -> None:
+    cuda = FakeCuda()
+    timer = TorchCudaEventTimer(torch_module=FakeTorch(cuda))
+
+    assert cuda.selected_devices == [0]
+    assert timer.read_ticks() == 1_000_000
+    assert timer.read_ticks() == 2_000_000
+
+
+def test_torch_cuda_event_timer_refuses_an_unavailable_device() -> None:
+    with pytest.raises(DeviceTimerUnavailableError, match="no CUDA/HIP device"):
+        TorchCudaEventTimer(torch_module=FakeTorch(FakeCuda(available=False)))
 
 
 def test_scripted_known_and_null_signals_are_distinguished() -> None:

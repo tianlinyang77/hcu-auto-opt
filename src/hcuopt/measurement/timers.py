@@ -3,12 +3,17 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from math import isfinite
+from typing import Any, Protocol
 
 from hcuopt.measurement.models import ClockCalibration
 
 
 class CalibrationError(ValueError):
+    pass
+
+
+class DeviceTimerUnavailableError(RuntimeError):
     pass
 
 
@@ -24,6 +29,56 @@ class DeviceTimer(Protocol):
 class HostMonotonicClock:
     def now_ns(self) -> int:
         return time.monotonic_ns()
+
+
+class TorchCudaEventTimer:
+    """A device-time axis built from CUDA/HIP events.
+
+    The caller owns device visibility.  On nmz36 this means setting only
+    ``ROCR_VISIBLE_DEVICES=7`` before importing PyTorch: ROCR maps physical
+    HCU 7 to the container's logical device 0.
+    """
+
+    def __init__(self, *, device_index: int = 0, torch_module: Any | None = None) -> None:
+        if device_index < 0:
+            raise ValueError("device_index must be non-negative")
+        if torch_module is None:
+            try:
+                import torch as torch_module
+            except ImportError as error:  # pragma: no cover - depends on target image
+                raise DeviceTimerUnavailableError(
+                    "PyTorch is required for CUDA/HIP timing"
+                ) from error
+
+        self._torch = torch_module
+        self._device_index = device_index
+        if not self._torch.cuda.is_available():
+            raise DeviceTimerUnavailableError("PyTorch reports no CUDA/HIP device is available")
+        if self._torch.cuda.device_count() <= device_index:
+            raise DeviceTimerUnavailableError(
+                f"requested device {device_index}, but only "
+                f"{self._torch.cuda.device_count()} are visible"
+            )
+
+        self._torch.cuda.set_device(device_index)
+        self._torch.cuda.synchronize()
+        self._origin = self._torch.cuda.Event(enable_timing=True)
+        self._origin.record()
+        self._torch.cuda.synchronize()
+        self._last_ticks: int | None = None
+
+    def read_ticks(self) -> int:
+        snapshot = self._torch.cuda.Event(enable_timing=True)
+        snapshot.record()
+        self._torch.cuda.synchronize()
+        elapsed_ms = float(self._origin.elapsed_time(snapshot))
+        if not isfinite(elapsed_ms) or elapsed_ms < 0:
+            raise CalibrationError(f"invalid CUDA/HIP event elapsed time: {elapsed_ms!r} ms")
+        ticks = round(elapsed_ms * 1_000_000)
+        if self._last_ticks is not None and ticks <= self._last_ticks:
+            raise CalibrationError("CUDA/HIP event timer did not strictly advance")
+        self._last_ticks = ticks
+        return ticks
 
 
 def calibrate_device_timer(
