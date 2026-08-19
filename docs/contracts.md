@@ -7,6 +7,8 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | 对象 | 生产者 | 消费者 | 关键不变量 |
 |---|---|---|---|
 | Stage0Evidence | B/C 探针 | A/D | 原始证据可追溯，能力结果不可由调用方伪造 |
+| Stage0Run | A | B/C/D | 绑定 Target Snapshot；Dry Run 不得转为 Formal 结论 |
+| Stage0ProbeRecord | B/C Job | A/D | completed Job、租约、原始证据和 Adapter 来源一致 |
 | OptimizationTask | A | 所有 Worker | 固定目标、预算和自动发布权限 |
 | BaselineEpoch | A/B | C/D | 硬件、软件、配置、Workload 指纹完整 |
 | Hotspot | B | C | 包含调用路径、占比、机会评分与可补丁性 |
@@ -55,6 +57,9 @@ release_mode: hot_patch | overlay | manual_only
 ```
 
 MVP 中 `automatic_release_allowed` 在 API 和数据库层都强制为 `false`。
+任务同时保存 `stage0_authority=none|synthetic|formal`。旧 Fake 入口只能得到
+`synthetic`；只有 Target-bound Formal Run 经七探针 Barrier finalize 后才能得到
+`formal`。
 
 ## Contract 解冻
 

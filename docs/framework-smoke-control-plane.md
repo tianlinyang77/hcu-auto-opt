@@ -22,6 +22,7 @@ POST FrameworkSmokeCreate
   -> output equivalence EvaluationRun
   -> EvidenceBundle + cleanup/health evidence
   -> AWAITING_SIGNOFF
+  -> 审计化 Signoff -> COMPLETED / REJECTED
 ```
 
 Framework Smoke 使用独立状态链，不复用 `PROFILING`、`SEARCHING` 或 `PERFORMANCE`，避免把框架功能验证误写成性能优化结果。
@@ -50,8 +51,12 @@ Framework Smoke 使用独立状态链，不复用 `PROFILING`、`SEARCHING` 或 
 | GET | `/v1/framework-smoke/tasks/{task_id}/summary` | 查看全链路关系和人工摘要 |
 | POST | `/v1/framework-smoke/tasks/{task_id}/cancel` | 取消并使旧 Claim 失效 |
 | POST | `/v1/framework-smoke/tasks/{task_id}/retest` | 创建新的有意复测 Run |
+| POST | `/v1/framework-smoke/tasks/{task_id}/signoff` | 绑定通过的 EvidenceBundle 并记录人工批准/拒绝 |
 
 开发环境可以显式使用 `fake-v1-control-flow-only` 打通控制流。该结果不能作为 nmz36 环境、SGLang 功能或性能已经验证的证据。
+
+Signoff 记录 decision、actor、reason、EvidenceBundle 和 idempotency key。批准或拒绝后均
+成为终态；同一个 idempotency key 只有输入完全一致时才允许重放。
 
 ## #5 / #6 / #7 集成结果
 

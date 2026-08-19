@@ -17,6 +17,7 @@ FRAMEWORK_SMOKE_CAPABILITIES = frozenset(
         "resource_cleaner",
     }
 )
+STAGE0_CAPABILITIES = frozenset({"stage0_probe"})
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 
 
@@ -34,13 +35,24 @@ class AdapterProfile:
                 f"{', '.join(missing)}"
             )
 
+    def require_stage0(self) -> None:
+        missing = sorted(STAGE0_CAPABILITIES - self.capabilities)
+        if missing:
+            raise AdapterUnavailable(
+                f"adapter profile {self.name} lacks Stage 0 capabilities: "
+                f"{', '.join(missing)}"
+            )
+
     def validate_target(
         self,
         target: TargetSpec,
         *,
         scope: str = "framework_smoke",
     ) -> None:
-        self.require_framework_smoke()
+        if scope == "stage0":
+            self.require_stage0()
+        else:
+            self.require_framework_smoke()
         if self.implementation_kind == "real":
             blockers = [
                 item.id
@@ -70,7 +82,7 @@ class AdapterProfileCatalog:
                 AdapterProfile(
                     name="fake-v1-control-flow-only",
                     implementation_kind="fake",
-                    capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
+                    capabilities=FRAMEWORK_SMOKE_CAPABILITIES | STAGE0_CAPABILITIES,
                 ),
                 AdapterProfile(
                     name=REAL_FRAMEWORK_SMOKE_PROFILE,

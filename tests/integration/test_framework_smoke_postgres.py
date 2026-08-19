@@ -1,4 +1,5 @@
 import os
+import threading
 import unittest
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -8,12 +9,18 @@ import pytest
 from hcuopt.contracts.v1 import (
     FrameworkSmokeCreate,
     FrameworkSmokeResult,
+    FrameworkSmokeSignoffRequest,
     FrameworkSmokeVariantExecution,
     PairedFrameworkSmokeResult,
     WorkerRegister,
 )
-from hcuopt.domain.enums import CandidateState, TaskState, WorkerType
-from hcuopt.domain.errors import StaleClaimToken
+from hcuopt.domain.enums import (
+    CandidateState,
+    FrameworkSmokeDecision,
+    TaskState,
+    WorkerType,
+)
+from hcuopt.domain.errors import Conflict, StaleClaimToken
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.storage.repository import PostgresRepository
 from hcuopt.targets import load_target
@@ -186,6 +193,78 @@ class FrameworkSmokePostgresTests(unittest.TestCase):
                 claimed["claim_token"],
                 claimed["fencing_token"],
                 {"late": True},
+            )
+
+    def test_signoff_is_auditable_and_idempotent(self) -> None:
+        task = self.repository.create_framework_smoke_task(
+            FrameworkSmokeCreate(
+                name="signoff fixture",
+                target_id=self.target.target_id,
+                adapter_profile=PROFILE,
+                idempotency_key="framework-signoff-task",
+            ),
+            self.target,
+            str(TARGET_PATH),
+        )
+        self._register_workers()
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        self.assertIsNotNone(self._complete_claim("gpu-fake"))
+        summary = self.repository.framework_smoke_summary(task["task_id"])
+        evidence_id = summary["evidence_bundles"][0]["evidence_id"]
+        request = FrameworkSmokeSignoffRequest(
+            decision=FrameworkSmokeDecision.APPROVED,
+            actor="fixture-reviewer",
+            reason="real evidence reviewed",
+            evidence_bundle_id=evidence_id,
+            idempotency_key="framework-signoff-decision",
+        )
+
+        barrier = threading.Barrier(2)
+        decisions: list[dict] = []
+        errors: list[BaseException] = []
+
+        def signoff() -> None:
+            try:
+                barrier.wait()
+                decisions.append(
+                    self.repository.signoff_framework_task(task["task_id"], request)
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=signoff) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(len({item["signoff_id"] for item in decisions}), 1)
+        first = decisions[0]
+        replay = self.repository.signoff_framework_task(task["task_id"], request)
+
+        self.assertEqual(first["signoff_id"], replay["signoff_id"])
+        self.assertEqual(first["task_state"], TaskState.COMPLETED.value)
+        self.assertEqual(
+            self.repository.get_task(task["task_id"])["state"],
+            TaskState.COMPLETED.value,
+        )
+        events = self.repository.list_task_events(task["task_id"])
+        self.assertEqual(
+            len(
+                [
+                    event
+                    for event in events
+                    if event["event_type"] == "framework_smoke_signed_off"
+                ]
+            ),
+            1,
+        )
+        with self.assertRaises(Conflict):
+            self.repository.signoff_framework_task(
+                task["task_id"], request.model_copy(update={"reason": "changed"})
             )
 
     def test_terminal_source_failure_rejects_the_task_atomically(self) -> None:

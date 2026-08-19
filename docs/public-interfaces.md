@@ -31,6 +31,8 @@ Framework Smoke 的 baseline/noop 双执行身份；变更依据见
 | `SourceSnapshot` | C | A/B/D | Commit、Tree Hash、Source Hash 和 Worktree 可追溯 |
 | `ArtifactManifest` | C | A/D | 内容 Hash、构建配方、SBOM/签名位置和 synthetic 标记完整 |
 | `EvidenceBundle` | D | A/Registry | 绑定 Task、Target、Baseline、Candidate、协议版本和原始证据 |
+| `Stage0Run` | A | B/C/D | 绑定不可变 Target Snapshot，区分 Dry Run 与 Formal |
+| `Stage0ProbeResult` | B/C | A/D | 必须来自 completed Job；Formal 需要真实来源、独占租约和原始证据 Hash |
 
 所有输入模型默认 `extra=forbid`。新增或改名字段必须走 ADR、上下游 Reviewer 和兼容测试，不能在各自模块重新声明同名结构。
 
@@ -88,3 +90,6 @@ TargetSpec → SourceSnapshot → No-op Artifact
 A 线的持久化、状态、API、取消、复测与 Reconcile 已进入 F1 实现，详见
 [Framework Smoke 控制面](framework-smoke-control-plane.md)。默认目录同时声明 Fake 和
 `nmz36-framework-smoke-v1`；真实任务仍须通过相应 Target blocker 作用域。
+
+F1 之后的 Stage 0 已建立 Target-bound 控制面和七探针 Barrier，接口与真假证据边界见
+[S0-A Stage 0 控制面](s0-control-plane.md)。

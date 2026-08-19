@@ -6,20 +6,24 @@ from uuid import UUID
 
 from hcuopt.domain.enums import JobType
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
+from hcuopt.orchestrator.stage0 import Stage0Coordinator
 from hcuopt.orchestrator.walking import WalkingSkeletonCoordinator
 from hcuopt.storage.repository import PostgresRepository
 
 FRAMEWORK_JOB_TYPES = frozenset(
     {JobType.SOURCE_PREPARE, JobType.NOOP_BUILD, JobType.FRAMEWORK_SMOKE}
 )
+STAGE0_JOB_TYPES = frozenset({JobType.STAGE0_PROBE})
 
 
 class WorkflowRouter:
     name = "workflow-router-v1"
 
     def __init__(self, repository: PostgresRepository) -> None:
+        self.repository = repository
         self.walking = WalkingSkeletonCoordinator(repository)
         self.framework_smoke = FrameworkSmokeCoordinator(repository)
+        self.stage0 = Stage0Coordinator(repository)
 
     def start_after_baseline(
         self, task_id: UUID, baseline: Mapping[str, Any]
@@ -31,8 +35,17 @@ class WorkflowRouter:
         job_type = JobType(materialized["job_type"])
         if job_type in FRAMEWORK_JOB_TYPES:
             self.framework_smoke.advance(materialized)
+        elif job_type in STAGE0_JOB_TYPES:
+            self.stage0.advance(materialized)
         else:
             self.walking.advance(materialized)
 
     def reconcile(self) -> list[UUID]:
-        return [*self.walking.reconcile(), *self.framework_smoke.reconcile()]
+        advanced: list[UUID] = []
+        # A Stage 0 task deliberately continues into the optimization state
+        # machine after a formal pass. Route recovery by durable JobType rather
+        # than by the task's original workflow_type.
+        for job in self.repository.unadvanced_succeeded_jobs():
+            self.advance(job)
+            advanced.append(job["job_id"])
+        return advanced
