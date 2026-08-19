@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.platform_v1 import AdapterProvenance, MeasurementSeries
 from hcuopt.domain.enums import LeaseScope
 from hcuopt.measurement.evidence import EvidenceArtifact, write_evidence
@@ -129,7 +128,7 @@ class EvidenceMeasurementHarness:
         finally:
             if formal:
                 cleanup_evidence = self._cleanup(context)
-        if formal and not cleanup_is_healthy(cleanup_evidence):
+        if formal and not _cleanup_is_healthy(cleanup_evidence):
             raise MeasurementSafetyError("formal measurement cleanup is unhealthy")
         return HarnessRun(
             series=MeasurementSeries(
@@ -193,3 +192,16 @@ class EvidenceMeasurementHarness:
             "fence": dict(self.cleaner.fence(resource_id, fencing_token)),
             "health": dict(self.cleaner.health_check(resource_id)),
         }
+
+
+def _cleanup_is_healthy(evidence: Mapping[str, Any] | None) -> bool:
+    if evidence is None:
+        return False
+    fence = evidence.get("fence")
+    health = evidence.get("health")
+    return (
+        isinstance(fence, Mapping)
+        and isinstance(health, Mapping)
+        and fence.get("fenced") is True
+        and health.get("healthy") is True
+    )
