@@ -16,6 +16,8 @@ from hcuopt.contracts.platform_v1 import (
     SourceSnapshot,
     TargetSpec,
 )
+from hcuopt.domain.enums import Stage0ProbeType
+from hcuopt.measurement.stage0 import Stage0ProbeOutput
 
 
 def _fake_provenance(capability: str, adapter_name: str) -> AdapterProvenance:
@@ -49,6 +51,43 @@ class FakeProfiler:
                 "evidence_uri": f"fake://profile/{workload_id}",
             }
         ]
+
+
+class FakeStage0Probe:
+    """Synthetic seven-probe implementation for Dry Run control-flow tests."""
+
+    provenance = _fake_provenance("stage0_probe", "FakeStage0Probe")
+
+    _summaries: dict[Stage0ProbeType, dict[str, Any]] = {
+        Stage0ProbeType.FINGERPRINT: {
+            "hardware_fingerprint": "synthetic-hardware",
+            "software_fingerprint": "synthetic-software",
+        },
+        Stage0ProbeType.TIMER: {"timer_resolution_ns": 0.0},
+        Stage0ProbeType.NOISE: {
+            "gate_result": "fail",
+            "noise_sigma_ns": 0.0,
+            "noise_cv": 0.0,
+            "mde_ratio": 0.0,
+        },
+        Stage0ProbeType.KNOWN_SIGNAL: {"detected": False},
+        Stage0ProbeType.NULL_SIGNAL: {"false_positive": False},
+        Stage0ProbeType.PROFILER: {"capability": "none"},
+        Stage0ProbeType.HOTPATCH: {"capability": "none"},
+    }
+
+    def run_probe(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> Stage0ProbeOutput:
+        del output_dir
+        probe_type = Stage0ProbeType(str(payload["probe_type"]))
+        return Stage0ProbeOutput(
+            summary=self._summaries[probe_type],
+            raw_evidence_uri=f"fake://stage0/{probe_type.value}",
+            raw_evidence_hash="sha256:" + "0" * 64,
+            cleanup_evidence=None,
+            synthetic=True,
+        )
 
 
 class FakeCandidateGenerator:

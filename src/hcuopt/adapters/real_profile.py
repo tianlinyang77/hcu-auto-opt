@@ -11,6 +11,7 @@ from hcuopt.adapters.noop_builder import NoopBuilder
 from hcuopt.adapters.profiles import (
     REAL_FRAMEWORK_SMOKE_PROFILE,
     REAL_STAGE0_MEASUREMENT_PROFILE,
+    REAL_STAGE0_PROFILE,
 )
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
@@ -21,6 +22,11 @@ from hcuopt.measurement.harness import EvidenceMeasurementHarness, TelemetryColl
 from hcuopt.measurement.sampling import SampledWorkload
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
 from hcuopt.measurement.timers import DeviceTimer, HostClock
+from hcuopt.runtime_probes import (
+    OverlayCapabilityProbe,
+    ProfilerCapabilityProbe,
+    RuntimeProbeAdapter,
+)
 
 
 def build_nmz36_framework_smoke_registry(
@@ -98,4 +104,29 @@ def build_nmz36_stage0_measurement_registry(
             null_signal_detector=null_signal_detector,
         ),
         resource_cleaner=cleaner,
+    )
+
+
+def build_nmz36_runtime_probe_registry(
+    target: TargetSpec,
+    output_dir: Path,
+    *,
+    runner: CommandRunner | None = None,
+) -> AdapterRegistry:
+    """Compose the real S0-C probes under the shared Stage 0 profile."""
+
+    del output_dir
+    profile = REAL_STAGE0_PROFILE
+    executor = ContainerExecutionAdapter(runner, profile=profile)
+    cleaner = ContainerResourceCleaner(target, runner, profile=profile)
+    runtime_probe = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(executor=executor),
+        OverlayCapabilityProbe(executor, cleaner),
+        profile=profile,
+    )
+    return AdapterRegistry(
+        profile=profile,
+        executor=executor,
+        resource_cleaner=cleaner,
+        stage0_probe=runtime_probe,
     )

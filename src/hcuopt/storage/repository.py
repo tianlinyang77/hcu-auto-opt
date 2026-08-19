@@ -287,6 +287,9 @@ class PostgresRepository:
                     "protocol_version": request.protocol_version,
                     "mode": request.mode.value,
                 }
+                runtime_probe = request.budget.get("runtime_probe")
+                if runtime_probe is not None:
+                    payload["runtime_probe"] = runtime_probe
                 connection.execute(
                     """
                     INSERT INTO jobs (
