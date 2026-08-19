@@ -142,8 +142,8 @@ class PostgresRepository:
                 target_snapshot_id, target_id, target_fingerprint,
                 specification, source_path
             ) VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (target_id, target_fingerprint) DO UPDATE
-            SET target_fingerprint = EXCLUDED.target_fingerprint
+            ON CONFLICT (target_snapshot_id) DO UPDATE
+            SET target_snapshot_id = EXCLUDED.target_snapshot_id
             RETURNING *
             """,
             (

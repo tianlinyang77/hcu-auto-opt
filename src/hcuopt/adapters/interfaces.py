@@ -15,6 +15,7 @@ from hcuopt.contracts.platform_v1 import (
     TargetSpec,
 )
 from hcuopt.domain.models import OptimizationCandidate
+from hcuopt.measurement.stage0 import Stage0ProbeOutput
 
 
 class ProfilerAdapter(Protocol):
@@ -43,6 +44,12 @@ class MeasurementHarness(Protocol):
     provenance: AdapterProvenance
 
     def run(self, plan: Mapping[str, Any], output_dir: Path) -> MeasurementSeries: ...
+
+
+class Stage0ProbeAdapter(Protocol):
+    provenance: AdapterProvenance
+
+    def run_probe(self, payload: Mapping[str, Any], output_dir: Path) -> Stage0ProbeOutput: ...
 
 
 class EvaluatorAdapter(Protocol):

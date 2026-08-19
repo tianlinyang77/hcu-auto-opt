@@ -162,6 +162,7 @@ class Worker:
             "lease_id": job.get("lease_id"),
             "resource_id": job.get("resource_id"),
             "fencing_token": job.get("fencing_token"),
+            "lease_scope": job.get("lease_scope"),
             "lease_lost_event": lease_lost,
         }
         heartbeat = threading.Thread(
