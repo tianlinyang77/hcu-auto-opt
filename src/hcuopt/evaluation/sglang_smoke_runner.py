@@ -59,8 +59,16 @@ EXPECTED_SPEC_FIELDS = frozenset(
         "request_timeout_seconds",
         "stop_grace_seconds",
         "execution_timeout_seconds",
-        "python_executable",
-        "server_module",
+        "runner_python_executable",
+        "server_entrypoint",
+        "server_subcommand",
+        "trust_remote_code",
+        "attention_backend",
+        "page_size",
+        "mem_fraction_static",
+        "cookbook_repository",
+        "cookbook_commit",
+        "cookbook_paths",
     }
 )
 
@@ -145,16 +153,43 @@ def validate_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise SpecValidationError(
             "execution_timeout_seconds must exceed ready, request, and stop timeouts"
         )
-    _require_exact(spec, "python_executable", "python")
-    _require_exact(spec, "server_module", "sglang.launch_server")
+    _require_exact(spec, "runner_python_executable", "python")
+    _require_exact(spec, "server_entrypoint", "sglang")
+    _require_exact(spec, "server_subcommand", "serve")
+    _require_exact(spec, "trust_remote_code", True)
+    _require_exact(spec, "attention_backend", "fa3")
+    _require_exact(spec, "page_size", 64)
+    mem_fraction_static = _require_number(
+        spec, "mem_fraction_static", minimum=0.001, maximum=0.999
+    )
+    if mem_fraction_static != 0.85:
+        raise SpecValidationError("mem_fraction_static must equal 0.85")
+    _require_exact(
+        spec,
+        "cookbook_repository",
+        "https://github.com/HYGON-AI/inference-cookbook-das",
+    )
+    cookbook_commit = _require_nonempty_string(spec, "cookbook_commit")
+    if len(cookbook_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in cookbook_commit
+    ):
+        raise SpecValidationError("cookbook_commit must be a lowercase 40-character commit")
+    cookbook_paths = spec["cookbook_paths"]
+    if (
+        not isinstance(cookbook_paths, list)
+        or not cookbook_paths
+        or any(not isinstance(path, str) or not path for path in cookbook_paths)
+    ):
+        raise SpecValidationError("cookbook_paths must be a non-empty list of strings")
+    if any(path.startswith("/") or ".." in path.split("/") for path in cookbook_paths):
+        raise SpecValidationError("cookbook_paths must contain clean relative paths")
     return spec
 
 
 def server_argv(spec: Mapping[str, Any]) -> list[str]:
     return [
-        str(spec["python_executable"]),
-        "-m",
-        str(spec["server_module"]),
+        str(spec["server_entrypoint"]),
+        str(spec["server_subcommand"]),
         "--model-path",
         str(spec["model_path"]),
         "--served-model-name",
@@ -165,6 +200,13 @@ def server_argv(spec: Mapping[str, Any]) -> list[str]:
         str(spec["port"]),
         "--tp-size",
         str(spec["tensor_parallel_size"]),
+        "--trust-remote-code",
+        "--attention-backend",
+        str(spec["attention_backend"]),
+        "--page-size",
+        str(spec["page_size"]),
+        "--mem-fraction-static",
+        str(spec["mem_fraction_static"]),
     ]
 
 
@@ -922,6 +964,7 @@ def _finalize_stream(handle: Any, temporary: Path, final_path: Path) -> None:
         os.fsync(handle.fileno())
         handle.close()
     os.replace(temporary, final_path)
+    final_path.chmod(0o644)
 
 
 def _atomic_write_json(path: Path, value: Any) -> None:
@@ -951,6 +994,7 @@ def _atomic_write_json(path: Path, value: Any) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        path.chmod(0o644)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

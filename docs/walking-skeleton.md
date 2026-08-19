@@ -23,7 +23,7 @@ docker compose run --rm api \
 
 API 文档位于 `http://localhost:8000/docs`。Demo 正常结束时，Task 状态为 `awaiting_signoff`，两个 Candidate 中一个为 `rejected`，一个为 `release_candidate`。Fake performance/E2E 只驱动控制流：EvaluationRun 带 `synthetic=true`，`passed` 为空，并且不包含加速比、延迟、吞吐或置信区间。
 
-## 已冻结的 platform-v1.1 边界
+## 已冻结的 platform-v1.2 边界
 
 | 边界 | 生产者 | 消费者 | 当前替身 |
 |---|---|---|---|

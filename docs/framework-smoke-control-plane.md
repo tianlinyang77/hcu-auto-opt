@@ -4,7 +4,9 @@
 
 Framework Smoke 是性能优化之前的真实框架链路。它回答的是“锁定的 Target、源码、No-op 制品、执行、输出一致性和证据能否被同一套控制面可靠串起来”，不回答“Kernel 是否更快”。
 
-当前 A 线只实现控制面、编排、持久化和 Adapter 注入边界。SSH、容器资源清理、Git Worktree、真实构建和 SGLang 请求分别由 #5、#6、#7 提供，不能在控制面中偷偷替换成 Fake。
+控制面、Git Worktree/确定性 No-op 制品、容器执行/清理和 SGLang 严格等价性现已通过
+`nmz36-framework-smoke-v1` 组合为一个真实 Profile。Fake 仍需显式选择，真实链路不允许
+静默回退 Fake。
 
 ## 完整链路
 
@@ -16,7 +18,7 @@ POST FrameworkSmokeCreate
   -> No-op Candidate + NOOP_BUILD Job
   -> Candidate SourceSnapshot + ArtifactManifest
   -> FRAMEWORK_SMOKE Job（独占资源 + fencing token）
-  -> ExecutionRequest / ExecutionAttempt
+  -> Baseline/No-op 双 ExecutionRequest / ExecutionAttempt
   -> output equivalence EvaluationRun
   -> EvidenceBundle + cleanup/health evidence
   -> AWAITING_SIGNOFF
@@ -28,7 +30,7 @@ Framework Smoke 使用独立状态链，不复用 `PROFILING`、`SEARCHING` 或 
 
 - 任务创建必须显式给出 `adapter_profile`；未知 Profile 或缺少六项能力时以 `AdapterUnavailable` 失败。
 - Fake Profile 只能显式选择，所有结果必须为 `synthetic=true`，并固定输出 `performance_conclusion=not_measured`。
-- Real Profile 遇到 Target Lock 中未关闭的 blocker 时以 `TargetNotReady` 失败。
+- Real Profile 遇到当前 gate 作用域内未关闭的 blocker 时以 `TargetNotReady` 失败。
 - Job Claim 同时匹配 `worker_type + adapter_profile`；旧 Worker 不会领取 F1 Job。
 - Target、Baseline、Source、Artifact、Execution、Evaluation 和 Evidence 均保存稳定关联。
 - 同一个 Job Completion 重放使用稳定 idempotency key，不重复写 Evaluation 或 Evidence。
@@ -51,15 +53,16 @@ Framework Smoke 使用独立状态链，不复用 `PROFILING`、`SEARCHING` 或 
 
 开发环境可以显式使用 `fake-v1-control-flow-only` 打通控制流。该结果不能作为 nmz36 环境、SGLang 功能或性能已经验证的证据。
 
-## 接入 #5 / #6 / #7
+## #5 / #6 / #7 集成结果
 
-三条实现线只需要实现已经冻结的 Adapter Protocol，并使用同一 Profile 名注册 Worker：
+三条实现线使用同一 Profile 名注册 Worker：
 
 - #5：`SourceManagerAdapter`、`BuilderAdapter`、`ArtifactStoreAdapter`；
 - #6：`ExecutionAdapter`、`ResourceCleaner`；
 - #7：`EvaluatorAdapter` 和 Evidence 内容。
 
-控制面不 fork 这些实现，也不把 Profile 缺失解释成可回退 Fake。真实 Profile 只有在六项能力、Target blocker 和 Contract Test 都通过后才加入默认 Profile Catalog。
+控制面不 fork 这些实现，也不把 Profile 缺失解释成可回退 Fake。默认 Profile Catalog
+已经声明真实 Profile；任务创建和 Worker Claim 仍会检查 Profile 与 Target blocker 作用域。
 
 #5 的确定性 Hash、No-op、Artifact Store 和清理语义见
 [F1-C 源码与制品证据链](f1-c-source-artifact.md)。

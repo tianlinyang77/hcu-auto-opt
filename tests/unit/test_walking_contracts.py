@@ -112,6 +112,14 @@ def test_evaluation_migration_preserves_runs_and_attempts() -> None:
     assert "legacy synthetic performance claims removed" in sql
 
 
+def test_dual_execution_migration_disambiguates_variants() -> None:
+    sql = migration_sql(4)
+    assert "ADD COLUMN variant" in sql
+    assert "execution_attempts_run_variant_attempt_key" in sql
+    assert "UNIQUE (evaluation_run_id, variant, attempt_number)" in sql
+    assert "('legacy', 'baseline', 'noop')" in sql
+
+
 def test_api_exposes_all_walking_skeleton_boundaries() -> None:
     paths = create_app().openapi()["paths"]
     expected = {

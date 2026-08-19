@@ -117,7 +117,28 @@ def test_locked_workload_has_the_exact_deterministic_request() -> None:
         "stream": False,
     }
     assert "seed" not in workload.request_payload()["sampling_params"]
-    assert workload.server_argv()[-2:] == ["--tp-size", "1"]
+    assert workload.server_argv() == [
+        "sglang",
+        "serve",
+        "--model-path",
+        "/public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct",
+        "--served-model-name",
+        "hcuopt-smoke",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "30000",
+        "--tp-size",
+        "1",
+        "--trust-remote-code",
+        "--attention-backend",
+        "fa3",
+        "--page-size",
+        "64",
+        "--mem-fraction-static",
+        "0.85",
+    ]
+    assert workload.cookbook_commit == "2a7f431301e41e6ea1f377129bf5ba3e43ae299f"
 
 
 @pytest.mark.parametrize(
@@ -129,6 +150,11 @@ def test_locked_workload_has_the_exact_deterministic_request() -> None:
         ({"stream": True}, "stream=false"),
         ({"model_path": "relative/model"}, "absolute"),
         ({"execution_timeout_seconds": 370}, "must exceed"),
+        ({"server_entrypoint": "python"}, "sglang"),
+        ({"attention_backend": "torch_native"}, "fa3"),
+        ({"page_size": 32}, "64"),
+        ({"mem_fraction_static": 0.9}, "0.85"),
+        ({"cookbook_paths": ["../other.md"]}, "clean relative"),
     ),
 )
 def test_workload_rejects_unsafe_or_nondeterministic_values(
@@ -198,10 +224,14 @@ def test_execution_request_is_digest_locked_leased_and_self_contained() -> None:
     ]
     assert {mount.target for mount in request.mounts} == {
         "/opt/hcuopt/sglang_smoke_runner.py",
+        "/opt/hyhal",
         "/work/input/spec.json",
         "/work/output",
         workload.model_path,
     }
+    runtime_mount = next(mount for mount in request.mounts if mount.target == "/opt/hyhal")
+    assert runtime_mount.source == "/opt/hyhal"
+    assert runtime_mount.read_only is True
 
 
 def test_noop_request_is_bound_to_the_declared_artifact() -> None:

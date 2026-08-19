@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -113,6 +114,7 @@ class Worker:
         heartbeat_seconds: float = 15.0,
         adapters: AdapterRegistry | None = None,
         handlers: JobHandler | None = None,
+        output_dir: Path | None = None,
     ) -> None:
         if adapters is not None and handlers is not None:
             raise ValueError("pass adapters or handlers, not both")
@@ -126,7 +128,7 @@ class Worker:
             self.capabilities.setdefault("adapter_profile", "custom-handler")
         else:
             registry = adapters or AdapterRegistry.fake()
-            self.handlers = JobHandlers(registry)
+            self.handlers = JobHandlers(registry, output_dir)
             self.capabilities.setdefault("adapter_profile", registry.profile)
             self.capabilities.setdefault("adapters", list(registry.available()))
         self.stop_event = threading.Event()
@@ -151,15 +153,16 @@ class Worker:
             return False
         if job is None:
             return False
+        heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
         payload = dict(job["payload"])
         payload["_job_context"] = {
             "job_id": job["job_id"],
             "attempt_number": job["attempts"],
             "resource_id": job.get("resource_id"),
             "fencing_token": job.get("fencing_token"),
+            "lease_lost_event": lease_lost,
         }
-        heartbeat_stop = threading.Event()
-        lease_lost = threading.Event()
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
             args=(job, heartbeat_stop, lease_lost, payload),

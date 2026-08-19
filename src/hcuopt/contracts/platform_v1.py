@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -9,7 +10,7 @@ from pydantic import Field, field_validator, model_validator
 from hcuopt.contracts.base import ContractModel
 from hcuopt.domain.enums import LeaseScope
 
-PLATFORM_CONTRACT_VERSION = "platform-v1.1"
+PLATFORM_CONTRACT_VERSION = "platform-v1.2"
 SHA256_PATTERN = r"^sha256:[0-9a-f]{64}$"
 GIT_COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 SYNTHETIC_PERFORMANCE_CLAIM_FIELDS = frozenset(
@@ -73,6 +74,17 @@ class TargetBlocker(ContractModel):
     id: str = Field(min_length=1, max_length=100)
     status: Literal["open", "resolved", "accepted"]
     detail: str = Field(min_length=1)
+    blocks: list[
+        Literal["framework_smoke", "stage0", "optimization", "release"]
+    ] = Field(
+        default_factory=lambda: [
+            "framework_smoke",
+            "stage0",
+            "optimization",
+            "release",
+        ],
+        min_length=1,
+    )
 
 
 class InferenceImageSpec(ContractModel):
@@ -132,6 +144,19 @@ class HostEnvironmentSpec(ContractModel):
     driver_version: str = Field(min_length=1)
 
 
+class MountSpec(ContractModel):
+    source: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    read_only: bool = True
+
+    @field_validator("source", "target")
+    @classmethod
+    def validate_mount_path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise ValueError("mount paths must be absolute")
+        return value
+
+
 class ExecutionHostSpec(ContractModel):
     name: str = Field(min_length=1)
     address: str = Field(min_length=1)
@@ -139,6 +164,7 @@ class ExecutionHostSpec(ContractModel):
     prohibited_work_root: str = Field(min_length=1)
     accelerator: AcceleratorBinding
     observed_host_environment: HostEnvironmentSpec
+    runtime_mounts: list[MountSpec] = Field(default_factory=list)
 
     @field_validator("work_root", "prohibited_work_root")
     @classmethod
@@ -151,6 +177,17 @@ class ExecutionHostSpec(ContractModel):
     def validate_work_roots(self) -> ExecutionHostSpec:
         if self.work_root == self.prohibited_work_root:
             raise ValueError("work_root cannot equal prohibited_work_root")
+        prohibited = PurePosixPath(self.prohibited_work_root)
+        for mount in self.runtime_mounts:
+            if not mount.read_only:
+                raise ValueError("target runtime mounts must be read-only")
+            source = PurePosixPath(mount.source)
+            if ".." in source.parts:
+                raise ValueError("target runtime mount sources must be clean absolute paths")
+            if source == prohibited or source.is_relative_to(prohibited):
+                raise ValueError(
+                    "target runtime mount sources cannot use prohibited_work_root"
+                )
         return self
 
 
@@ -170,19 +207,6 @@ class TargetSpec(ContractModel):
         if self.automatic_release_allowed:
             raise ValueError("MVP target specs cannot enable automatic release")
         return self
-
-
-class MountSpec(ContractModel):
-    source: str = Field(min_length=1)
-    target: str = Field(min_length=1)
-    read_only: bool = True
-
-    @field_validator("source", "target")
-    @classmethod
-    def validate_mount_path(cls, value: str) -> str:
-        if not value.startswith("/"):
-            raise ValueError("mount paths must be absolute")
-        return value
 
 
 class ExecutionRequest(ContractModel):
@@ -349,6 +373,7 @@ class ExecutionAttempt(ContractModel):
     execution_attempt_id: UUID = Field(default_factory=uuid4)
     evaluation_run_id: UUID
     request_id: UUID
+    variant: Literal["legacy", "baseline", "noop"] = "legacy"
     attempt_number: int = Field(ge=1)
     status: Literal["succeeded", "failed", "timed_out", "cancelled"]
     exit_code: int | None

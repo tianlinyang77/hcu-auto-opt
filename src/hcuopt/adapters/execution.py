@@ -36,10 +36,7 @@ SECRET_ENVIRONMENT_NAME = re.compile(
     r"(?:^|_)(?:PASSWORD|PASSWD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)(?:_|$)",
     re.IGNORECASE,
 )
-HCU_VISIBILITY_VARIABLES = (
-    "HIP_VISIBLE_DEVICES",
-    "ROCR_VISIBLE_DEVICES",
-)
+HCU_VISIBILITY_VARIABLE = "HIP_VISIBLE_DEVICES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,14 +476,14 @@ class ContainerExecutionAdapter:
                     f"secrets cannot be embedded in ExecutionRequest.environment: {key}"
                 )
         if request.lease_scope is not LeaseScope.NONE:
-            device = str(target.execution_host.accelerator.device_index)
-            for key in HCU_VISIBILITY_VARIABLES:
-                declared = environment.get(key)
-                if declared is not None and declared != device:
-                    raise ExecutionSafetyError(
-                        f"{key}={declared} conflicts with locked HCU {device}"
-                    )
-                environment[key] = device
+            expected = str(target.execution_host.accelerator.device_index)
+            declared = environment.get(HCU_VISIBILITY_VARIABLE)
+            if declared is not None and declared != expected:
+                raise ExecutionSafetyError(
+                    f"{HCU_VISIBILITY_VARIABLE}={declared} conflicts with locked HCU; "
+                    f"expected {expected}"
+                )
+            environment[HCU_VISIBILITY_VARIABLE] = expected
         return environment
 
     @staticmethod

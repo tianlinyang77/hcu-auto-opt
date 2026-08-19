@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -58,15 +59,30 @@ def test_adapter_profile_fails_closed_for_unknown_or_missing_capability() -> Non
         incomplete.require_framework_smoke()
 
 
-def test_real_profile_rejects_target_with_open_blockers() -> None:
+def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
     target = load_target(TARGET_PATH)
+    framework_blocked = target.model_copy(
+        update={
+            "blockers": [
+                blocker.model_copy(update={"status": "open"})
+                if blocker.id == "locked_image_dependency_conflict"
+                else blocker
+                for blocker in target.blockers
+            ]
+        }
+    )
     profile = AdapterProfile(
         name="real-test",
         implementation_kind="real",
         capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
     )
-    with pytest.raises(TargetNotReady, match="open blockers"):
-        profile.validate_target(target)
+    with pytest.raises(
+        TargetNotReady,
+        match="open blockers for framework_smoke: locked_image_dependency_conflict",
+    ):
+        profile.validate_target(framework_blocked)
+    with pytest.raises(TargetNotReady, match="open blockers for stage0"):
+        profile.validate_target(target, scope="stage0")
 
 
 def test_target_catalog_lists_valid_targets_and_rejects_duplicate_ids(
@@ -145,12 +161,39 @@ def test_openapi_exposes_framework_smoke_control_plane() -> None:
     assert "/v1/resources/{resource_id}/cleanup" in paths
 
 
-def test_framework_create_returns_stable_profile_and_target_errors() -> None:
+def test_framework_create_returns_stable_profile_and_target_errors(tmp_path: Path) -> None:
     class StubRepository:
         def migrate(self) -> None:
             return None
 
-    target_catalog = TargetCatalog(TARGET_PATH.parent)
+        def create_framework_smoke_task(self, payload, target, source_path):
+            now = datetime.now(timezone.utc)
+            return {
+                "task_id": uuid4(),
+                "name": payload.name,
+                "workload_id": f"framework-smoke:{target.target_id}",
+                "state": "source_preparing",
+                "project_mode": None,
+                "budget": {},
+                "automatic_release_allowed": False,
+                "version": 0,
+                "created_at": now,
+                "updated_at": now,
+                "workflow_type": "framework_smoke",
+                "target_id": target.target_id,
+                "target_snapshot_id": uuid4(),
+                "adapter_profile": payload.adapter_profile,
+                "retest_count": 0,
+            }
+
+    raw_target = yaml.safe_load(TARGET_PATH.read_text(encoding="utf-8"))
+    for blocker in raw_target["blockers"]:
+        if blocker["id"] == "locked_image_dependency_conflict":
+            blocker["status"] = "open"
+    (tmp_path / TARGET_PATH.name).write_text(
+        yaml.safe_dump(raw_target, sort_keys=False), encoding="utf-8"
+    )
+    target_catalog = TargetCatalog(tmp_path)
     missing_profile_app = create_app(
         repository=StubRepository(),  # type: ignore[arg-type]
         target_catalog=target_catalog,
@@ -182,3 +225,4 @@ def test_framework_create_returns_stable_profile_and_target_errors() -> None:
         response = client.post("/v1/framework-smoke/tasks", json=payload)
     assert response.status_code == 409
     assert response.json()["code"] == "target_not_ready"
+    assert "locked_image_dependency_conflict" in response.json()["message"]

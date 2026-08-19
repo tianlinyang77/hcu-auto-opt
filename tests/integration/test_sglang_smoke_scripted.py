@@ -44,8 +44,19 @@ def _spec(port: int, **updates: Any) -> dict[str, Any]:
         "request_timeout_seconds": 2.0,
         "stop_grace_seconds": 0.5,
         "execution_timeout_seconds": 8,
-        "python_executable": "python",
-        "server_module": "sglang.launch_server",
+        "runner_python_executable": "python",
+        "server_entrypoint": "sglang",
+        "server_subcommand": "serve",
+        "trust_remote_code": True,
+        "attention_backend": "fa3",
+        "page_size": 64,
+        "mem_fraction_static": 0.85,
+        "cookbook_repository": "https://github.com/HYGON-AI/inference-cookbook-das",
+        "cookbook_commit": "2a7f431301e41e6ea1f377129bf5ba3e43ae299f",
+        "cookbook_paths": [
+            "CONTRIBUTING.md",
+            "docs/model-deployment/sglang/qwen3.5.md",
+        ],
     }
     value.update(updates)
     return value
@@ -70,6 +81,24 @@ def _assert_complete_variant(directory: Path) -> None:
         runner._evidence_file_names()
     )
     assert not list(directory.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX evidence permission semantics")
+def test_evidence_is_host_readable_under_restrictive_umask(tmp_path: Path) -> None:
+    evidence = tmp_path / "restricted-umask"
+    previous_umask = os.umask(0o077)
+    try:
+        spec = _spec(_free_port())
+        spec["seed"] = 0
+        result = runner.run_smoke(spec, evidence)
+    finally:
+        os.umask(previous_umask)
+
+    assert result["status"] == "failed"
+    _assert_complete_variant(evidence)
+    assert {
+        path.name: path.stat().st_mode & 0o777 for path in evidence.iterdir()
+    } == {name: 0o644 for name in runner._evidence_file_names()}
 
 
 def test_runner_retries_ready_generates_once_and_stops_cleanly(

@@ -1,10 +1,17 @@
 import os
 import unittest
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 
-from hcuopt.contracts.v1 import FrameworkSmokeCreate, WorkerRegister
+from hcuopt.contracts.v1 import (
+    FrameworkSmokeCreate,
+    FrameworkSmokeResult,
+    FrameworkSmokeVariantExecution,
+    PairedFrameworkSmokeResult,
+    WorkerRegister,
+)
 from hcuopt.domain.enums import CandidateState, TaskState, WorkerType
 from hcuopt.domain.errors import StaleClaimToken
 from hcuopt.orchestrator.router import WorkflowRouter
@@ -180,3 +187,229 @@ class FrameworkSmokePostgresTests(unittest.TestCase):
                 claimed["fencing_token"],
                 {"late": True},
             )
+
+    def test_terminal_source_failure_rejects_the_task_atomically(self) -> None:
+        task = self.repository.create_framework_smoke_task(
+            FrameworkSmokeCreate(
+                name="source failure fixture",
+                target_id=self.target.target_id,
+                adapter_profile=PROFILE,
+                idempotency_key="source-failure-fixture-task",
+            ),
+            self.target,
+            str(TARGET_PATH),
+        )
+        self._register_workers()
+        job = self.repository.claim_job("build-fake")
+        assert job is not None
+
+        failed = self.repository.fail_job(
+            job["job_id"],
+            job["claim_token"],
+            job["fencing_token"],
+            {"code": "source_failed", "message": "scripted source failure"},
+            retryable=False,
+        )
+
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(
+            self.repository.get_task(task["task_id"])["state"],
+            TaskState.REJECTED.value,
+        )
+        self.assertEqual(self.repository.list_candidates(task["task_id"]), [])
+        events = self.repository.list_task_events(task["task_id"])
+        self.assertEqual(events[-1]["event_type"], "framework_smoke_job_failed")
+        self.assertEqual(events[-1]["details"]["job_type"], "source_prepare")
+
+    def test_terminal_build_failure_marks_the_candidate_build_failed(self) -> None:
+        task = self.repository.create_framework_smoke_task(
+            FrameworkSmokeCreate(
+                name="build failure fixture",
+                target_id=self.target.target_id,
+                adapter_profile=PROFILE,
+                idempotency_key="build-failure-fixture-task",
+            ),
+            self.target,
+            str(TARGET_PATH),
+        )
+        self._register_workers()
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        job = self.repository.claim_job("build-fake")
+        assert job is not None
+
+        self.repository.fail_job(
+            job["job_id"],
+            job["claim_token"],
+            job["fencing_token"],
+            {"code": "build_failed", "message": "scripted build failure"},
+            retryable=False,
+        )
+
+        self.assertEqual(
+            self.repository.get_task(task["task_id"])["state"],
+            TaskState.REJECTED.value,
+        )
+        candidates = self.repository.list_candidates(task["task_id"])
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["state"], CandidateState.BUILD_FAILED.value)
+
+    def test_framework_failure_retries_then_rejects_task_and_candidate(self) -> None:
+        task = self.repository.create_framework_smoke_task(
+            FrameworkSmokeCreate(
+                name="execution failure fixture",
+                target_id=self.target.target_id,
+                adapter_profile=PROFILE,
+                idempotency_key="execution-failure-fixture-task",
+            ),
+            self.target,
+            str(TARGET_PATH),
+        )
+        self._register_workers()
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        cleanup = {
+            "fence": {"fenced": True},
+            "health": {"healthy": True},
+        }
+
+        for attempt in (1, 2, 3):
+            job = self.repository.claim_job("gpu-fake")
+            assert job is not None
+            self.assertEqual(job["attempts"], attempt)
+            failed = self.repository.fail_job(
+                job["job_id"],
+                job["claim_token"],
+                job["fencing_token"],
+                {"code": "execution_failed", "message": "scripted HCU failure"},
+                retryable=True,
+                cleanup_evidence=cleanup,
+            )
+            self.assertEqual(failed["state"], "queued" if attempt < 3 else "failed")
+            if attempt < 3:
+                with self.repository.connection() as connection:
+                    connection.execute(
+                        "UPDATE jobs SET available_at = now() WHERE job_id = %s",
+                        (job["job_id"],),
+                    )
+
+        summary = self.repository.framework_smoke_summary(task["task_id"])
+        self.assertEqual(summary["task"]["state"], TaskState.REJECTED.value)
+        self.assertEqual(
+            summary["candidates"][0]["state"], CandidateState.REJECTED.value
+        )
+        self.assertEqual(summary["task"]["version"], 4)
+        failure_events = [
+            event
+            for event in summary["events"]
+            if event["event_type"] == "framework_smoke_job_failed"
+        ]
+        self.assertEqual(len(failure_events), 1)
+        self.assertEqual(failure_events[0]["details"]["attempts"], 3)
+        self.assertEqual(
+            failure_events[0]["details"]["error"],
+            {"code": "execution_failed", "message": "scripted HCU failure"},
+        )
+        self.assertEqual(self.repository.list_resources()[0]["state"], "available")
+
+    def test_paired_framework_result_persists_both_variants_idempotently(self) -> None:
+        task = self.repository.create_framework_smoke_task(
+            FrameworkSmokeCreate(
+                name="paired framework fixture",
+                target_id=self.target.target_id,
+                adapter_profile=PROFILE,
+                idempotency_key="paired-framework-fixture-task",
+            ),
+            self.target,
+            str(TARGET_PATH),
+        )
+        self._register_workers()
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+        self.assertIsNotNone(self._complete_claim("build-fake"))
+
+        job = self.repository.claim_job("gpu-fake")
+        assert job is not None
+        payload = dict(job["payload"])
+        payload["_job_context"] = {
+            "job_id": str(job["job_id"]),
+            "attempt_number": job["attempts"],
+            "resource_id": job["resource_id"],
+            "fencing_token": job["fencing_token"],
+        }
+        single = FrameworkSmokeResult.model_validate(
+            self.handlers.handle(job["job_type"], payload)
+        )
+
+        executions = []
+        attempts = {}
+        for variant in ("baseline", "noop"):
+            request_id = UUID(payload[f"{variant}_execution_request_id"])
+            request = single.execution_request.model_copy(
+                update={"request_id": request_id}
+            )
+            result = single.execution_result.model_copy(update={"request_id": request_id})
+            attempt = single.execution_attempt.model_copy(
+                update={
+                    "execution_attempt_id": uuid4(),
+                    "request_id": request_id,
+                    "variant": variant,
+                }
+            )
+            attempts[variant] = str(attempt.execution_attempt_id)
+            executions.append(
+                FrameworkSmokeVariantExecution(
+                    variant=variant,
+                    execution_request=request,
+                    execution_result=result,
+                    execution_attempt=attempt,
+                    cleanup_evidence=single.cleanup_evidence,
+                )
+            )
+
+        evidence = single.evidence.model_copy(
+            update={
+                "summary": {
+                    **single.evidence.summary,
+                    "execution_attempt_ids": attempts,
+                }
+            }
+        )
+        paired = PairedFrameworkSmokeResult(
+            executions=executions,
+            evaluation=single.evaluation,
+            evidence=evidence,
+            cleanup_evidence={
+                **single.cleanup_evidence,
+                "variants": {
+                    "baseline": single.cleanup_evidence,
+                    "noop": single.cleanup_evidence,
+                },
+            },
+            adapter_provenance=single.adapter_provenance,
+            synthetic=single.synthetic,
+        )
+        completed = self.repository.complete_job(
+            job["job_id"],
+            job["claim_token"],
+            job["fencing_token"],
+            paired.model_dump(mode="json"),
+        )
+        self.router.advance(completed)
+
+        summary = self.repository.framework_smoke_summary(task["task_id"])
+        self.assertEqual(
+            [item["variant"] for item in summary["execution_requests"]],
+            ["baseline", "noop"],
+        )
+        self.assertEqual(
+            {item["variant"] for item in summary["execution_attempts"]},
+            {"baseline", "noop"},
+        )
+        self.assertEqual(len(summary["execution_requests"]), 2)
+        self.assertEqual(len(summary["execution_attempts"]), 2)
+
+        self.router.advance(completed)
+        replay = self.repository.framework_smoke_summary(task["task_id"])
+        self.assertEqual(len(replay["execution_requests"]), 2)
+        self.assertEqual(len(replay["execution_attempts"]), 2)
+        self.assertEqual(len(replay["evaluations"]), 1)
+        self.assertEqual(len(replay["evidence_bundles"]), 1)
