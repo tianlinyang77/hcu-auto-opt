@@ -120,7 +120,9 @@ def test_real_f1d_sglang_baseline_noop_equivalence() -> None:
     assert (evidence_root / "report.md").is_file()
     assert (evidence_root / "baseline" / "server.log").is_file()
     assert (evidence_root / "noop" / "server.log").is_file()
-    _assert_hcu_idle(target.execution_host.accelerator.device_index)
+    cleanup_convergence = _wait_for_hcu_idle(
+        target.execution_host.accelerator.device_index
+    )
 
     acceptance = {
         "target_id": target.target_id,
@@ -138,6 +140,7 @@ def test_real_f1d_sglang_baseline_noop_equivalence() -> None:
             for item in result.executions
         },
         "final_cleanup": final_cleanup,
+        "cleanup_convergence": cleanup_convergence,
         "performance_conclusion": "not_measured",
     }
     (output_dir / "f1d-acceptance.json").write_text(
@@ -153,6 +156,32 @@ def _target_fingerprint(target: object) -> str:
 
 
 def _assert_hcu_idle(device_index: int) -> None:
+    sample = _sample_hcu_state(device_index)
+    _assert_idle_sample(device_index, sample)
+
+
+def _wait_for_hcu_idle(
+    device_index: int,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
+) -> list[dict[str, object]]:
+    deadline = time.monotonic() + timeout_seconds
+    samples: list[dict[str, object]] = []
+    while True:
+        sample = _sample_hcu_state(device_index)
+        samples.append(sample)
+        if _sample_is_idle(sample):
+            return samples
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"HCU {device_index} did not converge to idle within "
+                f"{timeout_seconds}s; samples={json.dumps(samples, sort_keys=True)}"
+            )
+        time.sleep(poll_interval_seconds)
+
+
+def _sample_hcu_state(device_index: int) -> dict[str, object]:
     state = _run(
         (
             "hy-smi",
@@ -167,12 +196,6 @@ def _assert_hcu_idle(device_index: int) -> None:
     use = _extract_number(state, r"HCU use \(%\):\s*([0-9.]+)")
     memory_percent = _extract_number(state, r"HCU memory use \(%\):\s*([0-9.]+)")
     memory_mib = _extract_number(state, r"vram Total Used Memory \(MiB\):\s*([0-9.]+)")
-    assert use == 0.0, f"HCU {device_index} is busy: {use}%"
-    assert memory_percent == 0.0, (
-        f"HCU {device_index} memory is in use: {memory_percent}%"
-    )
-    assert memory_mib <= 16.0, f"HCU {device_index} retains {memory_mib} MiB"
-
     managed = _run(
         (
             "docker",
@@ -185,7 +208,37 @@ def _assert_hcu_idle(device_index: int) -> None:
             f"label=io.hcuopt.resource-id=hcu-{device_index}",
         )
     )
-    assert not managed.strip(), f"managed HCU container remains: {managed.strip()}"
+    return {
+        "captured_at_unix": time.time(),
+        "use_percent": use,
+        "memory_percent": memory_percent,
+        "memory_mib": memory_mib,
+        "managed_containers": managed.strip().splitlines(),
+    }
+
+
+def _sample_is_idle(sample: dict[str, object]) -> bool:
+    return (
+        sample["use_percent"] == 0.0
+        and sample["memory_percent"] == 0.0
+        and float(sample["memory_mib"]) <= 16.0
+        and not sample["managed_containers"]
+    )
+
+
+def _assert_idle_sample(device_index: int, sample: dict[str, object]) -> None:
+    assert sample["use_percent"] == 0.0, (
+        f"HCU {device_index} is busy: {sample['use_percent']}%"
+    )
+    assert sample["memory_percent"] == 0.0, (
+        f"HCU {device_index} memory is in use: {sample['memory_percent']}%"
+    )
+    assert float(sample["memory_mib"]) <= 16.0, (
+        f"HCU {device_index} retains {sample['memory_mib']} MiB"
+    )
+    assert not sample["managed_containers"], (
+        f"managed HCU container remains: {sample['managed_containers']}"
+    )
 
 
 def _run(argv: tuple[str, ...]) -> str:
