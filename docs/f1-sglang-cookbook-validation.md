@@ -72,3 +72,21 @@ Cookbook 没有直接覆盖本项目的精确模型和 SGLang 版本，所以不
 EvidenceBundle、SHA256 manifest、Worker/API 日志和最终 HCU 状态。正式 Target Lock
 因此可以切换到上述 Registry digest，并关闭 `locked_image_dependency_conflict`；
 Stage 0 与设备独占窗口仍保持 open，不得开始性能优化或发布。
+
+## F1-D 显式 Target Lock 验收
+
+合入 F1-D 加固后，又使用提交 `691c9b5` 运行了仓库内显式真机测试
+`tests/integration/test_f1d_target_lock.py`，结果为 `1 passed in 184.53s`。
+验收证据位于：
+
+```text
+/home/github/lyt/Asari/hcuopt-f1d-acceptance-CYjNWZ
+```
+
+第一次运行暴露了容器删除后 HCU 显存不会同步归零：立即采样仍为 57%，随后自行归零。
+因此最终检查改为最长 30 秒的有界收敛等待，仍然要求使用率 0、显存百分比 0、已用显存
+不超过 16 MiB 且无受管容器，否则超时失败。通过运行记录了 4 次采样，显存占用依次为
+`64% -> 43% -> 22% -> 0%`，约 3.2 秒收敛，最终已用显存为 2 MiB。
+
+该结果仍然只证明真实 Framework、No-op 等价性、制品完整性和清理闭环；它不是性能
+测试，也不解除 Stage 0 闸门。
