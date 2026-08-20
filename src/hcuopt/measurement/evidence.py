@@ -30,11 +30,22 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 
 def write_evidence(path: Path, value: Any) -> EvidenceArtifact:
-    """Write canonical bytes atomically; the returned hash is over those exact bytes."""
+    """Publish canonical bytes once and reject attempts to replace different evidence."""
 
-    final_path = path.resolve()
+    final_path = path.parent.resolve() / path.name
     final_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = canonical_json_bytes(value)
+    digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    artifact = EvidenceArtifact(
+        uri=final_path.as_uri(),
+        sha256=digest,
+        byte_count=len(encoded),
+    )
+    if final_path.exists() or final_path.is_symlink():
+        _verify_existing_evidence(final_path, encoded)
+        final_path.chmod(0o444)
+        return artifact
+
     descriptor, temporary_name = tempfile.mkstemp(
         dir=final_path.parent,
         prefix=f".{final_path.name}.",
@@ -46,21 +57,38 @@ def write_evidence(path: Path, value: Any) -> EvidenceArtifact:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, final_path)
+        if os.name != "nt":
+            temporary_path.chmod(0o444)
+        try:
+            os.link(temporary_path, final_path)
+        except FileExistsError:
+            _verify_existing_evidence(final_path, encoded)
+        else:
+            temporary_path.unlink()
+            temporary_path = None
+            final_path.chmod(0o444)
     except Exception:
-        temporary_path.unlink(missing_ok=True)
         raise
-    return EvidenceArtifact(
-        uri=final_path.as_uri(),
-        sha256="sha256:" + hashlib.sha256(encoded).hexdigest(),
-        byte_count=len(encoded),
-    )
+    finally:
+        if temporary_path is not None:
+            temporary_path.chmod(0o600)
+            temporary_path.unlink(missing_ok=True)
+    return artifact
+
+
+def _verify_existing_evidence(path: Path, expected: bytes) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"evidence destination is not a regular file: {path}")
+    if path.read_bytes() != expected:
+        raise ValueError(f"immutable evidence already exists with different content: {path}")
 
 
 def verify_evidence(path: Path, expected_sha256: str) -> bool:
     if not expected_sha256.startswith("sha256:"):
         return False
     try:
+        if path.is_symlink() or not path.is_file():
+            return False
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return False

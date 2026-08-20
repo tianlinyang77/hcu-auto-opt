@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.harness import EvidenceMeasurementHarness, MeasurementSafetyError
+from hcuopt.measurement.models import ProcessIdentity
 
 
 class Clock:
@@ -25,8 +27,19 @@ class Timer:
         self.value += 5
         return self.value
 
+    def measure_resolution_ns(self, sample_count: int) -> float:
+        assert sample_count >= 2
+        return 50.0
+
 
 class Workload:
+    def __init__(self, restart: int) -> None:
+        self.identity = ProcessIdentity(pid=100 + restart, start_token=f"fixture-{restart}")
+        self.alive = True
+
+    def process_identity(self) -> ProcessIdentity:
+        return self.identity
+
     def synchronize(self) -> None:
         return None
 
@@ -35,6 +48,12 @@ class Workload:
 
     def run_batch(self, iterations: int) -> None:
         assert iterations == 2
+
+    def close(self) -> None:
+        self.alive = False
+
+    def is_alive(self) -> bool:
+        return self.alive
 
 
 class Telemetry:
@@ -63,7 +82,7 @@ def _harness(cleaner: Cleaner | None = None) -> EvidenceMeasurementHarness:
             implementation_kind="real",
         ),
         stable_identity={"target": "fixture", "image": "locked"},
-        workload_factory=lambda _restart: Workload(),
+        workload_factory=Workload,
         telemetry=Telemetry(),
         device_timer=Timer(),
         clock=Clock(),
@@ -81,7 +100,9 @@ def _plan(**changes: object) -> dict[str, object]:
             "repeat_count": 2,
             "process_restart_count": 0,
             "batched_loop_count": 2,
-            "environment_fingerprint": "sha256:" + "a" * 64,
+            "environment_fingerprint": stable_fingerprint(
+                {"target": "fixture", "image": "locked"}
+            ),
         }
     }
     values.update(changes)
@@ -96,6 +117,16 @@ def test_harness_writes_hashed_raw_evidence(tmp_path: Path) -> None:
     assert result.series.raw_samples_uri == result.artifact.uri
     assert result.series.raw_samples_hash == result.artifact.sha256
     assert len(result.evidence.raw_samples) == 2
+    assert result.evidence.calibration is not None
+    assert result.evidence.calibration.timer_resolution_ns == 50.0
+
+
+def test_harness_rejects_an_unbound_environment_fingerprint(tmp_path: Path) -> None:
+    plan = _plan()
+    plan["measurement_plan"]["environment_fingerprint"] = "sha256:" + "a" * 64
+
+    with pytest.raises(MeasurementSafetyError, match="environment fingerprint"):
+        _harness().run_with_evidence(plan, tmp_path)
 
 
 def test_formal_harness_requires_lease_and_healthy_cleanup(tmp_path: Path) -> None:

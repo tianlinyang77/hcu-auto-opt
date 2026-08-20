@@ -33,13 +33,21 @@ class ClockCalibration(MeasurementModel):
     device_origin_ticks: int = Field(ge=0)
     host_origin_ns: int = Field(ge=0)
     ns_per_tick: float = Field(gt=0)
+    timer_resolution_ns: float | None = Field(default=None, gt=0)
     max_residual_ns: float = Field(ge=0)
     point_count: int = Field(ge=2)
+
+
+class ProcessIdentity(MeasurementModel):
+    pid: int = Field(ge=1)
+    start_token: str = Field(min_length=1, max_length=200)
 
 
 class RawSample(MeasurementModel):
     restart_ordinal: int = Field(ge=0)
     sample_ordinal: int = Field(ge=0)
+    process_id: int | None = Field(default=None, ge=1)
+    process_start_token: str | None = Field(default=None, min_length=1, max_length=200)
     started_monotonic_ns: int = Field(ge=0)
     finished_monotonic_ns: int = Field(ge=0)
     batch_iterations: int = Field(ge=1)
@@ -48,6 +56,8 @@ class RawSample(MeasurementModel):
 
     @model_validator(mode="after")
     def validate_time_order(self) -> RawSample:
+        if (self.process_id is None) != (self.process_start_token is None):
+            raise ValueError("process identity fields must be present together")
         if self.finished_monotonic_ns < self.started_monotonic_ns:
             raise ValueError("finished_monotonic_ns must not precede started_monotonic_ns")
         if (

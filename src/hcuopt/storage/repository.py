@@ -51,6 +51,7 @@ from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFenci
 from hcuopt.domain.transitions import transition_candidate, transition_task
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
 from hcuopt.storage.migrations import migration_plan
+from hcuopt.targets import target_fingerprint
 
 
 class PostgresRepository:
@@ -121,10 +122,7 @@ class PostgresRepository:
 
     @staticmethod
     def _target_fingerprint(target: TargetSpec) -> str:
-        encoded = json.dumps(
-            target.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-        ).encode()
-        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+        return target_fingerprint(target)
 
     def _upsert_target_snapshot(
         self,
@@ -136,27 +134,43 @@ class PostgresRepository:
         snapshot_id = uuid5(
             NAMESPACE_URL, f"hcuopt:target:{target.target_id}:{fingerprint}"
         )
+        specification = target.model_dump(mode="json")
         row = connection.execute(
             """
             INSERT INTO target_snapshots (
                 target_snapshot_id, target_id, target_fingerprint,
                 specification, source_path
             ) VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (target_snapshot_id) DO UPDATE
-            SET target_snapshot_id = EXCLUDED.target_snapshot_id
+            ON CONFLICT DO NOTHING
             RETURNING *
             """,
             (
                 snapshot_id,
                 target.target_id,
                 fingerprint,
-                Jsonb(target.model_dump(mode="json")),
+                Jsonb(specification),
                 source_path,
             ),
         ).fetchone()
-        assert row is not None
-        if row["specification"] != target.model_dump(mode="json"):
-            raise Conflict("target fingerprint was reused with a different specification")
+        if row is None:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM target_snapshots
+                WHERE target_snapshot_id = %s
+                   OR (target_id = %s AND target_fingerprint = %s)
+                """,
+                (snapshot_id, target.target_id, fingerprint),
+            ).fetchone()
+        if row is None:
+            raise Conflict("target snapshot conflict could not be resolved")
+        if (
+            row["target_snapshot_id"] != snapshot_id
+            or row["target_id"] != target.target_id
+            or row["target_fingerprint"] != fingerprint
+            or row["specification"] != specification
+        ):
+            raise Conflict("target snapshot identity was reused with different content")
         return row
 
     def upsert_target_snapshot(

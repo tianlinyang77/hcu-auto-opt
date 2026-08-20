@@ -69,7 +69,11 @@ def file_uri_to_path(uri: str) -> Path:
     parsed = urlparse(uri)
     if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
         raise SourceIntegrityError(f"expected a local file URI, got: {uri}")
-    path = Path(unquote(parsed.path))
+    decoded_path = unquote(parsed.path)
+    if os.name == "nt" and len(decoded_path) >= 3 and decoded_path[0] == "/":
+        if decoded_path[1].isalpha() and decoded_path[2] == ":":
+            decoded_path = decoded_path[1:]
+    path = Path(decoded_path)
     if not path.is_absolute():
         raise SourceIntegrityError(f"file URI must resolve to an absolute path: {uri}")
     return path

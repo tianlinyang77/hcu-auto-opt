@@ -48,6 +48,7 @@ class MeasurementHarness(Protocol):
 
 class Stage0ProbeAdapter(Protocol):
     provenance: AdapterProvenance
+    target_fingerprint: str
 
     def run_probe(self, payload: Mapping[str, Any], output_dir: Path) -> Stage0ProbeOutput: ...
 

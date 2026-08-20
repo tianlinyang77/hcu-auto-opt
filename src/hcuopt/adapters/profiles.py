@@ -19,7 +19,7 @@ FRAMEWORK_SMOKE_CAPABILITIES = frozenset(
 )
 STAGE0_CAPABILITIES = frozenset({"stage0_probe"})
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
-REAL_STAGE0_MEASUREMENT_PROFILE = "nmz36-stage0-measurement-v1"
+REAL_STAGE0_MEASUREMENT_PROFILE = "nmz36-stage0-measurement-v2"
 
 
 @dataclass(frozen=True, slots=True)
