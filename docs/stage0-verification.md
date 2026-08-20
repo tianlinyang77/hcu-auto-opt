@@ -75,6 +75,50 @@ three inputs with the existing four-mode mapping. Producer-provided database
 summary fields such as `gate_result`, CV, MDE, `detected`, `false_positive`, or
 `capability` are deliberately outside the statistical input digest.
 
+## Server-side finalization
+
+Formal finalization uses two short database transactions around the expensive
+work:
+
+```text
+read a summary-free control-plane snapshot
+  -> read and hash raw files outside PostgreSQL
+  -> independently recompute all gates outside PostgreSQL
+  -> publish an immutable report bundle
+  -> lock and compare the snapshot digest
+  -> let the control plane map the verified gates to ProjectMode
+```
+
+The snapshot query selects probe IDs, raw evidence URI/hash, Target and protocol
+bindings, lease/fencing, provenance, and cleanup evidence. It intentionally does
+not select the producer-owned `summary` column. The commit transaction reloads
+the same fields and compares both the database snapshot digest and the strict
+verification input digest before it grants Formal authority. Concurrent replay
+is accepted only when the persisted report bytes and database report are
+identical.
+
+Evidence validation failures make the Stage0Run terminal `failed` while leaving
+the Task in `stage0_pending`, with `stage0_authority=none` and no row in
+`stage0_evidence`. Storage, report-publication, or database availability errors
+do not reclassify raw evidence; the run remains retryable. The current schema has
+one Stage0Run per Task, so after an evidence-invalid terminal the control-plane
+owner must create a new Task/run with a new idempotency key. Reusing the same Task
+would require a separate A-owned schema and API change.
+
+The immutable report directory is:
+
+```text
+results/stage0/<run-id>/verification/
+  stage0-verification.json
+  stage0-verification.md
+  sha256sums.json
+```
+
+The JSON and Markdown have no wall-clock timestamp or random identifier. A
+same-content replay is idempotent; an existing different file is never
+overwritten. The database stores all three URIs and hashes in the existing
+`stage0_evidence` and `stage0_runs.report` JSON fields.
+
 Synthetic evidence, Dry Run evidence, fake provenance, non-exclusive leases,
 unhealthy cleanup, mismatched bindings, missing device timing or telemetry, and
 corrupted files cannot obtain Formal authority. A statistically valid run may

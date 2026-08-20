@@ -52,8 +52,10 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.stage0_verifier import Stage0EvidenceError
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
+from hcuopt.orchestrator.stage0_finalization import Stage0FinalizationService
 from hcuopt.stage0 import evaluate_stage0
 from hcuopt.storage.repository import PostgresRepository
 from hcuopt.targets import TargetCatalog
@@ -68,12 +70,17 @@ def create_app(
     workflow_factory: WorkflowFactory = WorkflowRouter,
     target_catalog: TargetCatalog | None = None,
     adapter_profiles: AdapterProfileCatalog | None = None,
+    stage0_results_root: Path | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
         Path(os.getenv("HCUOPT_TARGET_ROOT", str(default_target_root)))
     )
     profiles = adapter_profiles or AdapterProfileCatalog()
+    results_root = (
+        stage0_results_root
+        or Path(os.getenv("HCUOPT_STAGE0_RESULTS_ROOT", "results/stage0"))
+    ).absolute()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -117,6 +124,19 @@ def create_app(
             status_code=status_codes.get(type(exc), 409),
             content={
                 "code": error_codes.get(type(exc), "contract_error"),
+                "message": str(exc),
+                "retryable": False,
+            },
+        )
+
+    @application.exception_handler(Stage0EvidenceError)
+    async def stage0_evidence_handler(
+        _request: Request, exc: Stage0EvidenceError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": exc.code,
                 "message": str(exc),
                 "retryable": False,
             },
@@ -258,7 +278,9 @@ def create_app(
     def finalize_stage0_run(
         stage0_run_id: UUID, request: Request
     ) -> dict[str, Any]:
-        return repo(request).finalize_stage0_run(stage0_run_id)
+        return Stage0FinalizationService(repo(request), results_root).finalize(
+            stage0_run_id
+        )
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:

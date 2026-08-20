@@ -29,6 +29,7 @@ from hcuopt.contracts.v1 import (
     JobCreate,
     Stage0EvidenceRequest,
     Stage0ProbeResult,
+    Stage0ReportView,
     Stage0RunCreate,
     TaskCreate,
     WorkerRegister,
@@ -40,7 +41,6 @@ from hcuopt.domain.enums import (
     JobType,
     LeaseScope,
     ProjectMode,
-    Stage0ProbeType,
     Stage0RunMode,
     Stage0RunState,
     TaskState,
@@ -49,7 +49,18 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from hcuopt.domain.transitions import transition_candidate, transition_task
-from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
+from hcuopt.evaluation.stage0_inputs import (
+    Stage0FinalizationSnapshot,
+    expected_verification_input_evidence,
+    stage0_snapshot_digest,
+    strict_verification_input_digest,
+)
+from hcuopt.evaluation.stage0_protocol import (
+    Stage0ProtocolError,
+    load_registered_stage0_protocol,
+)
+from hcuopt.evaluation.stage0_verifier import Stage0VerificationResult, Stage0Verifier
+from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 
 
@@ -173,6 +184,16 @@ class PostgresRepository:
     ) -> dict[str, Any]:
         task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
         run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
+        protocol_hash: str | None = None
+        if request.mode is Stage0RunMode.FORMAL:
+            try:
+                protocol_hash = load_registered_stage0_protocol(
+                    request.protocol_version
+                ).protocol_hash
+            except Stage0ProtocolError as exc:
+                raise Conflict(
+                    "formal Stage 0 requires a repository-registered protocol"
+                ) from exc
         with self.connection() as connection:
             snapshot = self._upsert_target_snapshot(connection, target, source_path)
             task = connection.execute(
@@ -270,7 +291,9 @@ class PostgresRepository:
                     "target_snapshot_id": str(snapshot["target_snapshot_id"]),
                     "target_fingerprint": snapshot["target_fingerprint"],
                     "target": target.model_dump(mode="json"),
+                    "workload_id": request.workload_id,
                     "protocol_version": request.protocol_version,
+                    "protocol_hash": protocol_hash,
                     "mode": request.mode.value,
                 }
                 connection.execute(
@@ -310,6 +333,7 @@ class PostgresRepository:
                             "target_snapshot_id": str(snapshot["target_snapshot_id"]),
                             "mode": request.mode.value,
                             "protocol_version": request.protocol_version,
+                            "protocol_hash": protocol_hash,
                             "probe_types": sorted(
                                 item.value for item in REQUIRED_STAGE0_PROBES
                             ),
@@ -734,74 +758,142 @@ class PostgresRepository:
                 )
         return row
 
-    def finalize_stage0_run(self, stage0_run_id: UUID) -> dict[str, Any]:
+    def load_stage0_finalization_snapshot(
+        self, stage0_run_id: UUID
+    ) -> Stage0FinalizationSnapshot:
+        """Read the immutable finalize inputs without holding a lock across file I/O."""
+
         with self.connection() as connection:
-            run = connection.execute(
-                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s FOR UPDATE",
-                (stage0_run_id,),
-            ).fetchone()
-            if run is None:
-                raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
-            if run["state"] == Stage0RunState.FINALIZED.value:
-                assert run["report"] is not None
-                return run["report"]
-            if run["mode"] != Stage0RunMode.FORMAL.value:
-                raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
-            if run["state"] != Stage0RunState.READY.value:
-                raise Conflict("Stage 0 probe barrier is not ready")
-            task = connection.execute(
-                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
-                (run["task_id"],),
-            ).fetchone()
-            assert task is not None
-            if task["state"] != TaskState.STAGE0_PENDING.value:
-                raise Conflict("formal Stage 0 requires a stage0_pending task")
-            records = connection.execute(
-                """
-                SELECT * FROM stage0_probe_records
-                WHERE stage0_run_id = %s ORDER BY probe_type
-                """,
-                (stage0_run_id,),
-            ).fetchall()
-            probes = {
-                Stage0ProbeType(row["probe_type"]): row["summary"] for row in records
-            }
-            evidence = evidence_from_probe_summaries(
-                probes,
-                evidence_uri=f"stage0://runs/{stage0_run_id}",
+            return self._load_stage0_finalization_snapshot(
+                connection,
+                stage0_run_id,
+                lock=False,
             )
-            decision = evaluate_stage0(evidence)
-            target_state = (
-                TaskState.STOPPED_MEASUREMENT
-                if decision.mode is ProjectMode.STOPPED_MEASUREMENT
-                else TaskState.DEGRADED
-                if decision.mode
-                in {ProjectMode.DEGRADED_MANUAL_INTAKE, ProjectMode.CONFIG_ONLY}
-                else TaskState.BASELINE_PENDING
+
+    def commit_stage0_finalization(
+        self,
+        stage0_run_id: UUID,
+        *,
+        expected_snapshot_digest: str,
+        verification: Stage0VerificationResult,
+        report: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """CAS the independently verified result into the Stage 0 state machine."""
+
+        verification = Stage0VerificationResult.model_validate(
+            verification.model_dump(mode="python", round_trip=True)
+        )
+        proposed_report = Stage0ReportView.model_validate(report).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+        required_report_artifacts = (
+            "protocol_version",
+            "protocol_hash",
+            "input_digest",
+            "measurement_gate",
+            "profiler_gate",
+            "hotpatch_gate",
+            "json_report_uri",
+            "json_report_hash",
+            "markdown_report_uri",
+            "markdown_report_hash",
+            "manifest_uri",
+            "manifest_hash",
+        )
+        missing_report_fields = [
+            name for name in required_report_artifacts if not proposed_report.get(name)
+        ]
+        if missing_report_fields:
+            raise Conflict(
+                "formal Stage 0 report is incomplete: "
+                + ", ".join(missing_report_fields)
             )
-            transition_task(TaskState(task["state"]), target_state)
-            report = {
-                "task_id": str(task["task_id"]),
+        try:
+            protocol = load_registered_stage0_protocol(verification.protocol_version)
+        except Stage0ProtocolError as exc:
+            raise Conflict("Stage 0 verification protocol is not registered") from exc
+        if verification.protocol_hash != protocol.protocol_hash:
+            raise Conflict("Stage 0 verification protocol hash is not registered")
+        if verification.verifier_provenance != Stage0Verifier.provenance:
+            raise Conflict("formal Stage 0 requires the D-owned verifier provenance")
+        with self.connection() as connection:
+            snapshot = self._load_stage0_finalization_snapshot(
+                connection,
+                stage0_run_id,
+                lock=True,
+            )
+            if snapshot.run.state is Stage0RunState.FINALIZED:
+                if snapshot.run.report != proposed_report:
+                    raise Conflict("Stage 0 was finalized with a different report")
+                return proposed_report
+            self._require_ready_formal_snapshot(snapshot)
+            if stage0_snapshot_digest(snapshot) != expected_snapshot_digest:
+                raise Conflict("Stage 0 finalization inputs changed during verification")
+            if verification.input_digest != strict_verification_input_digest(
+                snapshot,
+                protocol,
+            ):
+                raise Conflict("Stage 0 verification does not match the locked inputs")
+            if verification.input_evidence != expected_verification_input_evidence(
+                snapshot,
+                protocol,
+            ):
+                raise Conflict("Stage 0 verification evidence list is not DB-bound")
+
+            evidence_uri = proposed_report.get("json_report_uri")
+            if not isinstance(evidence_uri, str) or not evidence_uri:
+                raise Conflict("formal Stage 0 report requires a JSON evidence URI")
+            decision = evaluate_stage0(
+                verification.to_stage0_evidence(evidence_uri=evidence_uri)
+            )
+            expected_report = {
+                "task_id": str(snapshot.task.task_id),
                 "mode": decision.mode.value,
                 "reasons": list(decision.reasons),
                 "automatic_release_allowed": False,
                 "evidence_authority": "formal",
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "measurement_gate": verification.measurement.value,
+                "profiler_gate": verification.profiler.value,
+                "hotpatch_gate": verification.hot_patch.value,
+                "failure_codes": list(verification.failure_codes),
             }
+            mismatches = [
+                name
+                for name, value in expected_report.items()
+                if proposed_report.get(name) != value
+            ]
+            if mismatches:
+                raise Conflict(
+                    "Stage 0 report disagrees with independent verification: "
+                    + ", ".join(mismatches)
+                )
+
+            target_state = self._stage0_target_state(decision.mode)
+            transition_task(snapshot.task.state, target_state)
             aggregate = {
-                "source": "target-bound-stage0-run",
+                "source": "independent-stage0-verifier-v1",
                 "stage0_run_id": str(stage0_run_id),
-                "target_snapshot_id": str(run["target_snapshot_id"]),
-                "protocol_version": run["protocol_version"],
-                "measurement": evidence.measurement.value,
-                "profiler": evidence.profiler.value,
-                "hot_patch": evidence.hot_patch.value,
-                "hardware_fingerprint": evidence.hardware_fingerprint,
-                "software_fingerprint": evidence.software_fingerprint,
-                "timer_resolution_ns": evidence.timer_resolution_ns,
-                "noise_sigma_ns": evidence.noise_sigma_ns,
-                "noise_cv": evidence.noise_cv,
-                "mde_ratio": evidence.mde_ratio,
-                "probe_record_ids": [str(row["probe_record_id"]) for row in records],
+                "target_snapshot_id": str(snapshot.target.target_snapshot_id),
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "snapshot_digest": expected_snapshot_digest,
+                "verification": verification.model_dump(mode="json"),
+                "report_artifacts": {
+                    name: proposed_report.get(name)
+                    for name in (
+                        "json_report_uri",
+                        "json_report_hash",
+                        "markdown_report_uri",
+                        "markdown_report_hash",
+                        "manifest_uri",
+                        "manifest_hash",
+                    )
+                },
                 "synthetic": False,
             }
             connection.execute(
@@ -809,7 +901,12 @@ class PostgresRepository:
                 INSERT INTO stage0_evidence (task_id, stage0_run_id, evidence, report)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (task["task_id"], stage0_run_id, Jsonb(aggregate), Jsonb(report)),
+                (
+                    snapshot.task.task_id,
+                    stage0_run_id,
+                    Jsonb(aggregate),
+                    Jsonb(proposed_report),
+                ),
             )
             connection.execute(
                 """
@@ -818,7 +915,7 @@ class PostgresRepository:
                     version = version + 1, updated_at = now()
                 WHERE task_id = %s
                 """,
-                (target_state.value, decision.mode.value, task["task_id"]),
+                (target_state.value, decision.mode.value, snapshot.task.task_id),
             )
             connection.execute(
                 """
@@ -826,7 +923,11 @@ class PostgresRepository:
                 SET state = %s, report = %s, finalized_at = now()
                 WHERE stage0_run_id = %s
                 """,
-                (Stage0RunState.FINALIZED.value, Jsonb(report), stage0_run_id),
+                (
+                    Stage0RunState.FINALIZED.value,
+                    Jsonb(proposed_report),
+                    stage0_run_id,
+                ),
             )
             connection.execute(
                 """
@@ -834,17 +935,206 @@ class PostgresRepository:
                 VALUES (%s, 'stage0_finalized', %s)
                 """,
                 (
-                    task["task_id"],
+                    snapshot.task.task_id,
                     Jsonb(
                         {
                             "stage0_run_id": str(stage0_run_id),
                             "mode": decision.mode.value,
+                            "input_digest": verification.input_digest,
                             "automatic_release_allowed": False,
                         }
                     ),
                 ),
             )
-        return report
+        return proposed_report
+
+    def fail_stage0_finalization(
+        self,
+        stage0_run_id: UUID,
+        *,
+        expected_snapshot_digest: str,
+        error_code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Persist an invalid-evidence terminal without granting Task authority."""
+
+        failure_report = {
+            "task_id": None,
+            "status": "failed",
+            "error_code": error_code,
+            "message": message,
+            "snapshot_digest": expected_snapshot_digest,
+            "automatic_release_allowed": False,
+            "evidence_authority": "none",
+        }
+        with self.connection() as connection:
+            snapshot = self._load_stage0_finalization_snapshot(
+                connection,
+                stage0_run_id,
+                lock=True,
+            )
+            failure_report["task_id"] = str(snapshot.task.task_id)
+            if snapshot.run.state is Stage0RunState.FINALIZED:
+                raise Conflict("finalized Stage 0 cannot be replaced by a failure")
+            if snapshot.run.state is Stage0RunState.FAILED:
+                if snapshot.run.report != failure_report:
+                    raise Conflict("Stage 0 failed with different evidence")
+                return failure_report
+            self._require_ready_snapshot_for_failure(snapshot)
+            if stage0_snapshot_digest(snapshot) != expected_snapshot_digest:
+                raise Conflict("Stage 0 finalization inputs changed before failure record")
+            connection.execute(
+                """
+                UPDATE stage0_runs
+                SET state = %s, report = %s, finalized_at = now()
+                WHERE stage0_run_id = %s
+                """,
+                (
+                    Stage0RunState.FAILED.value,
+                    Jsonb(failure_report),
+                    stage0_run_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'stage0_finalization_failed', %s)
+                """,
+                (
+                    snapshot.task.task_id,
+                    Jsonb(
+                        {
+                            "stage0_run_id": str(stage0_run_id),
+                            "error_code": error_code,
+                            "snapshot_digest": expected_snapshot_digest,
+                        }
+                    ),
+                ),
+            )
+        return failure_report
+
+    def _load_stage0_finalization_snapshot(
+        self,
+        connection: Connection[dict[str, Any]],
+        stage0_run_id: UUID,
+        *,
+        lock: bool,
+    ) -> Stage0FinalizationSnapshot:
+        lock_related = " FOR SHARE" if lock else ""
+        if lock:
+            identity = connection.execute(
+                """
+                SELECT task_id, target_snapshot_id
+                FROM stage0_runs WHERE stage0_run_id = %s
+                """,
+                (stage0_run_id,),
+            ).fetchone()
+            if identity is None:
+                raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+            target = connection.execute(
+                """
+                SELECT target_snapshot_id, target_id, target_fingerprint, specification
+                FROM target_snapshots WHERE target_snapshot_id = %s FOR SHARE
+                """,
+                (identity["target_snapshot_id"],),
+            ).fetchone()
+            assert target is not None
+            task = connection.execute(
+                """
+                SELECT task_id, state, workload_id, adapter_profile, stage0_authority
+                FROM tasks WHERE task_id = %s FOR UPDATE
+                """,
+                (identity["task_id"],),
+            ).fetchone()
+            assert task is not None
+        else:
+            task = None
+            target = None
+        run = connection.execute(
+            """
+            SELECT stage0_run_id, task_id, target_snapshot_id, adapter_profile,
+                   mode, state, protocol_version, report
+            FROM stage0_runs WHERE stage0_run_id = %s
+            """
+            + (" FOR UPDATE" if lock else ""),
+            (stage0_run_id,),
+        ).fetchone()
+        if run is None:
+            raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+        if lock and (
+            run["task_id"] != identity["task_id"]
+            or run["target_snapshot_id"] != identity["target_snapshot_id"]
+        ):
+            raise Conflict("Stage 0 run identity changed during finalization")
+        if task is None:
+            task = connection.execute(
+                """
+                SELECT task_id, state, workload_id, adapter_profile, stage0_authority
+                FROM tasks WHERE task_id = %s
+                """,
+                (run["task_id"],),
+            ).fetchone()
+        assert task is not None
+        if target is None:
+            target = connection.execute(
+                """
+                SELECT target_snapshot_id, target_id, target_fingerprint, specification
+                FROM target_snapshots WHERE target_snapshot_id = %s
+                """,
+                (run["target_snapshot_id"],),
+            ).fetchone()
+        assert target is not None
+        records = connection.execute(
+            """
+            SELECT probe_record_id, task_id, target_snapshot_id, probe_type,
+                   protocol_version, raw_evidence_uri, raw_evidence_hash,
+                   adapter_provenance, synthetic, lease_id, resource_id,
+                   fencing_token, cleanup_evidence
+            FROM stage0_probe_records
+            WHERE stage0_run_id = %s ORDER BY probe_type
+            """
+            + lock_related,
+            (stage0_run_id,),
+        ).fetchall()
+        try:
+            return Stage0FinalizationSnapshot.model_validate(
+                {
+                    "run": run,
+                    "task": task,
+                    "target": target,
+                    "probes": records,
+                }
+            )
+        except ValueError as exc:
+            raise Conflict(f"Stage 0 finalization snapshot is invalid: {exc}") from exc
+
+    @staticmethod
+    def _require_ready_formal_snapshot(snapshot: Stage0FinalizationSnapshot) -> None:
+        if snapshot.run.mode is not Stage0RunMode.FORMAL:
+            raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
+        if snapshot.run.state is not Stage0RunState.READY:
+            raise Conflict("Stage 0 probe barrier is not ready")
+        if snapshot.task.state is not TaskState.STAGE0_PENDING:
+            raise Conflict("formal Stage 0 requires a stage0_pending task")
+        if snapshot.task.stage0_authority != "none":
+            raise Conflict("formal Stage 0 requires a task without prior authority")
+
+    @staticmethod
+    def _require_ready_snapshot_for_failure(snapshot: Stage0FinalizationSnapshot) -> None:
+        if snapshot.run.state is not Stage0RunState.READY:
+            raise Conflict("Stage 0 probe barrier is not ready")
+        if snapshot.task.state is not TaskState.STAGE0_PENDING:
+            raise Conflict("Stage 0 failure requires a stage0_pending task")
+        if snapshot.task.stage0_authority != "none":
+            raise Conflict("Stage 0 failure cannot replace prior authority")
+
+    @staticmethod
+    def _stage0_target_state(mode: ProjectMode) -> TaskState:
+        if mode is ProjectMode.STOPPED_MEASUREMENT:
+            return TaskState.STOPPED_MEASUREMENT
+        if mode in {ProjectMode.DEGRADED_MANUAL_INTAKE, ProjectMode.CONFIG_ONLY}:
+            return TaskState.DEGRADED
+        return TaskState.BASELINE_PENDING
 
     def freeze_baseline(self, task_id: UUID, request: BaselineCreate) -> dict[str, Any]:
         epoch_id = uuid4()

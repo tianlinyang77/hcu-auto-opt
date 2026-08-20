@@ -204,6 +204,19 @@ class Stage0ReportView(ReadModel):
     reasons: list[str]
     automatic_release_allowed: bool = False
     evidence_authority: Literal["synthetic_control_flow_only", "formal"]
+    protocol_version: str | None = None
+    protocol_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    input_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    measurement_gate: GateResult | None = None
+    profiler_gate: ProfilerCapability | None = None
+    hotpatch_gate: HotPatchCapability | None = None
+    failure_codes: list[str] = Field(default_factory=list)
+    json_report_uri: str | None = None
+    json_report_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    markdown_report_uri: str | None = None
+    markdown_report_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    manifest_uri: str | None = None
+    manifest_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
 
 class BaselineCreate(ContractModel):
