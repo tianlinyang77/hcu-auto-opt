@@ -148,7 +148,9 @@ class JobHandlers:
             raw_evidence_uri=output.raw_evidence_uri,
             raw_evidence_hash=output.raw_evidence_hash,
             summary=output.summary,
-            adapter_provenance=[probe.provenance],
+            adapter_provenance=list(
+                output.adapter_provenance or (probe.provenance,)
+            ),
             synthetic=output.synthetic,
             cleanup_evidence=output.cleanup_evidence,
         )

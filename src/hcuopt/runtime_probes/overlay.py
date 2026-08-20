@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from hcuopt.adapters.interfaces import ExecutionAdapter, ResourceCleaner
@@ -43,7 +45,12 @@ class OverlayCapabilityProbe:
         output_dir: Path,
         resource_id: str,
         fencing_token: int,
+        max_wall_seconds: int | None = None,
     ) -> dict[str, Any]:
+        if max_wall_seconds is not None and (
+            isinstance(max_wall_seconds, bool) or max_wall_seconds < 1
+        ):
+            raise ValueError("overlay max_wall_seconds must be a positive integer")
         if not resource_id:
             raise ValueError("overlay probe requires a leased resource_id")
         if (
@@ -88,7 +95,11 @@ class OverlayCapabilityProbe:
         )
         baseline_path = file_uri_to_path(baseline.worktree_uri).resolve(strict=True)
         baseline_hash_before = canonical_source_hash(baseline_path)
+        deadline = (
+            monotonic() + max_wall_seconds if max_wall_seconds is not None else None
+        )
 
+        baseline_request = self._bounded_request(baseline_request, deadline)
         baseline_result = self.executor.execute(baseline_request, target, output_dir)
         baseline_metadata = self._execution_observation(baseline_result)
         baseline_health = dict(self.cleaner.health_check(resource_id))
@@ -96,6 +107,7 @@ class OverlayCapabilityProbe:
             raise ExecutionSafetyError(
                 "baseline execution or health check failed; refusing to launch candidate"
             )
+        candidate_request = self._bounded_request(candidate_request, deadline)
         candidate_result = self.executor.execute(candidate_request, target, output_dir)
         candidate_metadata = self._execution_observation(candidate_result)
         candidate_health = dict(self.cleaner.health_check(resource_id))
@@ -103,6 +115,7 @@ class OverlayCapabilityProbe:
             raise ExecutionSafetyError(
                 "candidate cleanup health check failed; resource must be quarantined"
             )
+        recovery_request = self._bounded_request(recovery_request, deadline)
         recovery_result = self.executor.execute(recovery_request, target, output_dir)
         recovery_metadata = self._execution_observation(recovery_result)
         recovery_health = dict(self.cleaner.health_check(resource_id))
@@ -200,6 +213,23 @@ class OverlayCapabilityProbe:
                 "recovery": recovery_health,
             },
         }
+
+    @staticmethod
+    def _bounded_request(
+        request: ExecutionRequest, deadline: float | None
+    ) -> ExecutionRequest:
+        if deadline is None:
+            return request
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("runtime probe wall-clock budget exhausted")
+        return request.model_copy(
+            update={
+                "timeout_seconds": max(
+                    1, min(request.timeout_seconds, math.ceil(remaining))
+                )
+            }
+        )
 
     @staticmethod
     def _execution_observation(result: Any) -> dict[str, Any]:

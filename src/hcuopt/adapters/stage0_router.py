@@ -70,4 +70,5 @@ class RoutedStage0ProbeAdapter:
             raw_evidence_hash=output.raw_evidence_hash,
             cleanup_evidence=output.cleanup_evidence,
             synthetic=output.synthetic,
+            adapter_provenance=output.adapter_provenance or (delegate.provenance,),
         )

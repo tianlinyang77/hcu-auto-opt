@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -13,11 +14,11 @@ from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
 from hcuopt.targets import load_target, target_fingerprint
+from hcuopt.workers.handlers import JobHandlers
 
 ROOT = Path(__file__).parents[2]
-TARGET_FINGERPRINT = target_fingerprint(
-    load_target(ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml")
-)
+TARGET = load_target(ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml")
+TARGET_FINGERPRINT = target_fingerprint(TARGET)
 
 
 class RecordingProbe:
@@ -41,6 +42,7 @@ class RecordingProbe:
             raw_evidence_uri="file:///evidence.json",
             raw_evidence_hash="sha256:" + "0" * 64,
             cleanup_evidence=None,
+            adapter_provenance=(self.provenance,),
         )
 
 
@@ -83,6 +85,7 @@ def test_router_dispatches_b_and_c_probes_under_one_public_profile(tmp_path: Pat
         expected = "RuntimeProbe" if probe_type in runtime.calls else "MeasurementProbe"
         assert result.summary["handled_by"] == expected
         assert result.summary["probe_adapter_provenance"]["adapter_name"] == expected
+        assert result.adapter_provenance[0].adapter_name == expected
 
     assert set(measurement.calls) == {
         Stage0ProbeType.FINGERPRINT,
@@ -93,6 +96,32 @@ def test_router_dispatches_b_and_c_probes_under_one_public_profile(tmp_path: Pat
     }
     assert set(runtime.calls) == {Stage0ProbeType.PROFILER, Stage0ProbeType.HOTPATCH}
     assert router.provenance.profile == REAL_STAGE0_PROFILE
+
+
+def test_handler_records_delegate_provenance_in_the_public_result(tmp_path: Path) -> None:
+    measurement = RecordingProbe("nmz36-stage0-measurement-v1", "MeasurementProbe")
+    runtime = RecordingProbe(REAL_STAGE0_PROFILE, "RuntimeProbe")
+    router = RoutedStage0ProbeAdapter(
+        _routes(measurement, runtime), profile=REAL_STAGE0_PROFILE
+    )
+    handlers = JobHandlers(
+        AdapterRegistry(profile=REAL_STAGE0_PROFILE, stage0_probe=router),
+        output_dir=tmp_path,
+    )
+
+    result = handlers.handle_stage0_probe(
+        {
+            "stage0_run_id": str(uuid4()),
+            "target_snapshot_id": str(uuid4()),
+            "target_fingerprint": TARGET_FINGERPRINT,
+            "target": TARGET.model_dump(mode="json"),
+            "probe_type": Stage0ProbeType.PROFILER.value,
+            "protocol_version": "fixture-v1",
+            "mode": "dry_run",
+        }
+    )
+
+    assert result["adapter_provenance"][0]["adapter_name"] == "RuntimeProbe"
 
 
 def test_router_rejects_incomplete_public_contract() -> None:

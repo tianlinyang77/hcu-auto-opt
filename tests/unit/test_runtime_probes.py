@@ -46,10 +46,11 @@ class ScriptedRunner:
     def __init__(self, results: list[CommandResult]) -> None:
         self.results = results
         self.calls: list[tuple[str, ...]] = []
+        self.timeouts: list[float] = []
 
     def run(self, argv: tuple[str, ...], timeout: float = 30.0) -> CommandResult:
-        del timeout
         self.calls.append(tuple(argv))
+        self.timeouts.append(timeout)
         return self.results.pop(0)
 
     def popen(self, *args: Any, **kwargs: Any) -> Any:
@@ -243,6 +244,55 @@ def test_profiler_rejects_non_kernel_or_invalid_core_records(
     assert result["valid_record_count"] == 0
 
 
+def test_profiler_falls_back_until_a_tool_produces_a_valid_core_record() -> None:
+    valid = {
+        "kernel_name": "valid_kernel",
+        "duration_us": 2.0,
+        "call_count": 1,
+        "kernel_category": "kernel",
+    }
+    runner = ScriptedRunner(
+        [
+            _command(("first", "--version"), stdout=b"first 1\n"),
+            _command(
+                ("first", "--json"),
+                stdout=json.dumps([{"kernel_name": "partial"}]).encode(),
+            ),
+            _command(("second", "--version"), stdout=b"second 1\n"),
+            _command(("second", "--json"), stdout=json.dumps([valid]).encode()),
+        ]
+    )
+
+    result = ProfilerCapabilityProbe(runner).run(
+        {
+            "tool_candidates": [
+                {
+                    "name": "first",
+                    "version_argv": ["first", "--version"],
+                    "profile_argv": ["first", "--json"],
+                    "output_format": "json",
+                },
+                {
+                    "name": "second",
+                    "version_argv": ["second", "--version"],
+                    "profile_argv": ["second", "--json"],
+                    "output_format": "json",
+                },
+            ]
+        }
+    )
+
+    assert result["capability"] == "degraded"
+    assert result["selected_tool"] == "second"
+    assert result["records"][0]["kernel_name"] == "valid_kernel"
+    assert runner.calls == [
+        ("first", "--version"),
+        ("first", "--json"),
+        ("second", "--version"),
+        ("second", "--json"),
+    ]
+
+
 def test_profiler_rejects_legacy_mixed_workload_capture() -> None:
     with pytest.raises(ValueError, match="profile_workload"):
         ProfilerCapabilityProbe(ScriptedRunner([])).run(
@@ -260,33 +310,44 @@ def test_profiler_rejects_legacy_mixed_workload_capture() -> None:
         )
 
 
-def test_profiler_reads_rank_local_torch_trace_without_inventing_details(
+@pytest.mark.skipif(
+    os.name == "nt", reason="torch trace output paths are POSIX deployment paths"
+)
+def test_profiler_reads_only_the_trace_created_by_the_current_command(
     tmp_path: Path,
 ) -> None:
     trace_path = tmp_path / "rank-0.trace.json.gz"
     with gzip.open(trace_path, "wt", encoding="utf-8") as trace:
-        json.dump(
+        json.dump({"traceEvents": [{"ph": "X", "cat": "kernel", "name": "stale"}]}, trace)
+
+    fresh_trace = {
+        "traceEvents": [
             {
-                "traceEvents": [
-                    {
-                        "ph": "X",
-                        "cat": "kernel",
-                        "name": "rms_norm_kernel",
-                        "dur": 4.0,
-                        "args": {"stream": 7, "Input Dims": [[1, 4096]]},
-                    },
-                    {
-                        "ph": "X",
-                        "cat": "kernel",
-                        "name": "rms_norm_kernel",
-                        "dur": 6.0,
-                        "args": {"stream": 7},
-                    },
-                ]
+                "ph": "X",
+                "cat": "kernel",
+                "name": "rms_norm_kernel",
+                "dur": 4.0,
+                "args": {"stream": 7, "Input Dims": [[1, 4096]]},
             },
-            trace,
-        )
-    runner = ScriptedRunner(
+            {
+                "ph": "X",
+                "cat": "kernel",
+                "name": "rms_norm_kernel",
+                "dur": 6.0,
+                "args": {"stream": 7},
+            },
+        ]
+    }
+
+    class TraceWritingRunner(ScriptedRunner):
+        def run(self, argv: tuple[str, ...], timeout: float = 30.0) -> CommandResult:
+            result = super().run(argv, timeout)
+            if argv[0] == "triage":
+                with gzip.open(trace_path, "wt", encoding="utf-8") as trace:
+                    json.dump(fresh_trace, trace)
+            return result
+
+    runner = TraceWritingRunner(
         [
             _command(("analyze", "--help"), stdout=b"usage"),
             _command(("triage", str(trace_path)), stdout=b"report written"),
@@ -318,6 +379,46 @@ def test_profiler_reads_rank_local_torch_trace_without_inventing_details(
             "shape": [[1, 4096]],
         }
     ]
+    raw_trace = result["attempts"][0]["raw_trace"]
+    assert raw_trace["uri"] == trace_path.resolve().as_uri()
+    assert raw_trace["sha256"] == (
+        "sha256:" + hashlib.sha256(trace_path.read_bytes()).hexdigest()
+    )
+    assert raw_trace["byte_count"] == trace_path.stat().st_size
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="torch trace output paths are POSIX deployment paths"
+)
+def test_profiler_rejects_a_stale_trace_when_the_command_creates_no_new_file(
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "rank-0.trace.json"
+    trace_path.write_text('{"traceEvents": []}', encoding="utf-8")
+    runner = ScriptedRunner(
+        [
+            _command(("analyze", "--help"), stdout=b"usage"),
+            _command(("triage", str(trace_path)), stdout=b"report written"),
+        ]
+    )
+
+    result = ProfilerCapabilityProbe(runner).run(
+        {
+            "tool_candidates": [
+                {
+                    "name": "profile-llm-torch",
+                    "version_argv": ["analyze", "--help"],
+                    "profile_argv": ["triage", str(trace_path)],
+                    "output_format": "torch_trace",
+                    "output_path": str(trace_path),
+                }
+            ]
+        }
+    )
+
+    assert result["capability"] == "none"
+    assert not trace_path.exists()
+    assert "fresh torch trace" in result["attempts"][0]["parse_error"]
 
 
 class RecordingProfilerExecutor:
@@ -387,6 +488,7 @@ def test_real_profiler_commands_run_in_digest_locked_container(tmp_path: Path) -
         output_dir=tmp_path,
         resource_id="hcu-7",
         fencing_token=12,
+        max_wall_seconds=7,
     )
 
     assert result["capability"] == "degraded"
@@ -396,6 +498,33 @@ def test_real_profiler_commands_run_in_digest_locked_container(tmp_path: Path) -
         assert request.resource_id == "hcu-7"
         assert request.fencing_token == 12
         assert request.lease_scope is LeaseScope.EXCLUSIVE
+        assert request.timeout_seconds <= 7
+
+
+def test_executor_profiler_rejects_unexported_torch_trace_paths(tmp_path: Path) -> None:
+    executor = RecordingProfilerExecutor([])
+
+    result = ProfilerCapabilityProbe(executor=executor).run(
+        {
+            "tool_candidates": [
+                {
+                    "name": "profile-llm-torch",
+                    "version_argv": ["python", "analyze.py", "--help"],
+                    "profile_argv": ["python", "probe.py"],
+                    "output_format": "torch_trace",
+                    "output_path": "/workspace/rank-0.trace.json.gz",
+                }
+            ]
+        },
+        target=TARGET,
+        output_dir=tmp_path,
+        resource_id="hcu-7",
+        fencing_token=12,
+    )
+
+    assert result["capability"] == "none"
+    assert executor.requests == []
+    assert "worker-owned output mount" in result["attempts"][0]["execution_error"]
 
 
 class ScriptedExecutor:
@@ -439,11 +568,15 @@ class ScriptedCleaner:
 
     def __init__(self, healthy: list[bool]) -> None:
         self.healthy = healthy
+        self.health_calls: list[str] = []
+        self.fence_calls: list[tuple[str, int]] = []
 
     def health_check(self, resource_id: str) -> dict[str, Any]:
+        self.health_calls.append(resource_id)
         return {"resource_id": resource_id, "healthy": self.healthy.pop(0)}
 
     def fence(self, resource_id: str, fencing_token: int) -> dict[str, Any]:
+        self.fence_calls.append((resource_id, fencing_token))
         return {"resource_id": resource_id, "fencing_token": fencing_token, "fenced": True}
 
 
@@ -610,6 +743,7 @@ def test_runtime_adapter_uses_frozen_profile_not_job_commands(tmp_path: Path) ->
             "probe_type": "profiler",
             "protocol_version": "fixture-v1",
             "mode": "dry_run",
+            "budget": {"max_wall_seconds": 3, "max_samples": 10},
             "runtime_probe": {
                 "profiler": {"profile_argv": ["sh", "-c", "untrusted"]}
             },
@@ -622,10 +756,14 @@ def test_runtime_adapter_uses_frozen_profile_not_job_commands(tmp_path: Path) ->
         ("frozen-profiler", "--version"),
         ("frozen-profiler", "--json"),
     ]
+    assert all(timeout <= 3 for timeout in runner.timeouts)
     assert output.summary["capability"] == "degraded"
+    assert output.adapter_provenance == (adapter.provenance,)
 
 
-def test_formal_runtime_probe_rejects_worker_local_evidence_store(tmp_path: Path) -> None:
+def test_formal_runtime_probe_is_disabled_until_d_side_verification_is_wired(
+    tmp_path: Path,
+) -> None:
     cleaner = ScriptedCleaner([])
     adapter = RuntimeProbeAdapter(
         ProfilerCapabilityProbe(ScriptedRunner([])),
@@ -635,7 +773,7 @@ def test_formal_runtime_probe_rejects_worker_local_evidence_store(tmp_path: Path
         _runtime_profile(tmp_path),
     )
 
-    with pytest.raises(ValueError, match="verifier-owned evidence publisher"):
+    with pytest.raises(ValueError, match="D-side evidence verification"):
         adapter.run_probe(
             {
                 "stage0_run_id": str(uuid4()),
@@ -655,30 +793,15 @@ def test_formal_runtime_probe_rejects_worker_local_evidence_store(tmp_path: Path
         )
 
 
-def test_formal_runtime_probe_records_lease_cleanup_with_trusted_publisher(
+def test_trusted_publisher_cannot_bypass_the_formal_runtime_interlock(
     tmp_path: Path,
 ) -> None:
     class VerifierOwnedPublisher(LocalContentAddressedEvidencePublisher):
         publication_authority = "fixture-verifier-owned"
         authorizes_formal_results = True
 
-    records = [
-        {
-            "kernel_name": "kernel",
-            "duration_us": 1.0,
-            "call_count": 1,
-            "kernel_category": "kernel",
-        }
-    ]
-    runner = ScriptedRunner(
-        [
-            _command(("frozen-profiler", "--version"), stdout=b"version\n"),
-            _command(
-                ("frozen-profiler", "--json"), stdout=json.dumps(records).encode()
-            ),
-        ]
-    )
-    cleaner = ScriptedCleaner([True])
+    runner = ScriptedRunner([])
+    cleaner = ScriptedCleaner([])
     adapter = RuntimeProbeAdapter(
         ProfilerCapabilityProbe(runner),
         OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
@@ -687,7 +810,134 @@ def test_formal_runtime_probe_records_lease_cleanup_with_trusted_publisher(
         _runtime_profile(tmp_path),
         VerifierOwnedPublisher(),
     )
-    lease_id = str(uuid4())
+    with pytest.raises(ValueError, match="D-side evidence verification"):
+        adapter.run_probe(
+            {
+                "stage0_run_id": str(uuid4()),
+                "target_snapshot_id": str(uuid4()),
+                "target_fingerprint": target_fingerprint(TARGET),
+                "target": TARGET.model_dump(mode="json"),
+                "probe_type": "profiler",
+                "protocol_version": "fixture-v1",
+                "mode": "formal",
+                "_job_context": {
+                    "lease_id": str(uuid4()),
+                    "resource_id": "hcu-7",
+                    "fencing_token": 9,
+                },
+            },
+            tmp_path / "evidence",
+        )
+
+    assert runner.calls == []
+    assert cleaner.fence_calls == []
+    assert cleaner.health_calls == []
+
+
+def test_runtime_probe_failure_still_fences_and_health_checks_leased_resource(
+    tmp_path: Path,
+) -> None:
+    class ExplodingRunner(ScriptedRunner):
+        def run(self, argv: tuple[str, ...], timeout: float = 30.0) -> CommandResult:
+            self.calls.append(argv)
+            self.timeouts.append(timeout)
+            raise RuntimeError("probe exploded")
+
+    runner = ExplodingRunner([])
+    cleaner = ScriptedCleaner([True])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(runner),
+        OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
+        cleaner,
+        TARGET,
+        _runtime_profile(tmp_path),
+    )
+
+    with pytest.raises(RuntimeError, match="probe exploded"):
+        adapter.run_probe(
+            {
+                "stage0_run_id": str(uuid4()),
+                "target_snapshot_id": str(uuid4()),
+                "target_fingerprint": target_fingerprint(TARGET),
+                "target": TARGET.model_dump(mode="json"),
+                "probe_type": "profiler",
+                "protocol_version": "fixture-v1",
+                "mode": "dry_run",
+                "budget": {},
+                "_job_context": {
+                    "lease_id": str(uuid4()),
+                    "resource_id": "hcu-7",
+                    "fencing_token": 9,
+                },
+            },
+            tmp_path / "evidence",
+        )
+
+    assert cleaner.fence_calls == [("hcu-7", 9)]
+    assert cleaner.health_calls == ["hcu-7"]
+
+
+def test_runtime_cleanup_health_check_runs_even_when_fencing_raises(
+    tmp_path: Path,
+) -> None:
+    class ExplodingRunner(ScriptedRunner):
+        def run(self, argv: tuple[str, ...], timeout: float = 30.0) -> CommandResult:
+            del argv, timeout
+            raise RuntimeError("probe exploded")
+
+    class FenceFailingCleaner(ScriptedCleaner):
+        def fence(self, resource_id: str, fencing_token: int) -> dict[str, Any]:
+            self.fence_calls.append((resource_id, fencing_token))
+            raise RuntimeError("fence exploded")
+
+    cleaner = FenceFailingCleaner([True])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(ExplodingRunner([])),
+        OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
+        cleaner,
+        TARGET,
+        _runtime_profile(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="cleanup failed: fence"):
+        adapter.run_probe(
+            {
+                "stage0_run_id": str(uuid4()),
+                "target_snapshot_id": str(uuid4()),
+                "target_fingerprint": target_fingerprint(TARGET),
+                "target": TARGET.model_dump(mode="json"),
+                "probe_type": "profiler",
+                "protocol_version": "fixture-v1",
+                "mode": "dry_run",
+                "_job_context": {
+                    "lease_id": str(uuid4()),
+                    "resource_id": "hcu-7",
+                    "fencing_token": 9,
+                },
+            },
+            tmp_path / "evidence",
+        )
+
+    assert cleaner.fence_calls == [("hcu-7", 9)]
+    assert cleaner.health_calls == ["hcu-7"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="overlay mounts require POSIX host paths")
+def test_dry_run_hotpatch_records_cleanup_for_its_exclusive_lease(
+    tmp_path: Path,
+) -> None:
+    profile = _runtime_profile(tmp_path)
+    artifact_hash = profile.hotpatch.artifact.content_hash
+    cleaner = ScriptedCleaner([True, True, True, True])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(ScriptedRunner([])),
+        OverlayCapabilityProbe(
+            ScriptedExecutor(_overlay_observations(artifact_hash)), cleaner
+        ),
+        cleaner,
+        TARGET,
+        profile,
+    )
 
     output = adapter.run_probe(
         {
@@ -695,11 +945,12 @@ def test_formal_runtime_probe_records_lease_cleanup_with_trusted_publisher(
             "target_snapshot_id": str(uuid4()),
             "target_fingerprint": target_fingerprint(TARGET),
             "target": TARGET.model_dump(mode="json"),
-            "probe_type": "profiler",
+            "probe_type": "hotpatch",
             "protocol_version": "fixture-v1",
-            "mode": "formal",
+            "mode": "dry_run",
+            "budget": {"max_wall_seconds": 30},
             "_job_context": {
-                "lease_id": lease_id,
+                "lease_id": str(uuid4()),
                 "resource_id": "hcu-7",
                 "fencing_token": 9,
             },
@@ -711,9 +962,8 @@ def test_formal_runtime_probe_records_lease_cleanup_with_trusted_publisher(
         "fence": {"resource_id": "hcu-7", "fencing_token": 9, "fenced": True},
         "health": {"resource_id": "hcu-7", "healthy": True},
     }
-    evidence = json.loads(Path(output.raw_evidence_uri.removeprefix("file://")).read_text())
-    assert evidence["execution_context"]["lease_id"] == lease_id
-    assert evidence["publication_authority"] == "fixture-verifier-owned"
+    assert cleaner.fence_calls == [("hcu-7", 9)]
+    assert cleaner.health_calls == ["hcu-7", "hcu-7", "hcu-7", "hcu-7"]
 
 
 def test_overlay_reports_overlay_only_after_activation_correctness_and_recovery(

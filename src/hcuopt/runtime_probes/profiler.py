@@ -7,6 +7,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from hcuopt.adapters.execution import CommandResult, CommandRunner
@@ -58,7 +59,12 @@ class ProfilerCapabilityProbe:
         output_dir: Path | None = None,
         resource_id: str | None = None,
         fencing_token: int | None = None,
+        max_wall_seconds: int | None = None,
     ) -> dict[str, Any]:
+        if max_wall_seconds is not None and (
+            isinstance(max_wall_seconds, bool) or max_wall_seconds < 1
+        ):
+            raise ValueError("profiler max_wall_seconds must be a positive integer")
         frozen = ProfilerProbeConfiguration.model_validate(configuration)
         configuration = frozen.model_dump(mode="json", exclude_none=True)
         capture_contract = self._capture_contract(configuration)
@@ -67,6 +73,10 @@ class ProfilerCapabilityProbe:
         attempts: list[dict[str, Any]] = []
         normalized_records: list[dict[str, Any]] = []
         selected_tool: str | None = None
+        best_score = -1
+        deadline = (
+            monotonic() + max_wall_seconds if max_wall_seconds is not None else None
+        )
         for raw_candidate in candidates:
             candidate = raw_candidate
             name = candidate.name
@@ -74,17 +84,33 @@ class ProfilerCapabilityProbe:
             profile_argv = candidate.profile_argv
             output_format = candidate.output_format
             timeout = float(candidate.timeout_seconds)
+            if output_format == "torch_trace" and self.executor is not None:
+                attempts.append(
+                    {
+                        "tool": name,
+                        "version_argv": list(version_argv),
+                        "profile_argv": list(profile_argv),
+                        "output_format": output_format,
+                        "execution_error": (
+                            "executor torch_trace requires a worker-owned output mount "
+                            "and explicit container-to-host export"
+                        ),
+                    }
+                )
+                continue
 
             try:
                 version = self._run_command(
                     version_argv,
-                    min(timeout, 30.0),
+                    self._remaining_timeout(min(timeout, 30.0), deadline),
                     configuration,
                     target,
                     output_dir,
                     resource_id,
                     fencing_token,
                 )
+            except TimeoutError:
+                raise
             except OSError as error:
                 attempts.append(
                     {
@@ -105,16 +131,29 @@ class ProfilerCapabilityProbe:
                 attempts.append(attempt)
                 continue
 
+            trace_path: Path | None = None
+            if output_format == "torch_trace":
+                assert candidate.output_path is not None
+                trace_path = Path(candidate.output_path)
+                try:
+                    self._prepare_trace_output(trace_path)
+                except (OSError, ValueError) as error:
+                    attempt["execution_error"] = f"{error.__class__.__name__}: {error}"
+                    attempts.append(attempt)
+                    continue
+
             try:
                 profile = self._run_command(
                     profile_argv,
-                    timeout,
+                    self._remaining_timeout(timeout, deadline),
                     configuration,
                     target,
                     output_dir,
                     resource_id,
                     fencing_token,
                 )
+            except TimeoutError:
+                raise
             except OSError as error:
                 attempt["execution_error"] = f"{error.__class__.__name__}: {error}"
                 attempts.append(attempt)
@@ -133,16 +172,30 @@ class ProfilerCapabilityProbe:
                 continue
             try:
                 if output_format == "torch_trace":
-                    assert candidate.output_path is not None
-                    records = self._parse_torch_trace(Path(candidate.output_path))
+                    assert trace_path is not None
+                    trace_path = self._fresh_trace_path(trace_path)
+                    attempt["raw_trace"] = {
+                        "uri": trace_path.as_uri(),
+                        "sha256": sha256_file(trace_path),
+                        "byte_count": trace_path.stat().st_size,
+                    }
+                    records = self._parse_torch_trace(trace_path)
                 else:
                     records = self._parse_records(profile.stdout, output_format)
-            except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
                 attempt["parse_error"] = f"{error.__class__.__name__}: {error}"
                 continue
-            normalized_records = [self._normalize_record(item) for item in records]
-            normalized_records = [item for item in normalized_records if item]
-            if normalized_records:
+            candidate_records = [self._normalize_record(item) for item in records]
+            candidate_records = [item for item in candidate_records if item]
+            candidate_score = max(
+                (self._record_score(item) for item in candidate_records), default=-1
+            )
+            if candidate_score > best_score:
+                best_score = candidate_score
+                normalized_records = candidate_records
+                selected_tool = name
+            if any(self._valid_core(item) for item in candidate_records):
+                normalized_records = candidate_records
                 selected_tool = name
                 break
 
@@ -191,6 +244,38 @@ class ProfilerCapabilityProbe:
             "capture_contract": capture_contract,
             "triage_artifacts": self._triage_artifacts(configuration),
         }
+
+    @staticmethod
+    def _remaining_timeout(requested: float, deadline: float | None) -> float:
+        if deadline is None:
+            return requested
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("runtime probe wall-clock budget exhausted")
+        return min(requested, remaining)
+
+    @staticmethod
+    def _prepare_trace_output(path: Path) -> None:
+        if path.is_symlink():
+            raise ValueError("torch trace output path cannot be a symlink")
+        if not path.exists():
+            return
+        if not path.is_file():
+            raise ValueError("torch trace output path must be a regular file")
+        path.unlink()
+
+    @staticmethod
+    def _fresh_trace_path(path: Path) -> Path:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("profiler command did not produce a fresh torch trace")
+        return path.resolve(strict=True)
+
+    @staticmethod
+    def _record_score(record: Mapping[str, Any]) -> int:
+        return sum(
+            record.get(field) not in (None, "", [], {})
+            for field in (*CORE_FIELDS, *DETAIL_FIELDS)
+        )
 
     def _run_command(
         self,

@@ -26,6 +26,7 @@ class Stage0ProbeOutput:
     raw_evidence_hash: str
     cleanup_evidence: dict[str, Any] | None
     synthetic: bool = False
+    adapter_provenance: tuple[AdapterProvenance, ...] = ()
 
 
 class Stage0MeasurementProbeAdapter:
@@ -102,6 +103,7 @@ class Stage0MeasurementProbeAdapter:
             raw_evidence_uri=run.artifact.uri,
             raw_evidence_hash=run.artifact.sha256,
             cleanup_evidence=run.cleanup_evidence,
+            adapter_provenance=(self.provenance,),
         )
 
     def _fingerprint_probe(self, payload: Mapping[str, Any], output_dir: Path) -> Stage0ProbeOutput:
@@ -134,4 +136,5 @@ class Stage0MeasurementProbeAdapter:
             raw_evidence_uri=artifact.uri,
             raw_evidence_hash=artifact.sha256,
             cleanup_evidence=cleanup_evidence,
+            adapter_provenance=(self.provenance,),
         )

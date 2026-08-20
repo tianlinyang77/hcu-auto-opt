@@ -268,12 +268,13 @@ class PostgresRepository:
             if any(run[name] != value for name, value in expected_run.items()):
                 raise Conflict("Stage 0 idempotency_key was reused with a different run")
 
-            lease_scope = (
-                LeaseScope.EXCLUSIVE
-                if request.mode is Stage0RunMode.FORMAL
-                else LeaseScope.NONE
-            )
             for probe_type in sorted(REQUIRED_STAGE0_PROBES, key=lambda item: item.value):
+                lease_scope = (
+                    LeaseScope.EXCLUSIVE
+                    if request.mode is Stage0RunMode.FORMAL
+                    or probe_type is Stage0ProbeType.HOTPATCH
+                    else LeaseScope.NONE
+                )
                 job_id = uuid5(
                     NAMESPACE_URL,
                     f"hcuopt:{run['stage0_run_id']}:{probe_type.value}:v1",
@@ -287,6 +288,7 @@ class PostgresRepository:
                     "target": target.model_dump(mode="json"),
                     "protocol_version": request.protocol_version,
                     "mode": request.mode.value,
+                    "budget": budget,
                 }
                 connection.execute(
                     """

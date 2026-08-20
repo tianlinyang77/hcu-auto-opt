@@ -7,6 +7,7 @@ from uuid import UUID
 
 from hcuopt.adapters.interfaces import ResourceCleaner
 from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
+from hcuopt.contracts.v1 import Stage0Budget
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
 from hcuopt.runtime_probes.evidence import (
@@ -74,7 +75,13 @@ class RuntimeProbeAdapter:
         mode = payload.get("mode")
         if mode not in {"dry_run", "formal"}:
             raise ValueError("runtime probe mode must be dry_run or formal")
+        if mode == "formal":
+            raise ValueError(
+                "formal runtime probes are disabled until D-side evidence "
+                "verification is wired"
+            )
         context = self._mapping(payload.get("_job_context", {}), "job context")
+        budget = Stage0Budget.model_validate(payload.get("budget", {}))
         target = TargetSpec.model_validate(payload.get("target"))
         if (
             target_fingerprint(target) != self.target_fingerprint
@@ -86,85 +93,98 @@ class RuntimeProbeAdapter:
             if probe_type is Stage0ProbeType.PROFILER
             else self._configuration.hotpatch
         ).model_dump(mode="json")
-        formal = mode == "formal"
-        if formal and not self.evidence_publisher.authorizes_formal_results:
-            raise ValueError(
-                "formal runtime probe requires a verifier-owned evidence publisher"
-            )
-        resource_id = context.get("resource_id")
+        lease_id = context.get("lease_id")
+        raw_resource_id = context.get("resource_id")
         fencing_token = context.get("fencing_token")
+        resource_id = (
+            raw_resource_id
+            if isinstance(raw_resource_id, str) and raw_resource_id
+            else None
+        )
         valid_fencing_token = (
             isinstance(fencing_token, int)
             and not isinstance(fencing_token, bool)
             and fencing_token >= 1
         )
-        if formal and (
-            not isinstance(context.get("lease_id"), str)
-            or not isinstance(resource_id, str)
-            or not resource_id
+        lease_supplied = any(
+            value is not None for value in (lease_id, raw_resource_id, fencing_token)
+        )
+        if lease_supplied and (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or resource_id is None
             or not valid_fencing_token
         ):
-            raise ValueError("formal runtime probe requires lease, resource, and fencing token")
-
-        if probe_type is Stage0ProbeType.PROFILER:
-            details = self.profiler.run(
-                configuration,
-                target=target,
-                output_dir=output_dir,
-                resource_id=resource_id if isinstance(resource_id, str) else None,
-                fencing_token=fencing_token if valid_fencing_token else None,
+            raise ValueError(
+                "leased runtime probe requires lease, resource, and fencing token"
             )
-            summary = {
-                "capability": details["capability"],
-                "selected_tool": details["selected_tool"],
-                "observed_fields": details["observed_fields"],
-                "missing_fields": details["missing_fields"],
-            }
-        else:
-            if not isinstance(resource_id, str) or not resource_id:
-                raise ValueError("hotpatch probe requires a leased resource_id")
-            if not valid_fencing_token:
-                raise ValueError("hotpatch probe requires a fencing_token")
-            details = self.overlay.run(
-                configuration,
-                target=target,
-                output_dir=output_dir,
-                resource_id=resource_id,
-                fencing_token=fencing_token,
-            )
-            summary = {
-                name: details[name]
-                for name in (
-                    "capability",
-                    "activation_mode",
-                    "execution_succeeded",
-                    "baseline_proved",
-                    "activation_proved",
-                    "correctness_passed",
-                    "recovery_passed",
-                    "resource_healthy",
-                    "observation_contract_matches",
-                    "baseline_source_hash_before",
-                    "baseline_source_hash_after",
-                    "candidate_source_hash",
-                    "artifact_hash",
-                    "workload_kind",
-                    "replacement_point",
-                    "generic_artifact_mount_passed",
-                    "sglang_overlay_proved",
-                )
-            }
+        if probe_type is Stage0ProbeType.HOTPATCH and not lease_supplied:
+            raise ValueError("hotpatch probe requires an exclusive lease")
 
         cleanup_evidence = None
-        if formal:
-            assert isinstance(resource_id, str)
+        try:
+            if probe_type is Stage0ProbeType.PROFILER:
+                details = self.profiler.run(
+                    configuration,
+                    target=target,
+                    output_dir=output_dir,
+                    resource_id=resource_id,
+                    fencing_token=fencing_token if valid_fencing_token else None,
+                    max_wall_seconds=budget.max_wall_seconds,
+                )
+                summary = {
+                    "capability": details["capability"],
+                    "selected_tool": details["selected_tool"],
+                    "observed_fields": details["observed_fields"],
+                    "missing_fields": details["missing_fields"],
+                }
+            else:
+                assert resource_id is not None
+                assert valid_fencing_token
+                details = self.overlay.run(
+                    configuration,
+                    target=target,
+                    output_dir=output_dir,
+                    resource_id=resource_id,
+                    fencing_token=fencing_token,
+                    max_wall_seconds=budget.max_wall_seconds,
+                )
+                summary = {
+                    name: details[name]
+                    for name in (
+                        "capability",
+                        "activation_mode",
+                        "execution_succeeded",
+                        "baseline_proved",
+                        "activation_proved",
+                        "correctness_passed",
+                        "recovery_passed",
+                        "resource_healthy",
+                        "observation_contract_matches",
+                        "baseline_source_hash_before",
+                        "baseline_source_hash_after",
+                        "candidate_source_hash",
+                        "artifact_hash",
+                        "workload_kind",
+                        "replacement_point",
+                        "generic_artifact_mount_passed",
+                        "sglang_overlay_proved",
+                    )
+                }
+        except BaseException as probe_error:
+            if lease_supplied:
+                assert resource_id is not None
+                assert valid_fencing_token
+                try:
+                    self._cleanup_resource(resource_id, fencing_token)
+                except Exception as cleanup_error:
+                    raise cleanup_error from probe_error
+            raise
+
+        if lease_supplied:
+            assert resource_id is not None
             assert valid_fencing_token
-            cleanup_evidence = {
-                "fence": dict(self.cleaner.fence(resource_id, fencing_token)),
-                "health": dict(self.cleaner.health_check(resource_id)),
-            }
-            if cleanup_evidence["health"].get("healthy") is not True:
-                raise ValueError("formal runtime probe cleanup health check failed")
+            cleanup_evidence = self._cleanup_resource(resource_id, fencing_token)
 
         evidence_payload = {
             "stage0_run_id": stage0_run_id,
@@ -179,6 +199,7 @@ class RuntimeProbeAdapter:
                 "fencing_token": fencing_token,
             },
             "publication_authority": self.evidence_publisher.publication_authority,
+            "budget": budget.model_dump(mode="json", exclude_none=True),
             "summary": summary,
             "details": details,
             "cleanup_evidence": cleanup_evidence,
@@ -197,7 +218,43 @@ class RuntimeProbeAdapter:
             summary=summary,
             cleanup_evidence=cleanup_evidence,
             synthetic=False,
+            adapter_provenance=(self.provenance,),
         )
+
+    def _cleanup_resource(
+        self, resource_id: str, fencing_token: int
+    ) -> dict[str, dict[str, Any]]:
+        fence_error: Exception | None = None
+        health_error: Exception | None = None
+        try:
+            fence = dict(self.cleaner.fence(resource_id, fencing_token))
+        except Exception as error:
+            fence_error = error
+            fence = {
+                "resource_id": resource_id,
+                "fenced": False,
+                "error": f"{error.__class__.__name__}: {error}",
+            }
+        try:
+            health = dict(self.cleaner.health_check(resource_id))
+        except Exception as error:
+            health_error = error
+            health = {
+                "resource_id": resource_id,
+                "healthy": False,
+                "error": f"{error.__class__.__name__}: {error}",
+            }
+        cleanup_evidence = {"fence": fence, "health": health}
+        failures = []
+        if fence_error is not None or fence.get("fenced") is not True:
+            failures.append("fence")
+        if health_error is not None or health.get("healthy") is not True:
+            failures.append("health")
+        if failures:
+            raise ValueError(
+                "runtime probe cleanup failed: " + ", ".join(failures)
+            )
+        return cleanup_evidence
 
     @staticmethod
     def _mapping(value: Any, name: str) -> Mapping[str, Any]:
