@@ -16,6 +16,7 @@ from hcuopt.adapters.profiles import (
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
 from hcuopt.adapters.sglang_evaluator import SGLangSmokeEvaluator
+from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.harness import EvidenceMeasurementHarness, TelemetryCollector
@@ -129,4 +130,34 @@ def build_nmz36_runtime_probe_registry(
         executor=executor,
         resource_cleaner=cleaner,
         stage0_probe=runtime_probe,
+    )
+
+
+def compose_nmz36_stage0_registry(
+    measurement_registry: AdapterRegistry,
+    runtime_registry: AdapterRegistry,
+) -> AdapterRegistry:
+    """Route all seven Stage 0 probes through one public worker profile.
+
+    S0-B and S0-C remain independently implemented and testable.  The composed
+    registry is the deployment boundary consumed by the control plane.
+    """
+
+    measurement_probe = measurement_registry.require("stage0_probe")
+    runtime_probe = runtime_registry.require("stage0_probe")
+    resource_cleaner = runtime_registry.require("resource_cleaner")
+    routes = {
+        Stage0ProbeType.FINGERPRINT: measurement_probe,
+        Stage0ProbeType.TIMER: measurement_probe,
+        Stage0ProbeType.NOISE: measurement_probe,
+        Stage0ProbeType.KNOWN_SIGNAL: measurement_probe,
+        Stage0ProbeType.NULL_SIGNAL: measurement_probe,
+        Stage0ProbeType.PROFILER: runtime_probe,
+        Stage0ProbeType.HOTPATCH: runtime_probe,
+    }
+    return AdapterRegistry(
+        profile=REAL_STAGE0_PROFILE,
+        stage0_probe=RoutedStage0ProbeAdapter(routes, profile=REAL_STAGE0_PROFILE),
+        executor=runtime_registry.executor,
+        resource_cleaner=resource_cleaner,
     )

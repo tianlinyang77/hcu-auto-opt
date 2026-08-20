@@ -18,9 +18,10 @@ the server-side Barrier remains fail-closed.
    commit, HCU 7, NUMA affinity, and the recorded exclusive reservation window.
 2. Do not start a Formal run while `device_isolation_not_reserved` is open. A dry run may
    validate shape only and cannot be finalized as performance authority.
-3. Start a worker with the distinct `nmz36-stage0-measurement-v2` profile, supplying the
-   locked-image workload callable, HCU device-timer implementation, telemetry collector,
-   and explicit MeasurementPlan. There is intentionally no fallback host-only timer.
+3. Start the unified `nmz36-stage0-v2` worker, supplying the locked-image workload
+   callable, HCU device-timer implementation, telemetry collector, and explicit
+   MeasurementPlan. The worker routes the five measurement probe types to S0-B and the
+   `profiler`/`hotpatch` types to S0-C; there is intentionally no fallback host-only timer.
    For a container pinned to physical HCU 7, set `ROCR_VISIBLE_DEVICES=7` only. ROCR then
    exposes that physical device as logical device 0; adding `HIP_VISIBLE_DEVICES=7` after
    that remapping hides the only visible device. `TorchCudaEventTimer` uses a synchronized

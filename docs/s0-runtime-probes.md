@@ -4,6 +4,19 @@
 [S0-C nmz36 Dry Run 验收记录](evidence/s0-c-nmz36-dry-run-20260820.md)。该次结果为
 G0-P `DEGRADED`、G0-H `OVERLAY_ONLY`；由于未取得 HCU 7 独占窗口，不能视为 Formal。
 
+## 控制面对外使用一个 Profile，内部仍由 B、C 分工
+
+正式 Stage 0 的七类探针统一通过 `nmz36-stage0-v1` 这个 Worker Profile
+领取任务，但这不表示要把 S0-B 和 S0-C 合成一套实现：
+
+- `fingerprint`、`timer`、`noise`、`known_signal`、`null_signal` 交给 S0-B
+  Measurement Adapter；
+- `profiler`、`hotpatch` 交给 S0-C Runtime Probe Adapter。
+
+`compose_nmz36_stage0_registry()` 负责建立这层路由，并在七类探针没有全部配置时
+拒绝启动。每条探针结果还会记录实际执行它的内部 Adapter 来源，因此统一 Profile
+不会破坏 B、C 的职责边界和证据可追踪性。
+
 ## 目标和边界
 
 S0-C 实现 `profiler`（G0-P）和 `hotpatch`（G0-H）两类 `Stage0ProbeResult`。
