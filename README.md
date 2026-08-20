@@ -119,6 +119,8 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [领域契约](docs/contracts.md)
 - [公共接口层](docs/public-interfaces.md)
 - [F1-A Framework Smoke 控制面](docs/framework-smoke-control-plane.md)
+- [S0-A Stage 0 控制面](docs/s0-control-plane.md)
+- [S0-C Profiler 与可逆 Overlay 能力探针](docs/s0-runtime-probes.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
 - [Walking Skeleton](docs/walking-skeleton.md)

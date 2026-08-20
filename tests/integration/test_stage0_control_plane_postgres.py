@@ -9,6 +9,7 @@ import pytest
 from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
 from hcuopt.contracts.v1 import Stage0ProbeResult, Stage0RunCreate, WorkerRegister
 from hcuopt.domain.enums import (
+    LeaseScope,
     ProjectMode,
     Stage0ProbeType,
     Stage0RunMode,
@@ -210,6 +211,36 @@ class Stage0ControlPlanePostgresTests(unittest.TestCase):
         self.assertEqual(len(set(run_ids)), 1)
         summary = self.repository.stage0_run_summary(UUID(run_ids[0]))
         self.assertEqual(len(summary["jobs"]), len(Stage0ProbeType))
+
+    def test_dry_run_hotpatch_gets_exclusive_lease_and_public_budget(self) -> None:
+        request = Stage0RunCreate(
+            name="Stage 0 dry-run lease fixture",
+            workload_id="sglang-qwen2.5-0.5b",
+            target_id=self.target.target_id,
+            adapter_profile=PROFILE,
+            mode=Stage0RunMode.DRY_RUN,
+            protocol_version="stage0-fixture-v1",
+            idempotency_key="dry-run-hotpatch-exclusive-fixture",
+            budget={"max_wall_seconds": 123, "max_samples": 456},
+        )
+        run = self.repository.create_stage0_run(request, self.target, str(TARGET_PATH))
+
+        jobs = self.repository.stage0_run_summary(run["stage0_run_id"])["jobs"]
+        jobs_by_probe = {
+            Stage0ProbeType(job["payload"]["probe_type"]): job for job in jobs
+        }
+
+        self.assertEqual(
+            jobs_by_probe[Stage0ProbeType.HOTPATCH]["lease_scope"],
+            LeaseScope.EXCLUSIVE.value,
+        )
+        for probe_type, job in jobs_by_probe.items():
+            if probe_type is not Stage0ProbeType.HOTPATCH:
+                self.assertEqual(job["lease_scope"], LeaseScope.NONE.value)
+            self.assertEqual(
+                job["payload"]["budget"],
+                {"max_wall_seconds": 123, "max_samples": 456},
+            )
 
     def test_target_snapshot_upsert_is_concurrently_idempotent(self) -> None:
         thread_count = 4

@@ -114,6 +114,13 @@ class Stage0EvidenceRequest(ContractModel):
     synthetic: Literal[True] = True
 
 
+class Stage0Budget(ContractModel):
+    """Caller-controlled limits; executable probe configuration is not public input."""
+
+    max_wall_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    max_samples: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
 class Stage0RunCreate(ContractModel):
     name: str = Field(min_length=1, max_length=200)
     workload_id: str = Field(min_length=1, max_length=200)
@@ -122,7 +129,7 @@ class Stage0RunCreate(ContractModel):
     mode: Stage0RunMode
     protocol_version: str = Field(min_length=1, max_length=200)
     idempotency_key: str = Field(min_length=8, max_length=300)
-    budget: dict[str, Any] = Field(default_factory=dict)
+    budget: Stage0Budget = Field(default_factory=Stage0Budget)
 
 
 class Stage0RunView(ReadModel):

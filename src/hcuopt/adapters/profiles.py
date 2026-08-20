@@ -19,7 +19,10 @@ FRAMEWORK_SMOKE_CAPABILITIES = frozenset(
 )
 STAGE0_CAPABILITIES = frozenset({"stage0_probe"})
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
-REAL_STAGE0_MEASUREMENT_PROFILE = "nmz36-stage0-measurement-v2"
+REAL_STAGE0_PROFILE = "nmz36-stage0-v2"
+# Compatibility name for S0-B callers. Measurement is an internal delegate of the
+# single public Stage 0 worker profile, not a separately claimable profile.
+REAL_STAGE0_MEASUREMENT_PROFILE = REAL_STAGE0_PROFILE
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +94,7 @@ class AdapterProfileCatalog:
                     capabilities=FRAMEWORK_SMOKE_CAPABILITIES,
                 ),
                 AdapterProfile(
-                    name=REAL_STAGE0_MEASUREMENT_PROFILE,
+                    name=REAL_STAGE0_PROFILE,
                     implementation_kind="real",
                     capabilities=STAGE0_CAPABILITIES,
                 ),

@@ -47,6 +47,7 @@ class AdapterRegistry:
             FakeProfiler,
             FakeResourceCleaner,
             FakeSourceManager,
+            FakeStage0Probe,
         )
 
         return cls(
@@ -60,6 +61,7 @@ class AdapterRegistry:
             executor=FakeExecutionAdapter(),
             source_manager=FakeSourceManager(),
             artifact_store=FakeArtifactStore(),
+            stage0_probe=FakeStage0Probe(),
         )
 
     def available(self) -> tuple[str, ...]:

@@ -11,16 +11,25 @@ from hcuopt.adapters.noop_builder import NoopBuilder
 from hcuopt.adapters.profiles import (
     REAL_FRAMEWORK_SMOKE_PROFILE,
     REAL_STAGE0_MEASUREMENT_PROFILE,
+    REAL_STAGE0_PROFILE,
 )
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
 from hcuopt.adapters.sglang_evaluator import SGLangSmokeEvaluator
+from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.harness import EvidenceMeasurementHarness, TelemetryCollector
 from hcuopt.measurement.sampling import SampledWorkload
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
 from hcuopt.measurement.timers import DeviceTimer, HostClock
+from hcuopt.runtime_probes import (
+    EvidencePublisher,
+    OverlayCapabilityProbe,
+    ProfilerCapabilityProbe,
+    RuntimeProbeAdapter,
+    RuntimeProbeProfile,
+)
 
 
 def build_nmz36_framework_smoke_registry(
@@ -98,4 +107,69 @@ def build_nmz36_stage0_measurement_registry(
             null_signal_detector=null_signal_detector,
         ),
         resource_cleaner=cleaner,
+    )
+
+
+def build_nmz36_runtime_probe_registry(
+    target: TargetSpec,
+    output_dir: Path,
+    *,
+    configuration: RuntimeProbeProfile,
+    evidence_publisher: EvidencePublisher | None = None,
+    runner: CommandRunner | None = None,
+) -> AdapterRegistry:
+    """Compose the real S0-C probes under the shared Stage 0 profile."""
+
+    del output_dir
+    profile = REAL_STAGE0_PROFILE
+    if configuration.profile != profile:
+        raise ValueError(
+            f"runtime probe configuration profile must be {profile}, "
+            f"got {configuration.profile}"
+        )
+    executor = ContainerExecutionAdapter(runner, profile=profile)
+    cleaner = ContainerResourceCleaner(target, runner, profile=profile)
+    runtime_probe = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(executor=executor),
+        OverlayCapabilityProbe(executor, cleaner),
+        cleaner,
+        target,
+        configuration,
+        evidence_publisher,
+    )
+    return AdapterRegistry(
+        profile=profile,
+        executor=executor,
+        resource_cleaner=cleaner,
+        stage0_probe=runtime_probe,
+    )
+
+
+def compose_nmz36_stage0_registry(
+    measurement_registry: AdapterRegistry,
+    runtime_registry: AdapterRegistry,
+) -> AdapterRegistry:
+    """Route all seven Stage 0 probes through one public worker profile.
+
+    S0-B and S0-C remain independently implemented and testable.  The composed
+    registry is the deployment boundary consumed by the control plane.
+    """
+
+    measurement_probe = measurement_registry.require("stage0_probe")
+    runtime_probe = runtime_registry.require("stage0_probe")
+    resource_cleaner = runtime_registry.require("resource_cleaner")
+    routes = {
+        Stage0ProbeType.FINGERPRINT: measurement_probe,
+        Stage0ProbeType.TIMER: measurement_probe,
+        Stage0ProbeType.NOISE: measurement_probe,
+        Stage0ProbeType.KNOWN_SIGNAL: measurement_probe,
+        Stage0ProbeType.NULL_SIGNAL: measurement_probe,
+        Stage0ProbeType.PROFILER: runtime_probe,
+        Stage0ProbeType.HOTPATCH: runtime_probe,
+    }
+    return AdapterRegistry(
+        profile=REAL_STAGE0_PROFILE,
+        stage0_probe=RoutedStage0ProbeAdapter(routes, profile=REAL_STAGE0_PROFILE),
+        executor=runtime_registry.executor,
+        resource_cleaner=resource_cleaner,
     )

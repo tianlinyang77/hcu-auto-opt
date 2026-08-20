@@ -187,6 +187,7 @@ class PostgresRepository:
     ) -> dict[str, Any]:
         task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
         run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
+        budget = request.budget.model_dump(mode="json", exclude_none=True)
         with self.connection() as connection:
             snapshot = self._upsert_target_snapshot(connection, target, source_path)
             task = connection.execute(
@@ -207,7 +208,7 @@ class PostgresRepository:
                     request.workload_id,
                     request.idempotency_key,
                     TaskState.STAGE0_PENDING.value,
-                    Jsonb(request.budget),
+                    Jsonb(budget),
                     WorkflowType.STAGE0.value,
                     target.target_id,
                     snapshot["target_snapshot_id"],
@@ -223,7 +224,7 @@ class PostgresRepository:
             expected_task = {
                 "name": request.name,
                 "workload_id": request.workload_id,
-                "budget": request.budget,
+                "budget": budget,
                 "workflow_type": WorkflowType.STAGE0.value,
                 "target_id": target.target_id,
                 "target_snapshot_id": snapshot["target_snapshot_id"],
@@ -267,12 +268,13 @@ class PostgresRepository:
             if any(run[name] != value for name, value in expected_run.items()):
                 raise Conflict("Stage 0 idempotency_key was reused with a different run")
 
-            lease_scope = (
-                LeaseScope.EXCLUSIVE
-                if request.mode is Stage0RunMode.FORMAL
-                else LeaseScope.NONE
-            )
             for probe_type in sorted(REQUIRED_STAGE0_PROBES, key=lambda item: item.value):
+                lease_scope = (
+                    LeaseScope.EXCLUSIVE
+                    if request.mode is Stage0RunMode.FORMAL
+                    or probe_type is Stage0ProbeType.HOTPATCH
+                    else LeaseScope.NONE
+                )
                 job_id = uuid5(
                     NAMESPACE_URL,
                     f"hcuopt:{run['stage0_run_id']}:{probe_type.value}:v1",
@@ -286,6 +288,7 @@ class PostgresRepository:
                     "target": target.model_dump(mode="json"),
                     "protocol_version": request.protocol_version,
                     "mode": request.mode.value,
+                    "budget": budget,
                 }
                 connection.execute(
                     """
