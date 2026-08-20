@@ -60,6 +60,7 @@ class EvidenceMeasurementHarness:
             raise ValueError("EvidenceMeasurementHarness requires real provenance")
         self.provenance = provenance
         self.stable_identity = dict(stable_identity)
+        self.environment_fingerprint = stable_fingerprint(self.stable_identity)
         self.workload_factory = workload_factory
         self.telemetry = telemetry
         self.device_timer = device_timer
@@ -78,6 +79,10 @@ class EvidenceMeasurementHarness:
         measurement_plan = MeasurementPlan.model_validate(plan["measurement_plan"])
         if measurement_plan.synthetic:
             raise MeasurementSafetyError("real harness refuses synthetic measurement plans")
+        if measurement_plan.environment_fingerprint != self.environment_fingerprint:
+            raise MeasurementSafetyError(
+                "measurement plan environment fingerprint does not match the bound target"
+            )
         formal = plan.get("mode") == "formal"
         context = dict(plan.get("_job_context", {}))
         cleanup_evidence: dict[str, Any] | None = None
@@ -88,6 +93,7 @@ class EvidenceMeasurementHarness:
                 self.clock,
                 self.device_timer,
                 sample_count=int(plan.get("calibration_samples", 3)),
+                resolution_sample_count=int(plan.get("resolution_samples", 64)),
                 synchronize=self.synchronize,
                 device_name=str(plan.get("device_timer_name", "hcu-device-timer")),
             )
@@ -98,12 +104,13 @@ class EvidenceMeasurementHarness:
                 workload_factory=self.workload_factory,
                 device_timer=self.device_timer,
                 before_sample=lambda: self._require_live_lease(context) if formal else None,
+                require_fresh_processes=formal,
             )
             observations.append(self._observe(context))
             evidence = MeasurementEvidence(
                 protocol_version=measurement_plan.protocol_version,
-                stable_fingerprint=stable_fingerprint(self.stable_identity),
-                environment_fingerprint=measurement_plan.environment_fingerprint,
+                stable_fingerprint=self.environment_fingerprint,
+                environment_fingerprint=self.environment_fingerprint,
                 observations=observations,
                 calibration=calibration,
                 raw_samples=samples,

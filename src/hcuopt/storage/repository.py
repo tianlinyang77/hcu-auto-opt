@@ -51,6 +51,7 @@ from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFenci
 from hcuopt.domain.transitions import transition_candidate, transition_task
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
 from hcuopt.storage.migrations import migration_plan
+from hcuopt.targets import target_fingerprint
 
 
 class PostgresRepository:
@@ -121,10 +122,7 @@ class PostgresRepository:
 
     @staticmethod
     def _target_fingerprint(target: TargetSpec) -> str:
-        encoded = json.dumps(
-            target.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-        ).encode()
-        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+        return target_fingerprint(target)
 
     def _upsert_target_snapshot(
         self,

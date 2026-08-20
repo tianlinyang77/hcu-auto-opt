@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hcuopt.measurement.fixtures import KnownSignalFixture, NullSignalFixture
-from hcuopt.measurement.models import MeasurementPlan
-from hcuopt.measurement.sampling import collect_samples
+from hcuopt.measurement.models import MeasurementPlan, ProcessIdentity
+from hcuopt.measurement.sampling import SamplingSafetyError, collect_samples
 from hcuopt.measurement.timers import (
     CalibrationError,
     DeviceTimerUnavailableError,
@@ -22,17 +24,27 @@ class ScriptedClock:
 
 
 class ScriptedDeviceTimer:
-    def __init__(self, values: list[int]) -> None:
+    def __init__(self, values: list[int], *, resolution_ns: float = 100.0) -> None:
         self._values = iter(values)
+        self.resolution_ns = resolution_ns
 
     def read_ticks(self) -> int:
         return next(self._values)
 
+    def measure_resolution_ns(self, sample_count: int) -> float:
+        assert sample_count >= 2
+        return self.resolution_ns
+
 
 class Workload:
-    def __init__(self) -> None:
+    def __init__(self, process_id: int, start_token: str) -> None:
+        self.identity = ProcessIdentity(pid=process_id, start_token=start_token)
         self.warmups = 0
         self.batches: list[int] = []
+        self.alive = True
+
+    def process_identity(self) -> ProcessIdentity:
+        return self.identity
 
     def synchronize(self) -> None:
         return None
@@ -42,6 +54,12 @@ class Workload:
 
     def run_batch(self, iterations: int) -> None:
         self.batches.append(iterations)
+
+    def close(self) -> None:
+        self.alive = False
+
+    def is_alive(self) -> bool:
+        return self.alive
 
 
 class FakeEvent:
@@ -86,24 +104,26 @@ class FakeTorch:
         self.cuda = cuda
 
 
-def _plan() -> MeasurementPlan:
-    return MeasurementPlan(
-        protocol_version="s0-measurement-v1",
-        metric_name="kernel_elapsed",
-        unit="ns",
-        warmup_count=2,
-        repeat_count=2,
-        process_restart_count=1,
-        batched_loop_count=8,
-        environment_fingerprint="sha256:" + "a" * 64,
-    )
+def _plan(**changes: object) -> MeasurementPlan:
+    values: dict[str, object] = {
+        "protocol_version": "s0-measurement-v1",
+        "metric_name": "kernel_elapsed",
+        "unit": "ns",
+        "warmup_count": 2,
+        "repeat_count": 2,
+        "process_restart_count": 1,
+        "batched_loop_count": 8,
+        "environment_fingerprint": "sha256:" + "a" * 64,
+    }
+    values.update(changes)
+    return MeasurementPlan.model_validate(values)
 
 
 def test_sampling_keeps_each_restart_and_raw_duration() -> None:
     workloads: list[Workload] = []
 
-    def make_workload(_restart: int) -> Workload:
-        workload = Workload()
+    def make_workload(restart: int) -> Workload:
+        workload = Workload(100 + restart, f"fixture-{restart}")
         workloads.append(workload)
         return workload
 
@@ -122,6 +142,11 @@ def test_sampling_keeps_each_restart_and_raw_duration() -> None:
     assert [item.elapsed_ns for item in samples] == [10, 20, 30, 40]
     assert all(workload.warmups == 2 for workload in workloads)
     assert all(workload.batches == [8, 8] for workload in workloads)
+    assert all(workload.alive is False for workload in workloads)
+    assert {(item.process_id, item.process_start_token) for item in samples} == {
+        (100, "fixture-0"),
+        (101, "fixture-1"),
+    }
 
 
 def test_device_timer_calibration_rejects_non_monotonic_ticks() -> None:
@@ -140,6 +165,7 @@ def test_torch_cuda_event_timer_exposes_a_monotonic_device_time_axis() -> None:
     assert cuda.selected_devices == [0]
     assert timer.read_ticks() == 1_000_000
     assert timer.read_ticks() == 2_000_000
+    assert timer.measure_resolution_ns(sample_count=3) == 1_000_000
 
 
 def test_torch_cuda_event_timer_refuses_an_unavailable_device() -> None:
@@ -150,3 +176,22 @@ def test_torch_cuda_event_timer_refuses_an_unavailable_device() -> None:
 def test_scripted_known_and_null_signals_are_distinguished() -> None:
     assert KnownSignalFixture(delta_ns=50).detected(threshold_ns=10) is True
     assert NullSignalFixture().detected(threshold_ns=10) is False
+
+
+def test_restart_groups_require_distinct_process_identities() -> None:
+    with pytest.raises(SamplingSafetyError, match="distinct process identities"):
+        collect_samples(
+            _plan(),
+            clock=ScriptedClock([0, 10, 20, 30]),
+            workload_factory=lambda _restart: Workload(100, "same-process"),
+        )
+
+
+def test_formal_sampling_rejects_the_harness_process() -> None:
+    with pytest.raises(SamplingSafetyError, match="outside the harness process"):
+        collect_samples(
+            _plan(process_restart_count=0),
+            clock=ScriptedClock([0, 10]),
+            workload_factory=lambda _restart: Workload(os.getpid(), "harness-process"),
+            require_fresh_processes=True,
+        )

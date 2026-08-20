@@ -26,6 +26,7 @@ from hcuopt.contracts.v1 import (
 )
 from hcuopt.domain.enums import LeaseScope, Stage0ProbeType
 from hcuopt.domain.errors import AdapterUnavailable, ExecutionSafetyError
+from hcuopt.targets import target_fingerprint
 
 
 class JobHandlers:
@@ -129,9 +130,12 @@ class JobHandlers:
 
     def handle_stage0_probe(self, payload: dict[str, Any]) -> dict[str, Any]:
         target = TargetSpec.model_validate(payload["target"])
-        if payload.get("target_fingerprint") is None:
-            raise ExecutionSafetyError("Stage 0 probe requires the immutable target fingerprint")
+        expected_target_fingerprint = target_fingerprint(target)
+        if payload.get("target_fingerprint") != expected_target_fingerprint:
+            raise ExecutionSafetyError("Stage 0 target fingerprint does not match TargetSpec")
         probe = self.adapters.require("stage0_probe")
+        if getattr(probe, "target_fingerprint", None) != expected_target_fingerprint:
+            raise ExecutionSafetyError("Stage 0 probe adapter is bound to a different target")
         output = probe.run_probe(payload, self.output_dir)
         result = Stage0ProbeResult(
             stage0_run_id=UUID(payload["stage0_run_id"]),
@@ -145,8 +149,6 @@ class JobHandlers:
             synthetic=output.synthetic,
             cleanup_evidence=output.cleanup_evidence,
         )
-        if target.target_id != payload["target"]["target_id"]:
-            raise ExecutionSafetyError("Stage 0 target payload drifted during validation")
         return result.model_dump(mode="json")
 
     def handle_source_prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
