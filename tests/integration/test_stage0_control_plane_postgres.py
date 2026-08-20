@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
 from hcuopt.contracts.v1 import Stage0ProbeResult, Stage0RunCreate, WorkerRegister
 from hcuopt.domain.enums import (
     ProjectMode,
@@ -210,6 +210,47 @@ class Stage0ControlPlanePostgresTests(unittest.TestCase):
         self.assertEqual(len(set(run_ids)), 1)
         summary = self.repository.stage0_run_summary(UUID(run_ids[0]))
         self.assertEqual(len(summary["jobs"]), len(Stage0ProbeType))
+
+    def test_target_snapshot_upsert_is_concurrently_idempotent(self) -> None:
+        thread_count = 4
+
+        def upsert(
+            barrier: threading.Barrier,
+            target: TargetSpec,
+            snapshot_ids: list[str],
+            errors: list[BaseException],
+        ) -> None:
+            try:
+                barrier.wait()
+                snapshot = self.repository.upsert_target_snapshot(
+                    target, str(TARGET_PATH)
+                )
+                snapshot_ids.append(str(snapshot["target_snapshot_id"]))
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        for attempt in range(20):
+            target = self.target.model_copy(
+                update={"target_id": f"{self.target.target_id}-race-{attempt}"}
+            )
+            barrier = threading.Barrier(thread_count)
+            snapshot_ids: list[str] = []
+            errors: list[BaseException] = []
+
+            threads = [
+                threading.Thread(
+                    target=upsert, args=(barrier, target, snapshot_ids, errors)
+                )
+                for _ in range(thread_count)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [], f"attempt {attempt}: {errors!r}")
+            self.assertEqual(len(snapshot_ids), thread_count)
+            self.assertEqual(len(set(snapshot_ids)), 1)
 
     def test_probe_record_is_concurrently_idempotent(self) -> None:
         run = self._create("concurrent-probe-fixture", Stage0RunMode.DRY_RUN)
