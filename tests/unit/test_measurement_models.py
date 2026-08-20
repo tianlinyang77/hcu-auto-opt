@@ -44,6 +44,8 @@ def test_raw_sample_rejects_negative_duration() -> None:
         RawSample(
             restart_ordinal=0,
             sample_ordinal=0,
+            process_id=101,
+            process_start_token="fixture-101",
             started_monotonic_ns=20,
             finished_monotonic_ns=19,
             batch_iterations=1,
@@ -54,6 +56,8 @@ def test_evidence_keeps_raw_samples_and_rejects_synthetic_timing_claims() -> Non
     sample = RawSample(
         restart_ordinal=0,
         sample_ordinal=0,
+        process_id=101,
+        process_start_token="fixture-101",
         started_monotonic_ns=10,
         finished_monotonic_ns=20,
         batch_iterations=1,
@@ -63,6 +67,7 @@ def test_evidence_keeps_raw_samples_and_rejects_synthetic_timing_claims() -> Non
         device_origin_ticks=1,
         host_origin_ns=10,
         ns_per_tick=2.0,
+        timer_resolution_ns=100.0,
         max_residual_ns=0.0,
         point_count=2,
     )
@@ -85,3 +90,24 @@ def test_evidence_keeps_raw_samples_and_rejects_synthetic_timing_claims() -> Non
             synthetic=True,
             raw_samples=[sample],
         )
+
+
+def test_legacy_measurement_evidence_remains_readable() -> None:
+    sample = RawSample(
+        restart_ordinal=0,
+        sample_ordinal=0,
+        started_monotonic_ns=10,
+        finished_monotonic_ns=20,
+        batch_iterations=1,
+    )
+    calibration = ClockCalibration(
+        device_name="legacy-fixture",
+        device_origin_ticks=1,
+        host_origin_ns=10,
+        ns_per_tick=2.0,
+        max_residual_ns=0.0,
+        point_count=2,
+    )
+
+    assert sample.process_id is None
+    assert calibration.timer_resolution_ns is None

@@ -12,7 +12,7 @@
 - GPU 同步语义；
 - 批量循环放大短 Kernel；
 - 多次重复与原始样本；
-- 跨进程 restart；
+- 可验证的跨进程 restart：PID、进程启动令牌、退出确认；
 - 热/冷缓存模式；
 - 频率、温度、功耗与后台进程采集；
 - 单调时钟和设备计时器说明；
@@ -30,7 +30,8 @@
 Holdout 复验通过
 ```
 
-显示更多小数位不是更高的有效分辨率。
+显示更多小数位不是更高的有效分辨率。设备时钟与宿主时钟的比例只是时钟校准值；
+`timer_resolution_ns` 必须来自重复设备 Event 对能够观察到的最小正间隔。
 
 ## 随机化和隔离
 
@@ -46,11 +47,14 @@ Holdout 复验通过
 ```text
 measurement_id, task_id, candidate_id, baseline_epoch
 hardware_fingerprint, software_fingerprint, workload_id
-lease_id, fencing_token, process_id, restart_index
+lease_id, fencing_token, process_id, process_start_token, restart_index
 warmup_plan, sample_plan, raw_samples_ns
 temperature, clocks, power, cache_mode
 timer_kind, timer_resolution_ns, created_at
 ```
 
 没有原始样本和环境指纹的“1.06x”不进入 EXPDB 的 Verified Knowledge。
+
+原始证据 URI 是 write-once：相同字节允许幂等重放，不同字节禁止覆盖。Job Target、
+Adapter 绑定 Target 与 MeasurementPlan 环境指纹必须在启动采样前完成一致性校验。
 

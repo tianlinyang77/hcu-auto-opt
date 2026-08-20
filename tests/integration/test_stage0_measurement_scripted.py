@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.measurement.evidence import verify_evidence
 from hcuopt.measurement.harness import EvidenceMeasurementHarness
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
+from hcuopt.source_hash import file_uri_to_path
 from hcuopt.targets import load_target
 
 ROOT = Path(__file__).parents[2]
@@ -32,7 +33,7 @@ def test_fingerprint_probe_writes_independently_verifiable_evidence(tmp_path: Pa
             adapter_version="1",
             implementation_kind="real",
         ),
-        stable_identity={"fixture": True},
+        stable_identity=TARGET.model_dump(mode="json"),
         workload_factory=lambda _restart: None,
         telemetry=Telemetry(),
         device_timer=DeviceTimer(),
@@ -47,13 +48,14 @@ def test_fingerprint_probe_writes_independently_verifiable_evidence(tmp_path: Pa
 
     output = adapter.run_probe(
         {
+            "stage0_run_id": str(uuid4()),
             "probe_type": "fingerprint",
             "protocol_version": "s0-measurement-v1",
             "mode": "dry_run",
         },
         tmp_path,
     )
-    evidence_path = Path(unquote(urlparse(output.raw_evidence_uri).path))
+    evidence_path = file_uri_to_path(output.raw_evidence_uri)
 
     assert output.synthetic is False
     assert output.summary["hardware_fingerprint"].startswith("sha256:")

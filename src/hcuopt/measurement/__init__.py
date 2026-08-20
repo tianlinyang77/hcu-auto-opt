@@ -5,6 +5,7 @@ from hcuopt.measurement.models import (
     DynamicObservation,
     MeasurementEvidence,
     MeasurementPlan,
+    ProcessIdentity,
     RawSample,
 )
 
@@ -13,5 +14,6 @@ __all__ = (
     "DynamicObservation",
     "MeasurementEvidence",
     "MeasurementPlan",
+    "ProcessIdentity",
     "RawSample",
 )

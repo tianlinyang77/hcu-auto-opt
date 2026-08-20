@@ -24,6 +24,7 @@ from hcuopt.contracts.platform_v1 import (
     TargetSpec,
 )
 from hcuopt.domain.enums import LeaseScope
+from hcuopt.targets import target_fingerprint as canonical_target_fingerprint
 
 SGLANG_SMOKE_PROTOCOL_VERSION = "sglang-smoke-v1"
 FRAMEWORK_SMOKE_PROTOCOL_VERSION = "framework-smoke-v1"
@@ -575,7 +576,7 @@ def build_evidence(
         and all(character in "0123456789abcdef" for character in target_fingerprint[7:])
     ):
         raise ValueError("target_fingerprint must be a lowercase SHA-256 digest")
-    expected_target_fingerprint = _target_fingerprint(target)
+    expected_target_fingerprint = canonical_target_fingerprint(target)
     if target_fingerprint != expected_target_fingerprint:
         raise ValueError("target_fingerprint does not match TargetSpec")
     synthetic = artifact.synthetic or any(
@@ -818,15 +819,6 @@ def _validate_absolute_posix_path(value: str, label: str) -> str:
     ):
         raise ValueError(f"{label} must be a clean absolute POSIX path")
     return value
-
-
-def _target_fingerprint(target: TargetSpec) -> str:
-    encoded = json.dumps(
-        target.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
