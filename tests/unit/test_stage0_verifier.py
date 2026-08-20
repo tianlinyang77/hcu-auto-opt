@@ -445,6 +445,10 @@ class _Suite:
     references: dict[Stage0ProbeType, Stage0ProbeEvidenceReference]
 
     def rewrite(self, probe_type: Stage0ProbeType) -> None:
+        # Production evidence is write-once. These negative tests intentionally
+        # replace a temporary fixture before verification to model a producer
+        # that published malformed or incorrectly bound raw evidence.
+        self.paths[probe_type].unlink()
         artifact = write_evidence(self.paths[probe_type], self.raw[probe_type])
         self.references[probe_type] = self.references[probe_type].model_copy(
             update={"raw_evidence_hash": artifact.sha256}
