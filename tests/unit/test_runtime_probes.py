@@ -3,6 +3,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from hcuopt.domain.errors import ExecutionSafetyError
 from hcuopt.runtime_probes.evidence import write_immutable_json
 from hcuopt.runtime_probes.overlay import (
     CACHE_ENVIRONMENT_KEY,
+    OVERLAY_RESULT_PROTOCOL_VERSION,
     OverlayCapabilityProbe,
 )
 from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
@@ -324,6 +327,15 @@ class ScriptedCleaner:
         return {"resource_id": resource_id, "fencing_token": fencing_token, "fenced": True}
 
 
+class StdoutScriptedExecutor(ScriptedExecutor):
+    def execute(self, request: ExecutionRequest, target: Any, output_dir: Path) -> ExecutionResult:
+        result = super().execute(request, target, output_dir)
+        stdout = output_dir / f"{request.request_id}.json"
+        stdout.parent.mkdir(parents=True, exist_ok=True)
+        stdout.write_text(json.dumps(result.metadata), encoding="utf-8")
+        return result.model_copy(update={"stdout_uri": stdout.resolve().as_uri(), "metadata": {}})
+
+
 def _overlay_fixture(tmp_path: Path) -> tuple[dict[str, Any], str]:
     baseline_path = tmp_path / "baseline"
     candidate_path = tmp_path / "candidate"
@@ -429,6 +441,98 @@ def test_overlay_reports_overlay_only_after_activation_correctness_and_recovery(
     assert result["activation_proved"] is True
     assert result["correctness_passed"] is True
     assert result["recovery_passed"] is True
+
+
+def test_overlay_reads_versioned_observations_from_execution_stdout(tmp_path: Path) -> None:
+    configuration, artifact_hash = _overlay_fixture(tmp_path)
+    output_hash = "sha256:" + hashlib.sha256(b"same-output").hexdigest()
+    common = {
+        "protocol_version": OVERLAY_RESULT_PROTOCOL_VERSION,
+        "output_hash": output_hash,
+    }
+    executor = StdoutScriptedExecutor(
+        [
+            {**common, "activation_marker": "baseline"},
+            {
+                **common,
+                "activation_marker": "candidate-v1",
+                "loaded_artifact_hash": artifact_hash,
+            },
+            {**common, "activation_marker": "baseline"},
+        ]
+    )
+
+    result = OverlayCapabilityProbe(executor, ScriptedCleaner([True, True, True])).run(
+        configuration,
+        target=TARGET,
+        output_dir=tmp_path / "results",
+        resource_id="hcu-7",
+        fencing_token=9,
+    )
+
+    assert result["capability"] == "overlay_only"
+    assert result["observations"]["candidate"]["loaded_artifact_hash"] == artifact_hash
+
+
+def test_overlay_rejects_unversioned_stdout_observation(tmp_path: Path) -> None:
+    configuration, _ = _overlay_fixture(tmp_path)
+    output_hash = "sha256:" + hashlib.sha256(b"same-output").hexdigest()
+    executor = StdoutScriptedExecutor(
+        [{"activation_marker": "baseline", "output_hash": output_hash}]
+    )
+
+    with pytest.raises(ExecutionSafetyError, match="protocol_version"):
+        OverlayCapabilityProbe(executor, ScriptedCleaner([True])).run(
+            configuration,
+            target=TARGET,
+            output_dir=tmp_path / "results",
+            resource_id="hcu-7",
+            fencing_token=9,
+        )
+
+
+def test_overlay_runner_proves_candidate_load_without_changing_output(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.txt"
+    candidate = tmp_path / "candidate.txt"
+    baseline.write_bytes(b"identical no-op bytes")
+    candidate.write_bytes(baseline.read_bytes())
+    runner = ROOT / "src" / "hcuopt" / "runtime_probes" / "overlay_runner.py"
+
+    baseline_run = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--baseline-artifact",
+            str(baseline),
+            "--activation-marker",
+            "candidate-v1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    candidate_run = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--baseline-artifact",
+            str(baseline),
+            "--candidate-artifact",
+            str(candidate),
+            "--activation-marker",
+            "candidate-v1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    baseline_result = json.loads(baseline_run.stdout)
+    candidate_result = json.loads(candidate_run.stdout)
+    assert baseline_result["activation_marker"] == "baseline"
+    assert candidate_result["activation_marker"] == "candidate-v1"
+    assert candidate_result["loaded_artifact_hash"] == baseline_result["output_hash"]
+    assert candidate_result["output_hash"] == baseline_result["output_hash"]
 
 
 def test_overlay_fails_closed_when_cleanup_health_is_bad(tmp_path: Path) -> None:

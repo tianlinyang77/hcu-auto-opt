@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,6 +19,8 @@ from hcuopt.runtime_probes.evidence import sha256_file
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 
 CACHE_ENVIRONMENT_KEY = "HCUOPT_CANDIDATE_CACHE_DIR"
+OVERLAY_RESULT_PROTOCOL_VERSION = "hcuopt-overlay-result-v1"
+MAX_OVERLAY_RESULT_BYTES = 64 * 1024
 
 
 class OverlayCapabilityProbe:
@@ -66,24 +69,24 @@ class OverlayCapabilityProbe:
         baseline_hash_before = canonical_source_hash(baseline_path)
 
         baseline_result = self.executor.execute(baseline_request, target, output_dir)
+        baseline_metadata = self._execution_observation(baseline_result)
         baseline_health = dict(self.cleaner.health_check(resource_id))
         if baseline_result.status != "succeeded" or not baseline_health.get("healthy"):
             raise ExecutionSafetyError(
                 "baseline execution or health check failed; refusing to launch candidate"
             )
         candidate_result = self.executor.execute(candidate_request, target, output_dir)
+        candidate_metadata = self._execution_observation(candidate_result)
         candidate_health = dict(self.cleaner.health_check(resource_id))
         if not candidate_health.get("healthy"):
             raise ExecutionSafetyError(
                 "candidate cleanup health check failed; resource must be quarantined"
             )
         recovery_result = self.executor.execute(recovery_request, target, output_dir)
+        recovery_metadata = self._execution_observation(recovery_result)
         recovery_health = dict(self.cleaner.health_check(resource_id))
         baseline_hash_after = canonical_source_hash(baseline_path)
 
-        baseline_metadata = baseline_result.metadata
-        candidate_metadata = candidate_result.metadata
-        recovery_metadata = recovery_result.metadata
         execution_succeeded = all(
             item.status == "succeeded"
             for item in (baseline_result, candidate_result, recovery_result)
@@ -140,12 +143,64 @@ class OverlayCapabilityProbe:
                 "candidate": candidate_result.model_dump(mode="json"),
                 "recovery": recovery_result.model_dump(mode="json"),
             },
+            "observations": {
+                "baseline": baseline_metadata,
+                "candidate": candidate_metadata,
+                "recovery": recovery_metadata,
+            },
             "health": {
                 "baseline": baseline_health,
                 "candidate": candidate_health,
                 "recovery": recovery_health,
             },
         }
+
+    @staticmethod
+    def _execution_observation(result: Any) -> dict[str, Any]:
+        """Read the runner's bounded JSON result instead of trusting process exit alone.
+
+        Test adapters may provide the observation directly in metadata. Real container
+        executions must return the versioned object on stdout so activation and output
+        equivalence are based on bytes preserved by the execution adapter.
+        """
+
+        if result.stdout_uri is None:
+            return dict(result.metadata)
+        path = file_uri_to_path(result.stdout_uri).resolve(strict=True)
+        if path.is_symlink() or not path.is_file():
+            raise ExecutionSafetyError("overlay result stdout must be a regular file")
+        if path.stat().st_size > MAX_OVERLAY_RESULT_BYTES:
+            raise ExecutionSafetyError("overlay result stdout exceeds the 64 KiB limit")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as error:
+            raise ExecutionSafetyError("overlay result stdout is not valid JSON") from error
+        if not isinstance(value, dict):
+            raise ExecutionSafetyError("overlay result stdout must contain one JSON object")
+        if value.get("protocol_version") != OVERLAY_RESULT_PROTOCOL_VERSION:
+            raise ExecutionSafetyError("overlay result protocol_version is invalid")
+        marker = value.get("activation_marker")
+        output_hash = value.get("output_hash")
+        if not isinstance(marker, str) or not marker:
+            raise ExecutionSafetyError("overlay result requires activation_marker")
+        if not OverlayCapabilityProbe._is_sha256(output_hash):
+            raise ExecutionSafetyError("overlay result requires a SHA256 output_hash")
+        loaded_hash = value.get("loaded_artifact_hash")
+        if loaded_hash is not None and not OverlayCapabilityProbe._is_sha256(loaded_hash):
+            raise ExecutionSafetyError("overlay loaded_artifact_hash must be SHA256")
+        return {
+            "protocol_version": OVERLAY_RESULT_PROTOCOL_VERSION,
+            "activation_marker": marker,
+            "output_hash": output_hash,
+            **({"loaded_artifact_hash": loaded_hash} if loaded_hash is not None else {}),
+        }
+
+    @staticmethod
+    def _is_sha256(value: Any) -> bool:
+        if not isinstance(value, str) or not value.startswith("sha256:"):
+            return False
+        digest = value.removeprefix("sha256:")
+        return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
 
     @staticmethod
     def _validate_sources(

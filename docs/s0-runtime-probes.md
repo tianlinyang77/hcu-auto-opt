@@ -1,5 +1,9 @@
 # S0-C Profiler 与可逆 Overlay 能力探针
 
+当前 nmz36 Dry Run 的真实结果和证据见
+[S0-C nmz36 Dry Run 验收记录](evidence/s0-c-nmz36-dry-run-20260820.md)。该次结果为
+G0-P `DEGRADED`、G0-H `OVERLAY_ONLY`；由于未取得 HCU 7 独占窗口，不能视为 Formal。
+
 ## 目标和边界
 
 S0-C 实现 `profiler`（G0-P）和 `hotpatch`（G0-H）两类 `Stage0ProbeResult`。
@@ -86,6 +90,24 @@ G0-H 接受 F1-C 产生的 Baseline Snapshot、独立 Candidate Worktree 和内�
 - Recovery 不再带 Candidate 标记，输出 Hash 与 Baseline 一致；
 - 恢复后的 Baseline Source Hash 与探针前一致；
 - 三次执行后的资源健康检查都通过。
+
+三次容器请求都必须在 stdout 只输出一个 `hcuopt-overlay-result-v1` JSON 对象；执行器会
+保存这段原始 stdout，探针再从证据文件中读取，而不是相信调用方预填的 metadata：
+
+```json
+{
+  "protocol_version": "hcuopt-overlay-result-v1",
+  "activation_marker": "baseline 或约定的 Candidate 标记",
+  "loaded_artifact_hash": "Candidate 请求必填的 sha256:...",
+  "output_hash": "sha256:..."
+}
+```
+
+Baseline 和 Recovery 不得返回 `loaded_artifact_hash`；Candidate 返回的 Hash 必须与只读
+挂载的 Artifact 完全一致。stdout 不是合法 JSON、协议版本错误或 Hash 格式错误时均失败关闭。
+仓库提供的标准库 runner 位于 `src/hcuopt/runtime_probes/overlay_runner.py`，应以只读方式
+挂载进三次独立容器；它对 Baseline/Candidate Artifact 的实际字节计算 SHA256，并明确报告
+本次加载的是 Baseline 还是 Candidate。
 
 只在进程或容器启动时加载成功时返回 `OVERLAY_ONLY`。只有提供额外的进程内替换证据时
 才允许返回 `HOT_PATCH`。任一执行、加载、正确性、恢复或资源健康检查失败都返回 `NONE`。
