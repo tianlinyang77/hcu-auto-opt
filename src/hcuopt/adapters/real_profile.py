@@ -24,9 +24,11 @@ from hcuopt.measurement.sampling import SampledWorkload
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
 from hcuopt.measurement.timers import DeviceTimer, HostClock
 from hcuopt.runtime_probes import (
+    EvidencePublisher,
     OverlayCapabilityProbe,
     ProfilerCapabilityProbe,
     RuntimeProbeAdapter,
+    RuntimeProbeProfile,
 )
 
 
@@ -112,18 +114,28 @@ def build_nmz36_runtime_probe_registry(
     target: TargetSpec,
     output_dir: Path,
     *,
+    configuration: RuntimeProbeProfile,
+    evidence_publisher: EvidencePublisher | None = None,
     runner: CommandRunner | None = None,
 ) -> AdapterRegistry:
     """Compose the real S0-C probes under the shared Stage 0 profile."""
 
     del output_dir
     profile = REAL_STAGE0_PROFILE
+    if configuration.profile != profile:
+        raise ValueError(
+            f"runtime probe configuration profile must be {profile}, "
+            f"got {configuration.profile}"
+        )
     executor = ContainerExecutionAdapter(runner, profile=profile)
     cleaner = ContainerResourceCleaner(target, runner, profile=profile)
     runtime_probe = RuntimeProbeAdapter(
         ProfilerCapabilityProbe(executor=executor),
         OverlayCapabilityProbe(executor, cleaner),
-        profile=profile,
+        cleaner,
+        target,
+        configuration,
+        evidence_publisher,
     )
     return AdapterRegistry(
         profile=profile,

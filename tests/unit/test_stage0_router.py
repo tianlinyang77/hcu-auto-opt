@@ -12,11 +12,18 @@ from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
+from hcuopt.targets import load_target, target_fingerprint
+
+ROOT = Path(__file__).parents[2]
+TARGET_FINGERPRINT = target_fingerprint(
+    load_target(ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml")
+)
 
 
 class RecordingProbe:
     def __init__(self, profile: str, name: str) -> None:
         self.calls: list[Stage0ProbeType] = []
+        self.target_fingerprint = TARGET_FINGERPRINT
         self.provenance = AdapterProvenance(
             profile=profile,
             capability="stage0_probe",

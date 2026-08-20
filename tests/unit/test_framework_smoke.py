@@ -259,6 +259,35 @@ def test_formal_stage0_rejects_fake_profile_before_creating_a_run() -> None:
     assert "real Adapter Profile" in response.json()["message"]
 
 
+def test_stage0_public_budget_rejects_executable_probe_configuration() -> None:
+    class StubRepository:
+        def migrate(self) -> None:
+            return None
+
+    app = create_app(repository=StubRepository())  # type: ignore[arg-type]
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/stage0-runs",
+            json={
+                "name": "untrusted runtime configuration",
+                "workload_id": "fixture",
+                "target_id": "nmz36-sglang-0.5.12",
+                "adapter_profile": "nmz36-stage0-v2",
+                "mode": "dry_run",
+                "protocol_version": "fixture-v1",
+                "idempotency_key": "reject-runtime-probe-injection",
+                "budget": {
+                    "runtime_probe": {
+                        "profiler": {"profile_argv": ["sh", "-c", "untrusted"]}
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert "runtime_probe" in response.text
+
+
 def test_stage0_run_rejects_profile_without_stage0_capability() -> None:
     class StubRepository:
         def migrate(self) -> None:

@@ -9,9 +9,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
-PROTOCOL_VERSION = "hcuopt-overlay-result-v1"
+PROTOCOL_VERSION = "hcuopt-overlay-result-v2"
 
 
 def _regular_file(value: str) -> Path:
@@ -40,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-artifact", required=True, type=_regular_file)
     parser.add_argument("--candidate-artifact", type=_regular_file)
     parser.add_argument("--activation-marker", required=True)
+    parser.add_argument("--replacement-point", required=True)
     return parser
 
 
@@ -53,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
             args.activation_marker if args.candidate_artifact else "baseline"
         ),
         "output_hash": output_hash,
+        "workload_kind": "generic_artifact_mount",
+        "replacement_point": args.replacement_point,
+        "implementation_hash": output_hash,
+        "process_id": os.getpid(),
     }
     if args.candidate_artifact:
         payload["loaded_artifact_hash"] = output_hash

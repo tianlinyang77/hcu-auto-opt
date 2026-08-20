@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,20 +19,24 @@ from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
     ExecutionRequest,
     ExecutionResult,
-    MountSpec,
     SourceSnapshot,
 )
 from hcuopt.domain.enums import LeaseScope
 from hcuopt.domain.errors import ExecutionSafetyError
-from hcuopt.runtime_probes.evidence import write_immutable_json
+from hcuopt.runtime_probes.adapter import RuntimeProbeAdapter
+from hcuopt.runtime_probes.evidence import (
+    LocalContentAddressedEvidencePublisher,
+    write_immutable_json,
+)
 from hcuopt.runtime_probes.overlay import (
     CACHE_ENVIRONMENT_KEY,
     OVERLAY_RESULT_PROTOCOL_VERSION,
     OverlayCapabilityProbe,
 )
+from hcuopt.runtime_probes.profile import RuntimeProbeProfile
 from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
 from hcuopt.source_hash import canonical_source_hash
-from hcuopt.targets import load_target
+from hcuopt.targets import load_target, target_fingerprint
 
 ROOT = Path(__file__).parents[2]
 TARGET = load_target(ROOT / "config" / "targets" / "nmz36-sglang-0.5.12.yaml")
@@ -67,8 +72,10 @@ def test_profiler_reports_full_only_when_every_required_field_is_observed(
     records = [
         {
             "kernel_name": "rms_norm",
-            "duration": 12.5,
+            "duration_value": 12.5,
+            "duration_unit": "us",
             "call_count": 4,
+            "kernel_category": "kernel",
             "shape": [1, 4096],
             "dtype": "bf16",
             "meta": {"stage": "decode"},
@@ -116,7 +123,10 @@ def test_profiler_reports_full_only_when_every_required_field_is_observed(
 
 
 def test_profiler_degrades_instead_of_inventing_missing_shape_or_source() -> None:
-    raw = b"kernel_name,duration,call_count\nrms_norm,12.5,4\n"
+    raw = (
+        b"kernel_name,duration_value,duration_unit,call_count,kernel_category\n"
+        b"rms_norm,12.5,us,4,kernel\n"
+    )
     runner = ScriptedRunner(
         [
             _command(("rocprof", "--version"), stdout=b"rocprof 1\n"),
@@ -143,10 +153,110 @@ def test_profiler_degrades_instead_of_inventing_missing_shape_or_source() -> Non
     assert "shape" not in result["records"][0]
 
 
+def test_profiler_does_not_combine_fields_across_different_records() -> None:
+    records = [
+        {
+            "kernel_name": "real_kernel",
+            "duration_us": 12.5,
+            "call_count": 4,
+            "kernel_category": "kernel",
+        },
+        {
+            "shape": [1, 4096],
+            "dtype": "bf16",
+            "meta": {"stage": "decode"},
+            "python_location": "rmsnorm.py:10",
+            "hip_location": "hipModuleLaunchKernel",
+        },
+    ]
+    runner = ScriptedRunner(
+        [
+            _command(("profiler", "--version"), stdout=b"profiler 1\n"),
+            _command(("profiler", "--json"), stdout=json.dumps(records).encode()),
+        ]
+    )
+
+    result = ProfilerCapabilityProbe(runner).run(
+        {
+            "tool_candidates": [
+                {
+                    "name": "profiler",
+                    "version_argv": ["profiler", "--version"],
+                    "profile_argv": ["profiler", "--json"],
+                    "output_format": "json",
+                }
+            ]
+        }
+    )
+
+    assert result["capability"] == "degraded"
+    assert result["valid_record_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"kernel_name": "k", "duration_us": 1.0, "call_count": 1},
+        {
+            "kernel_name": "k",
+            "duration_us": float("nan"),
+            "call_count": 1,
+            "kernel_category": "kernel",
+        },
+        {
+            "kernel_name": "k",
+            "duration_us": 1.0,
+            "call_count": True,
+            "kernel_category": "kernel",
+        },
+        {
+            "kernel_name": "memcpy",
+            "duration_us": 1.0,
+            "call_count": 1,
+            "kernel_category": "runtime",
+        },
+    ],
+)
+def test_profiler_rejects_non_kernel_or_invalid_core_records(
+    record: dict[str, Any],
+) -> None:
+    runner = ScriptedRunner(
+        [
+            _command(("profiler", "--version"), stdout=b"profiler 1\n"),
+            _command(("profiler", "--json"), stdout=json.dumps([record]).encode()),
+        ]
+    )
+    result = ProfilerCapabilityProbe(runner).run(
+        {
+            "tool_candidates": [
+                {
+                    "name": "profiler",
+                    "version_argv": ["profiler", "--version"],
+                    "profile_argv": ["profiler", "--json"],
+                    "output_format": "json",
+                }
+            ]
+        }
+    )
+
+    assert result["capability"] == "none"
+    assert result["valid_record_count"] == 0
+
+
 def test_profiler_rejects_legacy_mixed_workload_capture() -> None:
-    with pytest.raises(ValueError, match="stage-separated"):
+    with pytest.raises(ValueError, match="profile_workload"):
         ProfilerCapabilityProbe(ScriptedRunner([])).run(
-            {"profile_workload": "legacy", "tool_candidates": []}
+            {
+                "profile_workload": "legacy",
+                "tool_candidates": [
+                    {
+                        "name": "fixture",
+                        "version_argv": ["fixture", "--version"],
+                        "profile_argv": ["fixture", "--profile"],
+                        "output_format": "json",
+                    }
+                ],
+            }
         )
 
 
@@ -201,8 +311,10 @@ def test_profiler_reads_rank_local_torch_trace_without_inventing_details(
     assert result["records"] == [
         {
             "kernel_name": "rms_norm_kernel",
-            "duration": 10.0,
+            "duration_value": 10.0,
+            "duration_unit": "us",
             "call_count": 2,
+            "kernel_category": "kernel",
             "shape": [[1, 4096]],
         }
     ]
@@ -210,7 +322,7 @@ def test_profiler_reads_rank_local_torch_trace_without_inventing_details(
 
 class RecordingProfilerExecutor:
     provenance = AdapterProvenance(
-        profile="nmz36-stage0-v1",
+        profile="nmz36-stage0-v2",
         capability="executor",
         adapter_name="RecordingProfilerExecutor",
         adapter_version="1",
@@ -249,7 +361,15 @@ class RecordingProfilerExecutor:
 
 
 def test_real_profiler_commands_run_in_digest_locked_container(tmp_path: Path) -> None:
-    records = [{"kernel_name": "kernel", "duration": 1, "call_count": 1}]
+    records = [
+        {
+            "kernel_name": "kernel",
+            "duration_value": 1,
+            "duration_unit": "us",
+            "call_count": 1,
+            "kernel_category": "kernel",
+        }
+    ]
     executor = RecordingProfilerExecutor([b"tool 1\n", json.dumps(records).encode()])
 
     result = ProfilerCapabilityProbe(executor=executor).run(
@@ -280,7 +400,7 @@ def test_real_profiler_commands_run_in_digest_locked_container(tmp_path: Path) -
 
 class ScriptedExecutor:
     provenance = AdapterProvenance(
-        profile="nmz36-stage0-v1",
+        profile="nmz36-stage0-v2",
         capability="executor",
         adapter_name="ScriptedExecutor",
         adapter_version="1",
@@ -310,7 +430,7 @@ class ScriptedExecutor:
 
 class ScriptedCleaner:
     provenance = AdapterProvenance(
-        profile="nmz36-stage0-v1",
+        profile="nmz36-stage0-v2",
         capability="resource_cleaner",
         adapter_name="ScriptedCleaner",
         adapter_version="1",
@@ -336,7 +456,9 @@ class StdoutScriptedExecutor(ScriptedExecutor):
         return result.model_copy(update={"stdout_uri": stdout.resolve().as_uri(), "metadata": {}})
 
 
-def _overlay_fixture(tmp_path: Path) -> tuple[dict[str, Any], str]:
+def _overlay_fixture(
+    tmp_path: Path, *, workload_kind: str = "sglang_python_triton"
+) -> tuple[dict[str, Any], str]:
     baseline_path = tmp_path / "baseline"
     candidate_path = tmp_path / "candidate"
     baseline_path.mkdir()
@@ -375,60 +497,230 @@ def _overlay_fixture(tmp_path: Path) -> tuple[dict[str, Any], str]:
     artifact_path.chmod(0o444)
     target_path = "/opt/hcuopt/candidate.tar"
 
-    def request(name: str, *, candidate_mount: bool = False) -> ExecutionRequest:
-        return ExecutionRequest(
-            target_id=TARGET.target_id,
-            argv=["python", "probe.py", name],
-            working_directory="/workspace",
-            environment={CACHE_ENVIRONMENT_KEY: f"/tmp/hcuopt-cache-{name}"},
-            lease_scope=LeaseScope.EXCLUSIVE,
-            resource_id="hcu-7",
-            fencing_token=9,
-            container_image=TARGET.inference_image.immutable_reference,
-            mounts=(
-                [
-                    MountSpec(
-                        source=artifact_path.resolve().as_posix(),
-                        target=target_path,
-                        read_only=True,
-                    )
-                ]
-                if candidate_mount
-                else []
-            ),
-        )
+    def phase(name: str) -> dict[str, Any]:
+        return {
+            "argv": ["python", "probe.py", name],
+            "working_directory": "/workspace",
+            "environment": {CACHE_ENVIRONMENT_KEY: f"/tmp/hcuopt-cache-{name}"},
+        }
 
     return (
         {
+            "workload_kind": workload_kind,
+            "replacement_point": target_path,
             "baseline_source": baseline.model_dump(mode="json"),
             "candidate_source": candidate.model_dump(mode="json"),
             "artifact": artifact.model_dump(mode="json"),
-            "baseline_request": request("baseline").model_dump(mode="json"),
-            "candidate_request": request("candidate", candidate_mount=True).model_dump(mode="json"),
-            "recovery_request": request("recovery").model_dump(mode="json"),
+            "baseline": phase("baseline"),
+            "candidate": phase("candidate"),
+            "recovery": phase("recovery"),
             "activation_marker": "candidate-v1",
             "overlay_mount_target": target_path,
-            "activation_mode": "startup_overlay",
         },
         artifact_hash,
     )
+
+
+def _overlay_observations(
+    artifact_hash: str, *, workload_kind: str = "sglang_python_triton"
+) -> list[dict[str, Any]]:
+    output_hash = "sha256:" + hashlib.sha256(b"same output").hexdigest()
+    baseline_hash = "sha256:" + hashlib.sha256(b"baseline implementation").hexdigest()
+    common = {
+        "protocol_version": OVERLAY_RESULT_PROTOCOL_VERSION,
+        "output_hash": output_hash,
+        "workload_kind": workload_kind,
+        "replacement_point": "/opt/hcuopt/candidate.tar",
+    }
+    return [
+        {
+            **common,
+            "activation_marker": "baseline",
+            "implementation_hash": baseline_hash,
+            "process_id": 101,
+        },
+        {
+            **common,
+            "activation_marker": "candidate-v1",
+            "loaded_artifact_hash": artifact_hash,
+            "implementation_hash": artifact_hash,
+            "process_id": 102,
+        },
+        {
+            **common,
+            "activation_marker": "baseline",
+            "implementation_hash": baseline_hash,
+            "process_id": 103,
+        },
+    ]
+
+
+def _runtime_profile(tmp_path: Path) -> RuntimeProbeProfile:
+    hotpatch, _ = _overlay_fixture(tmp_path)
+    return RuntimeProbeProfile(
+        profile="nmz36-stage0-v2",
+        target_id=TARGET.target_id,
+        target_fingerprint=target_fingerprint(TARGET),
+        profiler={
+            "tool_candidates": [
+                {
+                    "name": "frozen-profiler",
+                    "version_argv": ["frozen-profiler", "--version"],
+                    "profile_argv": ["frozen-profiler", "--json"],
+                    "output_format": "json",
+                }
+            ]
+        },
+        hotpatch=hotpatch,
+    )
+
+
+def test_runtime_adapter_uses_frozen_profile_not_job_commands(tmp_path: Path) -> None:
+    records = [
+        {
+            "kernel_name": "kernel",
+            "duration_us": 1.0,
+            "call_count": 1,
+            "kernel_category": "kernel",
+        }
+    ]
+    runner = ScriptedRunner(
+        [
+            _command(("frozen-profiler", "--version"), stdout=b"version\n"),
+            _command(
+                ("frozen-profiler", "--json"), stdout=json.dumps(records).encode()
+            ),
+        ]
+    )
+    cleaner = ScriptedCleaner([])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(runner),
+        OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
+        cleaner,
+        TARGET,
+        _runtime_profile(tmp_path),
+    )
+
+    output = adapter.run_probe(
+        {
+            "stage0_run_id": str(uuid4()),
+            "target_snapshot_id": str(uuid4()),
+            "target_fingerprint": target_fingerprint(TARGET),
+            "target": TARGET.model_dump(mode="json"),
+            "probe_type": "profiler",
+            "protocol_version": "fixture-v1",
+            "mode": "dry_run",
+            "runtime_probe": {
+                "profiler": {"profile_argv": ["sh", "-c", "untrusted"]}
+            },
+            "_job_context": {},
+        },
+        tmp_path / "evidence",
+    )
+
+    assert runner.calls == [
+        ("frozen-profiler", "--version"),
+        ("frozen-profiler", "--json"),
+    ]
+    assert output.summary["capability"] == "degraded"
+
+
+def test_formal_runtime_probe_rejects_worker_local_evidence_store(tmp_path: Path) -> None:
+    cleaner = ScriptedCleaner([])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(ScriptedRunner([])),
+        OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
+        cleaner,
+        TARGET,
+        _runtime_profile(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="verifier-owned evidence publisher"):
+        adapter.run_probe(
+            {
+                "stage0_run_id": str(uuid4()),
+                "target_snapshot_id": str(uuid4()),
+                "target_fingerprint": target_fingerprint(TARGET),
+                "target": TARGET.model_dump(mode="json"),
+                "probe_type": "profiler",
+                "protocol_version": "fixture-v1",
+                "mode": "formal",
+                "_job_context": {
+                    "lease_id": str(uuid4()),
+                    "resource_id": "hcu-7",
+                    "fencing_token": 9,
+                },
+            },
+            tmp_path / "evidence",
+        )
+
+
+def test_formal_runtime_probe_records_lease_cleanup_with_trusted_publisher(
+    tmp_path: Path,
+) -> None:
+    class VerifierOwnedPublisher(LocalContentAddressedEvidencePublisher):
+        publication_authority = "fixture-verifier-owned"
+        authorizes_formal_results = True
+
+    records = [
+        {
+            "kernel_name": "kernel",
+            "duration_us": 1.0,
+            "call_count": 1,
+            "kernel_category": "kernel",
+        }
+    ]
+    runner = ScriptedRunner(
+        [
+            _command(("frozen-profiler", "--version"), stdout=b"version\n"),
+            _command(
+                ("frozen-profiler", "--json"), stdout=json.dumps(records).encode()
+            ),
+        ]
+    )
+    cleaner = ScriptedCleaner([True])
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(runner),
+        OverlayCapabilityProbe(ScriptedExecutor([]), cleaner),
+        cleaner,
+        TARGET,
+        _runtime_profile(tmp_path),
+        VerifierOwnedPublisher(),
+    )
+    lease_id = str(uuid4())
+
+    output = adapter.run_probe(
+        {
+            "stage0_run_id": str(uuid4()),
+            "target_snapshot_id": str(uuid4()),
+            "target_fingerprint": target_fingerprint(TARGET),
+            "target": TARGET.model_dump(mode="json"),
+            "probe_type": "profiler",
+            "protocol_version": "fixture-v1",
+            "mode": "formal",
+            "_job_context": {
+                "lease_id": lease_id,
+                "resource_id": "hcu-7",
+                "fencing_token": 9,
+            },
+        },
+        tmp_path / "evidence",
+    )
+
+    assert output.cleanup_evidence == {
+        "fence": {"resource_id": "hcu-7", "fencing_token": 9, "fenced": True},
+        "health": {"resource_id": "hcu-7", "healthy": True},
+    }
+    evidence = json.loads(Path(output.raw_evidence_uri.removeprefix("file://")).read_text())
+    assert evidence["execution_context"]["lease_id"] == lease_id
+    assert evidence["publication_authority"] == "fixture-verifier-owned"
 
 
 def test_overlay_reports_overlay_only_after_activation_correctness_and_recovery(
     tmp_path: Path,
 ) -> None:
     configuration, artifact_hash = _overlay_fixture(tmp_path)
-    executor = ScriptedExecutor(
-        [
-            {"output_hash": "sha256:output", "activation_marker": "baseline"},
-            {
-                "output_hash": "sha256:output",
-                "activation_marker": "candidate-v1",
-                "loaded_artifact_hash": artifact_hash,
-            },
-            {"output_hash": "sha256:output", "activation_marker": "baseline"},
-        ]
-    )
+    executor = ScriptedExecutor(_overlay_observations(artifact_hash))
     result = OverlayCapabilityProbe(executor, ScriptedCleaner([True, True, True])).run(
         configuration,
         target=TARGET,
@@ -445,22 +737,7 @@ def test_overlay_reports_overlay_only_after_activation_correctness_and_recovery(
 
 def test_overlay_reads_versioned_observations_from_execution_stdout(tmp_path: Path) -> None:
     configuration, artifact_hash = _overlay_fixture(tmp_path)
-    output_hash = "sha256:" + hashlib.sha256(b"same-output").hexdigest()
-    common = {
-        "protocol_version": OVERLAY_RESULT_PROTOCOL_VERSION,
-        "output_hash": output_hash,
-    }
-    executor = StdoutScriptedExecutor(
-        [
-            {**common, "activation_marker": "baseline"},
-            {
-                **common,
-                "activation_marker": "candidate-v1",
-                "loaded_artifact_hash": artifact_hash,
-            },
-            {**common, "activation_marker": "baseline"},
-        ]
-    )
+    executor = StdoutScriptedExecutor(_overlay_observations(artifact_hash))
 
     result = OverlayCapabilityProbe(executor, ScriptedCleaner([True, True, True])).run(
         configuration,
@@ -472,6 +749,51 @@ def test_overlay_reads_versioned_observations_from_execution_stdout(tmp_path: Pa
 
     assert result["capability"] == "overlay_only"
     assert result["observations"]["candidate"]["loaded_artifact_hash"] == artifact_hash
+
+
+def test_generic_artifact_mount_cannot_authorize_sglang_overlay(tmp_path: Path) -> None:
+    configuration, artifact_hash = _overlay_fixture(
+        tmp_path, workload_kind="generic_artifact_mount"
+    )
+    result = OverlayCapabilityProbe(
+        ScriptedExecutor(
+            _overlay_observations(
+                artifact_hash, workload_kind="generic_artifact_mount"
+            )
+        ),
+        ScriptedCleaner([True, True, True]),
+    ).run(
+        configuration,
+        target=TARGET,
+        output_dir=tmp_path / "results",
+        resource_id="hcu-7",
+        fencing_token=9,
+    )
+
+    assert result["capability"] == "none"
+    assert result["generic_artifact_mount_passed"] is True
+    assert result["sglang_overlay_proved"] is False
+
+
+def test_sglang_profile_rejects_generic_runner_observations(tmp_path: Path) -> None:
+    configuration, artifact_hash = _overlay_fixture(tmp_path)
+    result = OverlayCapabilityProbe(
+        ScriptedExecutor(
+            _overlay_observations(
+                artifact_hash, workload_kind="generic_artifact_mount"
+            )
+        ),
+        ScriptedCleaner([True, True, True]),
+    ).run(
+        configuration,
+        target=TARGET,
+        output_dir=tmp_path / "results",
+        resource_id="hcu-7",
+        fencing_token=9,
+    )
+
+    assert result["capability"] == "none"
+    assert result["observation_contract_matches"] is False
 
 
 def test_overlay_rejects_unversioned_stdout_observation(tmp_path: Path) -> None:
@@ -506,6 +828,8 @@ def test_overlay_runner_proves_candidate_load_without_changing_output(tmp_path: 
             str(baseline),
             "--activation-marker",
             "candidate-v1",
+            "--replacement-point",
+            str(candidate),
         ],
         check=True,
         capture_output=True,
@@ -521,6 +845,8 @@ def test_overlay_runner_proves_candidate_load_without_changing_output(tmp_path: 
             str(candidate),
             "--activation-marker",
             "candidate-v1",
+            "--replacement-point",
+            str(candidate),
         ],
         check=True,
         capture_output=True,
@@ -535,19 +861,90 @@ def test_overlay_runner_proves_candidate_load_without_changing_output(tmp_path: 
     assert candidate_result["output_hash"] == baseline_result["output_hash"]
 
 
+def test_sglang_overlay_runner_requires_import_from_server_process_group(
+    tmp_path: Path,
+) -> None:
+    smoke_runner = tmp_path / "fake_sglang_smoke.py"
+    smoke_runner.write_text(
+        """\
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+evidence_dir = Path(sys.argv[sys.argv.index("--evidence-dir") + 1])
+evidence_dir.mkdir(parents=True)
+pid = os.getpid()
+group = os.getpgrp()
+(evidence_dir / "start.json").write_text(json.dumps({"pid": pid, "process_group_id": group}))
+(evidence_dir / "result.json").write_text(json.dumps({
+    "status": "succeeded",
+    "cleanup_succeeded": True,
+    "normalized_output": {"text": "fixed"},
+}))
+marker_path = os.environ.get("HCUOPT_TEST_IMPORT_MARKER")
+if marker_path:
+    module = Path(os.environ["HCUOPT_TEST_REPLACEMENT"])
+    digest = "sha256:" + hashlib.sha256(module.read_bytes()).hexdigest()
+    Path(marker_path).write_text(json.dumps({
+        "protocol_version": "hcuopt-sglang-overlay-import-v1",
+        "process_id": pid,
+        "process_group_id": group,
+        "module_file": str(module.resolve()),
+        "module_sha256": digest,
+    }))
+""",
+        encoding="utf-8",
+    )
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    candidate = tmp_path / "candidate.py"
+    candidate.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    candidate_hash = "sha256:" + hashlib.sha256(candidate.read_bytes()).hexdigest()
+    marker = tmp_path / "candidate-import.json"
+    runner = ROOT / "src" / "hcuopt" / "runtime_probes" / "sglang_overlay_runner.py"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--phase",
+            "candidate",
+            "--smoke-runner",
+            str(smoke_runner),
+            "--spec",
+            str(spec),
+            "--evidence-dir",
+            str(tmp_path / "evidence"),
+            "--replacement-point",
+            str(candidate),
+            "--activation-marker",
+            "candidate-v1",
+            "--candidate-import-marker",
+            str(marker),
+            "--expected-artifact-hash",
+            candidate_hash,
+        ],
+        env={
+            **os.environ,
+            "HCUOPT_TEST_IMPORT_MARKER": str(marker),
+            "HCUOPT_TEST_REPLACEMENT": str(candidate),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    observation = json.loads(completed.stdout)
+    assert observation["activation_marker"] == "candidate-v1"
+    assert observation["loaded_artifact_hash"] == candidate_hash
+    assert observation["implementation_hash"] == candidate_hash
+
+
 def test_overlay_fails_closed_when_cleanup_health_is_bad(tmp_path: Path) -> None:
     configuration, artifact_hash = _overlay_fixture(tmp_path)
-    executor = ScriptedExecutor(
-        [
-            {"output_hash": "same", "activation_marker": "baseline"},
-            {
-                "output_hash": "same",
-                "activation_marker": "candidate-v1",
-                "loaded_artifact_hash": artifact_hash,
-            },
-            {"output_hash": "same", "activation_marker": "baseline"},
-        ]
-    )
+    executor = ScriptedExecutor(_overlay_observations(artifact_hash))
     with pytest.raises(ExecutionSafetyError, match="quarantined"):
         OverlayCapabilityProbe(executor, ScriptedCleaner([True, False, True])).run(
             configuration,
@@ -559,9 +956,10 @@ def test_overlay_fails_closed_when_cleanup_health_is_bad(tmp_path: Path) -> None
 
 
 def test_evidence_is_atomic_immutable_and_content_addressed(tmp_path: Path) -> None:
+    stage0_run_id = str(uuid4())
     uri, digest = write_immutable_json(
         tmp_path,
-        stage0_run_id="run-1",
+        stage0_run_id=stage0_run_id,
         probe_type="profiler",
         payload={"capability": "degraded"},
     )
@@ -572,14 +970,16 @@ def test_evidence_is_atomic_immutable_and_content_addressed(tmp_path: Path) -> N
     assert path.stat().st_mode & 0o222 == 0
     assert write_immutable_json(
         tmp_path,
-        stage0_run_id="run-1",
+        stage0_run_id=stage0_run_id,
         probe_type="profiler",
         payload={"capability": "degraded"},
     ) == (uri, digest)
-    with pytest.raises(ValueError, match="different content"):
-        write_immutable_json(
-            tmp_path,
-            stage0_run_id="run-1",
-            probe_type="profiler",
-            payload={"capability": "full"},
-        )
+    other_uri, other_digest = write_immutable_json(
+        tmp_path,
+        stage0_run_id=stage0_run_id,
+        probe_type="profiler",
+        payload={"capability": "full"},
+    )
+    assert other_uri != uri
+    assert other_digest != digest
+    assert path.read_bytes() != Path(other_uri.removeprefix("file://")).read_bytes()

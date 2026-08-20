@@ -10,16 +10,21 @@ from hcuopt.adapters.interfaces import ExecutionAdapter, ResourceCleaner
 from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
     ExecutionRequest,
+    MountSpec,
     SourceSnapshot,
     TargetSpec,
 )
-from hcuopt.domain.enums import HotPatchCapability
+from hcuopt.domain.enums import HotPatchCapability, LeaseScope
 from hcuopt.domain.errors import ExecutionSafetyError
 from hcuopt.runtime_probes.evidence import sha256_file
+from hcuopt.runtime_probes.profile import (
+    OverlayPhaseConfiguration,
+    OverlayProbeConfiguration,
+)
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 
 CACHE_ENVIRONMENT_KEY = "HCUOPT_CANDIDATE_CACHE_DIR"
-OVERLAY_RESULT_PROTOCOL_VERSION = "hcuopt-overlay-result-v1"
+OVERLAY_RESULT_PROTOCOL_VERSION = "hcuopt-overlay-result-v2"
 MAX_OVERLAY_RESULT_BYTES = 64 * 1024
 
 
@@ -39,25 +44,41 @@ class OverlayCapabilityProbe:
         resource_id: str,
         fencing_token: int,
     ) -> dict[str, Any]:
-        baseline = SourceSnapshot.model_validate(configuration.get("baseline_source"))
-        candidate = SourceSnapshot.model_validate(configuration.get("candidate_source"))
-        artifact = ArtifactManifest.model_validate(configuration.get("artifact"))
-        baseline_request = ExecutionRequest.model_validate(
-            configuration.get("baseline_request")
+        if not resource_id:
+            raise ValueError("overlay probe requires a leased resource_id")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token < 1
+        ):
+            raise ValueError("overlay probe requires a positive fencing_token")
+        frozen = OverlayProbeConfiguration.model_validate(configuration)
+        baseline = frozen.baseline_source
+        candidate = frozen.candidate_source
+        artifact = frozen.artifact
+        activation_marker = frozen.activation_marker
+        overlay_target = frozen.overlay_mount_target
+
+        baseline_request = self._execution_request(
+            frozen.baseline, target, resource_id, fencing_token
         )
-        candidate_request = ExecutionRequest.model_validate(
-            configuration.get("candidate_request")
+        candidate_request = self._execution_request(
+            frozen.candidate,
+            target,
+            resource_id,
+            fencing_token,
+            artifact=artifact,
+            overlay_target=overlay_target,
         )
-        recovery_request = ExecutionRequest.model_validate(
-            configuration.get("recovery_request")
+        recovery_request = self._execution_request(
+            frozen.recovery, target, resource_id, fencing_token
         )
-        activation_marker = self._required_text(configuration, "activation_marker")
-        overlay_target = self._required_text(configuration, "overlay_mount_target")
 
         self._validate_sources(baseline, candidate, artifact)
         self._validate_requests(
             target,
             artifact,
+            frozen,
             overlay_target,
             baseline_request,
             candidate_request,
@@ -91,9 +112,15 @@ class OverlayCapabilityProbe:
             item.status == "succeeded"
             for item in (baseline_result, candidate_result, recovery_result)
         )
+        baseline_proved = (
+            baseline_metadata.get("activation_marker") == "baseline"
+            and baseline_metadata.get("loaded_artifact_hash") is None
+        )
         activation_proved = (
             candidate_metadata.get("activation_marker") == activation_marker
             and candidate_metadata.get("loaded_artifact_hash") == artifact.content_hash
+            and candidate_metadata.get("implementation_hash") == artifact.content_hash
+            and candidate_metadata.get("replacement_point") == frozen.replacement_point
         )
         correctness_passed = (
             baseline_metadata.get("output_hash") is not None
@@ -101,39 +128,58 @@ class OverlayCapabilityProbe:
         )
         recovery_passed = (
             recovery_metadata.get("output_hash") == baseline_metadata.get("output_hash")
-            and recovery_metadata.get("activation_marker") in (None, "baseline")
+            and recovery_metadata.get("activation_marker") == "baseline"
+            and recovery_metadata.get("loaded_artifact_hash") is None
+            and recovery_metadata.get("implementation_hash")
+            == baseline_metadata.get("implementation_hash")
+            and recovery_metadata.get("replacement_point") == frozen.replacement_point
             and baseline_hash_before == baseline.source_hash == baseline_hash_after
         )
         resource_healthy = all(
             bool(item.get("healthy"))
             for item in (baseline_health, candidate_health, recovery_health)
         )
+        observation_contract_matches = all(
+            observation.get("workload_kind") == frozen.workload_kind
+            and observation.get("replacement_point") == frozen.replacement_point
+            for observation in (
+                baseline_metadata,
+                candidate_metadata,
+                recovery_metadata,
+            )
+        )
         passed = all(
             (
                 execution_succeeded,
+                baseline_proved,
                 activation_proved,
                 correctness_passed,
                 recovery_passed,
                 resource_healthy,
+                observation_contract_matches,
             )
         )
-        if not passed:
-            capability = HotPatchCapability.NONE
-        elif configuration.get("activation_mode") == "hot_patch" and bool(
-            configuration.get("in_process_replacement_proved")
-        ):
-            capability = HotPatchCapability.HOT_PATCH
-        else:
-            capability = HotPatchCapability.OVERLAY_ONLY
+        sglang_overlay_proved = passed and frozen.workload_kind == "sglang_python_triton"
+        capability = (
+            HotPatchCapability.OVERLAY_ONLY
+            if sglang_overlay_proved
+            else HotPatchCapability.NONE
+        )
 
         return {
             "capability": capability.value,
-            "activation_mode": configuration.get("activation_mode", "startup_overlay"),
+            "activation_mode": "startup_overlay",
+            "workload_kind": frozen.workload_kind,
+            "replacement_point": frozen.replacement_point,
+            "generic_artifact_mount_passed": passed,
+            "sglang_overlay_proved": sglang_overlay_proved,
             "execution_succeeded": execution_succeeded,
+            "baseline_proved": baseline_proved,
             "activation_proved": activation_proved,
             "correctness_passed": correctness_passed,
             "recovery_passed": recovery_passed,
             "resource_healthy": resource_healthy,
+            "observation_contract_matches": observation_contract_matches,
             "baseline_source_hash_before": baseline_hash_before,
             "baseline_source_hash_after": baseline_hash_after,
             "candidate_source_hash": candidate.source_hash,
@@ -165,16 +211,17 @@ class OverlayCapabilityProbe:
         """
 
         if result.stdout_uri is None:
-            return dict(result.metadata)
-        path = file_uri_to_path(result.stdout_uri).resolve(strict=True)
-        if path.is_symlink() or not path.is_file():
-            raise ExecutionSafetyError("overlay result stdout must be a regular file")
-        if path.stat().st_size > MAX_OVERLAY_RESULT_BYTES:
-            raise ExecutionSafetyError("overlay result stdout exceeds the 64 KiB limit")
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as error:
-            raise ExecutionSafetyError("overlay result stdout is not valid JSON") from error
+            value = dict(result.metadata)
+        else:
+            path = file_uri_to_path(result.stdout_uri).resolve(strict=True)
+            if path.is_symlink() or not path.is_file():
+                raise ExecutionSafetyError("overlay result stdout must be a regular file")
+            if path.stat().st_size > MAX_OVERLAY_RESULT_BYTES:
+                raise ExecutionSafetyError("overlay result stdout exceeds the 64 KiB limit")
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ExecutionSafetyError("overlay result stdout is not valid JSON") from error
         if not isinstance(value, dict):
             raise ExecutionSafetyError("overlay result stdout must contain one JSON object")
         if value.get("protocol_version") != OVERLAY_RESULT_PROTOCOL_VERSION:
@@ -188,12 +235,62 @@ class OverlayCapabilityProbe:
         loaded_hash = value.get("loaded_artifact_hash")
         if loaded_hash is not None and not OverlayCapabilityProbe._is_sha256(loaded_hash):
             raise ExecutionSafetyError("overlay loaded_artifact_hash must be SHA256")
+        workload_kind = value.get("workload_kind")
+        if workload_kind not in {"generic_artifact_mount", "sglang_python_triton"}:
+            raise ExecutionSafetyError("overlay result workload_kind is invalid")
+        replacement_point = value.get("replacement_point")
+        if not isinstance(replacement_point, str) or not replacement_point:
+            raise ExecutionSafetyError("overlay result requires replacement_point")
+        implementation_hash = value.get("implementation_hash")
+        if not OverlayCapabilityProbe._is_sha256(implementation_hash):
+            raise ExecutionSafetyError("overlay result requires implementation_hash")
+        process_id = value.get("process_id")
+        if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id < 1:
+            raise ExecutionSafetyError("overlay result requires a positive process_id")
         return {
             "protocol_version": OVERLAY_RESULT_PROTOCOL_VERSION,
             "activation_marker": marker,
             "output_hash": output_hash,
+            "workload_kind": workload_kind,
+            "replacement_point": replacement_point,
+            "implementation_hash": implementation_hash,
+            "process_id": process_id,
             **({"loaded_artifact_hash": loaded_hash} if loaded_hash is not None else {}),
         }
+
+    @staticmethod
+    def _execution_request(
+        phase: OverlayPhaseConfiguration,
+        target: TargetSpec,
+        resource_id: str,
+        fencing_token: int,
+        *,
+        artifact: ArtifactManifest | None = None,
+        overlay_target: str | None = None,
+    ) -> ExecutionRequest:
+        mounts = list(phase.mounts)
+        if artifact is not None:
+            if overlay_target is None:
+                raise ValueError("candidate overlay requires a mount target")
+            mounts.append(
+                MountSpec(
+                    source=file_uri_to_path(artifact.uri).resolve(strict=True).as_posix(),
+                    target=overlay_target,
+                    read_only=True,
+                )
+            )
+        return ExecutionRequest(
+            target_id=target.target_id,
+            argv=list(phase.argv),
+            working_directory=phase.working_directory,
+            environment=phase.environment,
+            timeout_seconds=phase.timeout_seconds,
+            lease_scope=LeaseScope.EXCLUSIVE,
+            resource_id=resource_id,
+            fencing_token=fencing_token,
+            container_image=target.inference_image.immutable_reference,
+            mounts=mounts,
+        )
 
     @staticmethod
     def _is_sha256(value: Any) -> bool:
@@ -232,6 +329,7 @@ class OverlayCapabilityProbe:
     def _validate_requests(
         target: TargetSpec,
         artifact: ArtifactManifest,
+        configuration: OverlayProbeConfiguration,
         overlay_target: str,
         baseline: ExecutionRequest,
         candidate: ExecutionRequest,
@@ -246,6 +344,12 @@ class OverlayCapabilityProbe:
                 raise ValueError("overlay execution must use the digest-locked image")
             if request.resource_id != resource_id or request.fencing_token != fencing_token:
                 raise ValueError("overlay execution must use the live lease and fencing token")
+
+        if (
+            configuration.workload_kind == "sglang_python_triton"
+            and configuration.replacement_point != overlay_target
+        ):
+            raise ValueError("SGLang overlay must mount the artifact at its replacement point")
 
         artifact_path = file_uri_to_path(artifact.uri).resolve(strict=True).as_posix()
         matching_mounts = [
@@ -266,10 +370,3 @@ class OverlayCapabilityProbe:
             recovery.environment.get(CACHE_ENVIRONMENT_KEY),
         }:
             raise ValueError("candidate cache must be isolated from baseline and recovery")
-
-    @staticmethod
-    def _required_text(configuration: Mapping[str, Any], name: str) -> str:
-        value = configuration.get(name)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"overlay configuration requires {name}")
-        return value

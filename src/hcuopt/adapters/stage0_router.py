@@ -40,7 +40,14 @@ class RoutedStage0ProbeAdapter:
             if provenance.implementation_kind != "real":
                 raise ValueError(f"route {probe_type.value} must use a real adapter")
 
+        target_fingerprints = {
+            getattr(adapter, "target_fingerprint", None) for adapter in normalized.values()
+        }
+        if None in target_fingerprints or len(target_fingerprints) != 1:
+            raise ValueError("all Stage 0 probe routes must bind the same target fingerprint")
+
         self._routes = MappingProxyType(normalized)
+        self.target_fingerprint = target_fingerprints.pop()
         self.provenance = AdapterProvenance(
             profile=profile,
             capability="stage0_probe",

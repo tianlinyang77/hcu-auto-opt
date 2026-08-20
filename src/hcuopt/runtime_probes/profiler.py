@@ -4,6 +4,7 @@ import csv
 import gzip
 import io
 import json
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,20 @@ from hcuopt.adapters.interfaces import ExecutionAdapter
 from hcuopt.contracts.platform_v1 import ExecutionRequest, MountSpec, TargetSpec
 from hcuopt.domain.enums import LeaseScope, ProfilerCapability
 from hcuopt.runtime_probes.evidence import sha256_file
+from hcuopt.runtime_probes.profile import ProfilerProbeConfiguration
 
-CORE_FIELDS = ("kernel_name", "duration", "call_count")
+CORE_FIELDS = (
+    "kernel_name",
+    "duration_value",
+    "duration_unit",
+    "call_count",
+    "kernel_category",
+)
 DETAIL_FIELDS = ("shape", "dtype", "meta", "python_location", "hip_location")
 ALIASES = {
     "kernel_name": ("kernel_name", "kernel", "name", "KernelName", "Name"),
-    "duration": ("duration", "duration_ns", "time", "DurationNs", "DurationUs"),
     "call_count": ("call_count", "calls", "count", "Calls"),
+    "kernel_category": ("kernel_category", "category", "cat"),
     "shape": ("shape", "tensor_shape"),
     "dtype": ("dtype", "data_type"),
     "meta": ("meta", "metadata"),
@@ -51,23 +59,21 @@ class ProfilerCapabilityProbe:
         resource_id: str | None = None,
         fencing_token: int | None = None,
     ) -> dict[str, Any]:
+        frozen = ProfilerProbeConfiguration.model_validate(configuration)
+        configuration = frozen.model_dump(mode="json", exclude_none=True)
         capture_contract = self._capture_contract(configuration)
-        candidates = configuration.get("tool_candidates", [])
-        if not isinstance(candidates, list):
-            raise ValueError("profiler.tool_candidates must be a list")
+        candidates = frozen.tool_candidates
 
         attempts: list[dict[str, Any]] = []
         normalized_records: list[dict[str, Any]] = []
         selected_tool: str | None = None
         for raw_candidate in candidates:
-            candidate = self._mapping(raw_candidate, "profiler tool candidate")
-            name = self._required_text(candidate, "name")
-            version_argv = self._argv(candidate.get("version_argv"), "version_argv")
-            profile_argv = self._argv(candidate.get("profile_argv"), "profile_argv")
-            output_format = str(candidate.get("output_format", "json"))
-            timeout = float(candidate.get("timeout_seconds", 300))
-            if timeout <= 0:
-                raise ValueError("profiler timeout_seconds must be positive")
+            candidate = raw_candidate
+            name = candidate.name
+            version_argv = candidate.version_argv
+            profile_argv = candidate.profile_argv
+            output_format = candidate.output_format
+            timeout = float(candidate.timeout_seconds)
 
             try:
                 version = self._run_command(
@@ -127,10 +133,8 @@ class ProfilerCapabilityProbe:
                 continue
             try:
                 if output_format == "torch_trace":
-                    output_path = candidate.get("output_path")
-                    if not isinstance(output_path, str) or not output_path:
-                        raise ValueError("torch_trace profiler candidate requires output_path")
-                    records = self._parse_torch_trace(Path(output_path))
+                    assert candidate.output_path is not None
+                    records = self._parse_torch_trace(Path(candidate.output_path))
                 else:
                     records = self._parse_records(profile.stdout, output_format)
             except (UnicodeError, json.JSONDecodeError, ValueError) as error:
@@ -150,11 +154,23 @@ class ProfilerCapabilityProbe:
                 if value not in (None, "", [], {})
             }
         )
-        core_present = all(field in observed for field in CORE_FIELDS)
-        details_present = all(field in observed for field in DETAIL_FIELDS)
-        if core_present and details_present:
+        valid_records = [record for record in normalized_records if self._valid_core(record)]
+        full_records = [
+            record
+            for record in valid_records
+            if all(record.get(field) not in (None, "", [], {}) for field in DETAIL_FIELDS)
+        ]
+        best_record = max(
+            valid_records or normalized_records,
+            key=lambda record: sum(
+                record.get(field) not in (None, "", [], {})
+                for field in (*CORE_FIELDS, *DETAIL_FIELDS)
+            ),
+            default={},
+        )
+        if full_records:
             capability = ProfilerCapability.FULL
-        elif core_present:
+        elif valid_records:
             capability = ProfilerCapability.DEGRADED
         else:
             capability = ProfilerCapability.NONE
@@ -164,9 +180,13 @@ class ProfilerCapabilityProbe:
             "selected_tool": selected_tool,
             "observed_fields": observed,
             "missing_fields": [
-                field for field in (*CORE_FIELDS, *DETAIL_FIELDS) if field not in observed
+                field
+                for field in (*CORE_FIELDS, *DETAIL_FIELDS)
+                if best_record.get(field) in (None, "", [], {})
             ],
             "records": normalized_records,
+            "valid_record_count": len(valid_records),
+            "invalid_record_count": len(normalized_records) - len(valid_records),
             "attempts": attempts,
             "capture_contract": capture_contract,
             "triage_artifacts": self._triage_artifacts(configuration),
@@ -188,13 +208,20 @@ class ProfilerCapabilityProbe:
             self.executor is None
             or target is None
             or output_dir is None
-            or resource_id is None
-            or fencing_token is None
         ):
             raise ValueError(
-                "real profiler execution requires Target Lock, output directory, "
-                "resource_id, and fencing_token"
+                "real profiler execution requires Target Lock and output directory"
             )
+        if (resource_id is None) != (fencing_token is None):
+            raise ValueError("profiler resource_id and fencing_token must be present together")
+        if resource_id is not None and not resource_id:
+            raise ValueError("profiler resource_id cannot be empty")
+        if fencing_token is not None and (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token < 1
+        ):
+            raise ValueError("profiler fencing_token must be a positive integer")
         raw_mounts = configuration.get("mounts", [])
         if not isinstance(raw_mounts, list):
             raise ValueError("profiler mounts must be a list")
@@ -210,7 +237,7 @@ class ProfilerCapabilityProbe:
                 ).items()
             },
             timeout_seconds=max(1, min(int(timeout), 86_400)),
-            lease_scope=LeaseScope.EXCLUSIVE,
+            lease_scope=(LeaseScope.EXCLUSIVE if resource_id is not None else LeaseScope.NONE),
             resource_id=resource_id,
             fencing_token=fencing_token,
             container_image=target.inference_image.immutable_reference,
@@ -284,7 +311,53 @@ class ProfilerCapabilityProbe:
                 if alias in raw and raw[alias] not in (None, ""):
                     normalized[canonical] = raw[alias]
                     break
+        duration = cls._duration(raw)
+        if duration is not None:
+            normalized["duration_value"], normalized["duration_unit"] = duration
         return normalized
+
+    @staticmethod
+    def _duration(raw: Mapping[str, Any]) -> tuple[float, str] | None:
+        choices = (
+            ("duration_value", raw.get("duration_unit")),
+            ("duration_ns", "ns"),
+            ("DurationNs", "ns"),
+            ("duration_us", "us"),
+            ("DurationUs", "us"),
+            ("duration_ms", "ms"),
+            ("DurationMs", "ms"),
+            ("duration", raw.get("duration_unit")),
+        )
+        for name, unit in choices:
+            if name not in raw:
+                continue
+            value = raw[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+                or unit not in {"ns", "us", "ms", "s"}
+            ):
+                return None
+            return float(value), str(unit)
+        return None
+
+    @staticmethod
+    def _valid_core(record: Mapping[str, Any]) -> bool:
+        kernel_name = record.get("kernel_name")
+        call_count = record.get("call_count")
+        category = record.get("kernel_category")
+        return (
+            isinstance(kernel_name, str)
+            and bool(kernel_name.strip())
+            and isinstance(call_count, int)
+            and not isinstance(call_count, bool)
+            and call_count > 0
+            and category == "kernel"
+            and isinstance(record.get("duration_value"), float)
+            and record.get("duration_unit") in {"ns", "us", "ms", "s"}
+        )
 
     @staticmethod
     def _parse_records(raw: bytes, output_format: str) -> list[Mapping[str, Any]]:
@@ -307,7 +380,30 @@ class ProfilerCapabilityProbe:
                 raise ValueError("profiler JSONL output must contain objects")
             return values
         if output_format == "csv":
-            return list(csv.DictReader(io.StringIO(text)))
+            records = list(csv.DictReader(io.StringIO(text)))
+            for record in records:
+                for field in (
+                    "duration_value",
+                    "duration_ns",
+                    "DurationNs",
+                    "duration_us",
+                    "DurationUs",
+                    "duration_ms",
+                    "DurationMs",
+                    "duration",
+                ):
+                    if field in record:
+                        try:
+                            record[field] = float(record[field])
+                        except (TypeError, ValueError):
+                            pass
+                for field in ALIASES["call_count"]:
+                    if field in record:
+                        try:
+                            record[field] = int(record[field])
+                        except (TypeError, ValueError):
+                            pass
+            return records
         raise ValueError(f"unsupported profiler output format: {output_format}")
 
     @classmethod
@@ -329,9 +425,8 @@ class ProfilerCapabilityProbe:
                 continue
             category = str(event.get("cat", "")).lower()
             args = event.get("args") if isinstance(event.get("args"), Mapping) else {}
-            if "kernel" not in category and not any(
-                key in args for key in ("kernel", "Kernel", "stream", "External id")
-            ):
+            categories = {item.strip() for item in category.replace(";", ",").split(",")}
+            if "kernel" not in categories:
                 continue
             name = str(event.get("name", "")).strip()
             duration = event.get("dur")
@@ -339,9 +434,17 @@ class ProfilerCapabilityProbe:
                 continue
             row = grouped.setdefault(
                 name,
-                {"kernel_name": name, "duration": 0.0, "call_count": 0},
+                {
+                    "kernel_name": name,
+                    "duration_value": 0.0,
+                    "duration_unit": "us",
+                    "call_count": 0,
+                    "kernel_category": "kernel",
+                },
             )
-            row["duration"] += float(duration)
+            if not math.isfinite(float(duration)) or float(duration) <= 0:
+                continue
+            row["duration_value"] += float(duration)
             row["call_count"] += 1
             cls._copy_trace_detail(args, row)
         return list(grouped.values())

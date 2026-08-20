@@ -11,7 +11,7 @@ from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.api.app import create_app
 from hcuopt.domain.enums import WorkerType
 from hcuopt.domain.errors import AdapterUnavailable
-from hcuopt.targets import load_target
+from hcuopt.targets import load_target, target_fingerprint
 from hcuopt.workers.handlers import JobHandlers
 from hcuopt.workers.sdk import Worker
 
@@ -106,7 +106,7 @@ def test_fake_stage0_probe_handler_is_explicitly_synthetic() -> None:
         {
             "stage0_run_id": str(uuid4()),
             "target_snapshot_id": str(uuid4()),
-            "target_fingerprint": "sha256:" + "1" * 64,
+            "target_fingerprint": target_fingerprint(TARGET),
             "target": TARGET.model_dump(mode="json"),
             "probe_type": "profiler",
             "protocol_version": "fixture-v1",

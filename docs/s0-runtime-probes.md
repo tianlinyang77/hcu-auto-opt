@@ -1,156 +1,115 @@
 # S0-C Profiler 与可逆 Overlay 能力探针
 
-当前 nmz36 Dry Run 的真实结果和证据见
-[S0-C nmz36 Dry Run 验收记录](evidence/s0-c-nmz36-dry-run-20260820.md)。该次结果为
-G0-P `DEGRADED`、G0-H `OVERLAY_ONLY`；由于未取得 HCU 7 独占窗口，不能视为 Formal。
+S0-C 负责回答两个问题：锁定环境能否产出可用于定位 Kernel 的真实 Profiler
+记录（G0-P），以及一个 Python/Triton Candidate 能否在新容器中真实生效并在退出后
+恢复 Baseline（G0-H）。它不实现第二套计时器，也不发布性能提升结论。
 
-## 控制面对外使用一个 Profile，内部仍由 B、C 分工
+## 一个公开 Profile，两个内部实现
 
-正式 Stage 0 的七类探针统一通过 `nmz36-stage0-v1` 这个 Worker Profile
-领取任务，但这不表示要把 S0-B 和 S0-C 合成一套实现：
+正式 Stage 0 的七类探针统一由 `nmz36-stage0-v2` Worker Profile 领取：
 
-- `fingerprint`、`timer`、`noise`、`known_signal`、`null_signal` 交给 S0-B
-  Measurement Adapter；
-- `profiler`、`hotpatch` 交给 S0-C Runtime Probe Adapter。
+- `fingerprint`、`timer`、`noise`、`known_signal`、`null_signal` 由 S0-B
+  Measurement Adapter 执行；
+- `profiler`、`hotpatch` 由 S0-C Runtime Probe Adapter 执行。
 
-`compose_nmz36_stage0_registry()` 负责建立这层路由，并在七类探针没有全部配置时
-拒绝启动。每条探针结果还会记录实际执行它的内部 Adapter 来源，因此统一 Profile
-不会破坏 B、C 的职责边界和证据可追踪性。
+`compose_nmz36_stage0_registry()` 建立这层路由，并要求七类探针绑定同一个 Target
+Fingerprint。每条结果仍会记录实际执行它的内部 Adapter，因此统一 Profile 不会混淆
+B、C 的职责和证据来源。
 
-## 目标和边界
+## 配置的信任边界
 
-S0-C 实现 `profiler`（G0-P）和 `hotpatch`（G0-H）两类 `Stage0ProbeResult`。
-它只报告当前 Target Lock 中实际观察到的能力，不产生性能提升结论，也不实现第二套计时器。
-任何耗时采集都必须在 #18 合入后复用统一 `MeasurementHarness`。
+`RuntimeProbeProfile` 是部署方创建并绑定到 Worker 的冻结配置，包含固定 argv、环境变量、
+只读挂载、工作目录、Profiler 工具和 G0-H 三阶段执行方案。它同时绑定：
 
-真实探针统一使用 Adapter Profile `nmz36-stage0-v1`，原始证据以规范 JSON 原子写入：
+- `profile = nmz36-stage0-v2`；
+- Target ID；
+- Target Lock 的 SHA256 Fingerprint。
 
-```text
-<worker-output>/stage0/<stage0_run_id>/profiler.json
-<worker-output>/stage0/<stage0_run_id>/hotpatch.json
-```
+创建 `Stage0Run` 的外部请求只能提交 `max_wall_seconds`、`max_samples` 等资源上限，不能在
+`budget` 中注入命令、环境变量、挂载或完整 `ExecutionRequest`。Worker 也不会读取 Job 中的
+`runtime_probe` 字段。这样可避免调用方借能力探针执行任意命令或伪造探针方案。
 
-文件落盘后为只读，并将 `file://` URI 和 `sha256:<digest>` 写入
-`Stage0ProbeResult`。同一路径只能幂等重放完全相同的内容，不能覆盖已有证据。
+所有实际执行仍由 Worker 根据冻结 Profile 构造 `ExecutionRequest`，并强制使用 Target Lock
+中的 digest 镜像。Formal 运行还必须具有 Lease ID、独占 Resource ID 和 fencing token。
 
-## G0-P：Profiler 能力
+## G0-P：Profiler 能力分级
 
-### 使用 profile-llm-torch skill
+Profiler 命令使用结构化 argv，不通过 shell 拼接。每个工具候选需声明版本命令、采集命令、
+超时和一种机器可解析格式：JSON、JSONL、CSV 或 PyTorch trace。
 
-SGLang torch profiler 的捕获和分析遵守 `profile-llm-torch` skill 的 `triage` 工作流：
+每条有效 Kernel 记录必须独立包含：
 
-- 默认分别捕获 prefill 和 decode，不能使用混合的 `legacy` workload；
-- 默认预热 10 步、采集 5 个 active step；
-- 默认 prefill 为 `4090 -> 1`，decode 为 `1 -> 2048`；
-- 已知真实 benchmark 分布时可以覆盖长度，但必须把选择写入原始证据；
-- 分析工作目录必须保留 `terminal_commands.log`、`analysis_stdout.txt` 和
-  `torch_profiler_analysis.md`；
-- 优先使用 rank-local trace，不能把缺失的 shape、dtype 或源码位置人工补齐。
+- `kernel_name`；
+- 数值型且有限、为正数的 `duration_value`；
+- 明确的 `duration_unit`：`ns`、`us`、`ms` 或 `s`；
+- 正整数 `call_count`；
+- 来自工具输出的 `kernel_category = kernel`。
 
-`ProfilerCapabilityProbe` 执行结构化 argv，不通过 shell 拼接命令。每个候选工具配置包括：
-
-```yaml
-name: profile-llm-torch
-version_argv: [python, /opt/dcu-opt-skills/profile-llm-torch/scripts/analyze_llm_torch_profile.py, --help]
-profile_argv:
-  - python
-  - /opt/dcu-opt-skills/profile-llm-torch/scripts/run_triage_report.py
-  - --work-dir
-  - /data/hcuopt/stage0/profiler-analysis
-  - --input
-  - /data/hcuopt/stage0/traces
-  - --framework
-  - sglang
-  - --model
-  - Qwen2.5-0.5B-Instruct
-output_format: torch_trace
-output_path: /data/hcuopt/stage0/traces/rank-0.trace.json.gz
-timeout_seconds: 900
-```
-
-对于已有 trace，`profile_argv` 运行 skill 的报告入口，`output_path` 指向用于机器复核的
-rank-local trace。也可以配置返回 JSON/JSONL/CSV 的 rocprof 工具。所有命令的退出码、
-stdout、stderr、解析错误和真实字段都会进入原始证据。
-
-能力分级规则：
+不能把不同记录中的字段拼成一条“完整记录”，也不能替工具补写 Kernel 类别、shape、dtype
+或源码位置。能力按单条记录分级：
 
 | 结果 | 条件 |
 |---|---|
-| `FULL` | 实际记录包含 Kernel 名称、耗时、调用次数、shape、dtype、meta、Python 位置和 HIP 关联 |
-| `DEGRADED` | 至少包含 Kernel 名称、耗时和调用次数，但详细定位字段不全 |
-| `NONE` | 工具不可用、命令失败、格式无法解析，或核心三字段不全 |
+| `FULL` | 至少一条有效 Kernel 记录同时具有 shape、dtype、meta、Python 位置和 HIP 关联位置 |
+| `DEGRADED` | 至少一条记录具有全部核心字段，但详细定位字段不完整 |
+| `NONE` | 工具不可用、执行/解析失败，或不存在核心字段完整的真实 Kernel 记录 |
 
-## G0-H：可逆 Overlay
+PyTorch trace 只接受真实 `kernel` 类别事件，并保留 trace 的微秒单位。使用
+`profile-llm-torch` 时仍遵守 stage-separated 的 prefill/decode 采集流程，保留原始 trace、
+命令日志和分析结果。
 
-G0-H 接受 F1-C 产生的 Baseline Snapshot、独立 Candidate Worktree 和内容寻址 Artifact，
-然后执行三个使用同一锁定镜像、租约和 fencing token 的独立容器请求：
+## G0-H：真实 SGLang Python/Triton Overlay
+
+G0-H 依次执行三个使用相同 Target Lock 的隔离容器：
 
 ```text
-纯净 Baseline
-  → Candidate Artifact 只读挂载到新容器
-  → 纯净 Baseline 恢复验证
+Baseline 固定正确性请求
+  → Candidate Artifact 只读挂载到真实 SGLang 替换点并执行同一请求
+  → 不挂载 Candidate，重新启动 Baseline 并执行同一请求
 ```
 
-探针会强制检查：
+探针会检查：
 
-- Candidate Worktree 与 Baseline 分离，并正确引用 Baseline Snapshot；
-- Artifact 引用 Candidate Snapshot、SHA256 匹配且宿主文件不可写；
-- Candidate Artifact 只出现在 Candidate 请求中，并且只读挂载一次；
-- 三次执行都使用 Target Lock 中的 digest 镜像及当前租约/fencing token；
-- Candidate 使用与 Baseline/Recovery 不同的 `HCUOPT_CANDIDATE_CACHE_DIR`；
-- Candidate 返回匹配的 `activation_marker` 和 `loaded_artifact_hash`，证明实际加载；
-- Candidate 正确性输出 Hash 与 Baseline 一致；
-- Recovery 不再带 Candidate 标记，输出 Hash 与 Baseline 一致；
-- 恢复后的 Baseline Source Hash 与探针前一致；
-- 三次执行后的资源健康检查都通过。
+- Baseline Snapshot 干净，Candidate 是它的独立 Worktree；
+- Artifact 引用 Candidate Snapshot，文件 Hash 与 Manifest 一致且以只读方式挂载；
+- 三次执行使用 digest 锁定镜像和同一 Lease/fencing token；
+- Candidate 使用独立缓存目录；
+- Candidate 模块由本次 SGLang 服务进程组实际导入，导入标记中的模块路径和 Hash 与挂载
+  Artifact 一致；
+- Candidate 与 Baseline 的固定正确性输出 Hash 一致；
+- Recovery 的实现 Hash、输出 Hash 和 Baseline 源码 Hash 均恢复一致；
+- 每阶段容器退出后资源健康检查通过。
 
-三次容器请求都必须在 stdout 只输出一个 `hcuopt-overlay-result-v1` JSON 对象；执行器会
-保存这段原始 stdout，探针再从证据文件中读取，而不是相信调用方预填的 metadata：
+`sglang_overlay_runner.py` 复用固定的 `sglang_smoke_runner.py` 请求，并输出
+`hcuopt-overlay-result-v2` 机器证据。Candidate 模块必须在导入时写出
+`hcuopt-sglang-overlay-import-v1` 标记，至少包含 `process_id`、`process_group_id`、
+`module_file` 和 `module_sha256`。
 
-```json
-{
-  "protocol_version": "hcuopt-overlay-result-v1",
-  "activation_marker": "baseline 或约定的 Candidate 标记",
-  "loaded_artifact_hash": "Candidate 请求必填的 sha256:...",
-  "output_hash": "sha256:..."
-}
+只有上述 SGLang 路径全部通过时才返回 `OVERLAY_ONLY`。仓库中的通用文件挂载 runner 仅能
+验证“只读挂载、Hash 和三阶段恢复机制”，其结果会标记
+`generic_artifact_mount_passed=true`，但能力仍为 `NONE`，不能授权真实优化。
+
+当前实现不声称支持进程内热替换，因此不会返回 `HOT_PATCH`；也不修改镜像内
+`site-packages`，不触碰 `_C.so`、Driver、DTK 或系统 BLAS/RCCL。
+
+## 证据发布
+
+Dry Run 默认使用 Worker 本地内容寻址存储：
+
+```text
+<worker-output>/stage0/<stage0_run_id>/<probe_type>/sha256-<digest>.json
 ```
 
-Baseline 和 Recovery 不得返回 `loaded_artifact_hash`；Candidate 返回的 Hash 必须与只读
-挂载的 Artifact 完全一致。stdout 不是合法 JSON、协议版本错误或 Hash 格式错误时均失败关闭。
-仓库提供的标准库 runner 位于 `src/hcuopt/runtime_probes/overlay_runner.py`，应以只读方式
-挂载进三次独立容器；它对 Baseline/Candidate Artifact 的实际字节计算 SHA256，并明确报告
-本次加载的是 Baseline 还是 Candidate。
+发布过程使用不覆盖的原子创建语义，可安全处理并发和幂等重放；URI、SHA256、执行上下文、
+Adapter 来源、实际执行结果和清理证据都会保留。但本地文件所有者仍可能修改文件权限，
+因此这种存储只用于 Dry Run，不被描述为正式不可变证据。
 
-只在进程或容器启动时加载成功时返回 `OVERLAY_ONLY`。只有提供额外的进程内替换证据时
-才允许返回 `HOT_PATCH`。任一执行、加载、正确性、恢复或资源健康检查失败都返回 `NONE`。
+Formal S0-C 必须由部署方注入 verifier-owned `EvidencePublisher`（例如具有保留策略和禁止
+覆盖能力的对象存储）。若 Worker 只有本地发布器，Formal 探针会在执行前失败关闭，不能把
+本地文件包装成正式证据。
 
-当前范围不修改镜像内 `site-packages`，也不触碰 `_C.so`、Driver、DTK、系统
-BLAS/RCCL。
+## 旧 Dry Run 记录
 
-## 控制面接入
-
-创建 `Stage0Run` 时可在 `budget.runtime_probe` 中携带 G0-P/G0-H 配置；控制面会把这份配置
-传给七类 Probe Job，S0-C Adapter 只消费其中的 `profiler` 和 `hotpatch`：
-
-```json
-{
-  "budget": {
-    "runtime_probe": {
-      "profiler": {
-        "profile_workload": "both",
-        "warmup_steps": 10,
-        "num_steps": 5,
-        "triage_work_dir": "/data/hcuopt/stage0/profiler-analysis",
-        "tool_candidates": []
-      },
-      "hotpatch": {
-        "activation_mode": "startup_overlay"
-      }
-    }
-  }
-}
-```
-
-正式运行仍必须由控制面提供独占 Lease、resource ID、fencing token、Target Snapshot 和健康
-cleanup evidence。S0-C 不绕过 #17 的 Barrier，也不根据客户端手填结论宣布通过。
+`docs/evidence/s0-c-nmz36-dry-run-20260820.md` 记录的是旧协议下的探索性运行。它证明了
+Profiler 工具可运行和通用挂载链路可工作，但没有证明真实 SGLang 替换点，也不满足当前
+`nmz36-stage0-v2` 的 Formal 证据要求，因此不能作为 G0-H `OVERLAY_ONLY` 验收结论。

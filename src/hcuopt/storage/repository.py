@@ -187,6 +187,7 @@ class PostgresRepository:
     ) -> dict[str, Any]:
         task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
         run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
+        budget = request.budget.model_dump(mode="json", exclude_none=True)
         with self.connection() as connection:
             snapshot = self._upsert_target_snapshot(connection, target, source_path)
             task = connection.execute(
@@ -207,7 +208,7 @@ class PostgresRepository:
                     request.workload_id,
                     request.idempotency_key,
                     TaskState.STAGE0_PENDING.value,
-                    Jsonb(request.budget),
+                    Jsonb(budget),
                     WorkflowType.STAGE0.value,
                     target.target_id,
                     snapshot["target_snapshot_id"],
@@ -223,7 +224,7 @@ class PostgresRepository:
             expected_task = {
                 "name": request.name,
                 "workload_id": request.workload_id,
-                "budget": request.budget,
+                "budget": budget,
                 "workflow_type": WorkflowType.STAGE0.value,
                 "target_id": target.target_id,
                 "target_snapshot_id": snapshot["target_snapshot_id"],
@@ -287,9 +288,6 @@ class PostgresRepository:
                     "protocol_version": request.protocol_version,
                     "mode": request.mode.value,
                 }
-                runtime_probe = request.budget.get("runtime_probe")
-                if runtime_probe is not None:
-                    payload["runtime_probe"] = runtime_probe
                 connection.execute(
                     """
                     INSERT INTO jobs (

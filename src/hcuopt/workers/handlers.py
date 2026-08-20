@@ -134,7 +134,10 @@ class JobHandlers:
         if payload.get("target_fingerprint") != expected_target_fingerprint:
             raise ExecutionSafetyError("Stage 0 target fingerprint does not match TargetSpec")
         probe = self.adapters.require("stage0_probe")
-        if getattr(probe, "target_fingerprint", None) != expected_target_fingerprint:
+        if (
+            probe.provenance.implementation_kind == "real"
+            and getattr(probe, "target_fingerprint", None) != expected_target_fingerprint
+        ):
             raise ExecutionSafetyError("Stage 0 probe adapter is bound to a different target")
         output = probe.run_probe(payload, self.output_dir)
         result = Stage0ProbeResult(
