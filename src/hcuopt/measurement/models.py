@@ -305,6 +305,9 @@ class DynamicObservationV2(StrictMeasurementModel):
     captured_monotonic_ns: int = Field(ge=0, le=INT64_MAX)
     restart_ordinal: int | None = Field(default=None, ge=0, le=MAX_PLAN_COUNT)
     acquisition_ordinal: int | None = Field(default=None, ge=0, le=MAX_PLAN_COUNT)
+    process_id: int | None = Field(default=None, ge=1, le=INT64_MAX)
+    process_start_token: str | None = Field(default=None, min_length=1, max_length=200)
+    process_alive: bool | None = None
     telemetry: TelemetrySnapshotV2
 
     @model_validator(mode="after")
@@ -324,11 +327,24 @@ class DynamicObservationV2(StrictMeasurementModel):
             raise ValueError(f"{self.phase} observation cannot bind a restart")
         if self.phase not in sample_phases and self.acquisition_ordinal is not None:
             raise ValueError(f"{self.phase} observation cannot bind an acquisition")
+        lifecycle_phases = {"before_restart", "after_restart"}
+        process_fields = (self.process_id, self.process_start_token, self.process_alive)
+        if self.phase in lifecycle_phases and any(value is None for value in process_fields):
+            raise ValueError(f"{self.phase} observation requires process lifecycle identity")
+        if self.phase not in lifecycle_phases and any(
+            value is not None for value in process_fields
+        ):
+            raise ValueError(f"{self.phase} observation cannot contain process lifecycle identity")
+        if self.phase == "before_restart" and self.process_alive is not True:
+            raise ValueError("before_restart must observe a live workload process")
+        if self.phase == "after_restart" and self.process_alive is not False:
+            raise ValueError("after_restart must confirm the workload process exited")
         return self
 
 
 class RawSampleV2(StrictMeasurementModel):
     process_id: int = Field(ge=1, le=INT64_MAX)
+    process_start_token: str = Field(min_length=1, max_length=200)
     restart_ordinal: int = Field(ge=0, le=MAX_PLAN_COUNT)
     arm: Stage0Arm
     segment: Stage0Segment
@@ -416,20 +432,23 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
             ):
                 raise ValueError("device sample ticks must be ordered and non-overlapping")
 
-        process_by_restart: dict[int, int] = {}
+        process_by_restart: dict[int, tuple[int, str]] = {}
         for sample in self.samples:
             if sample.restart_ordinal >= self.plan.restart_count:
                 raise ValueError("sample restart_ordinal is outside the measurement plan")
-            known_process = process_by_restart.setdefault(sample.restart_ordinal, sample.process_id)
-            if known_process != sample.process_id:
-                raise ValueError("one restart group cannot contain multiple process IDs")
+            process_identity = (sample.process_id, sample.process_start_token)
+            known_process = process_by_restart.setdefault(
+                sample.restart_ordinal, process_identity
+            )
+            if known_process != process_identity:
+                raise ValueError("one restart group cannot contain multiple process identities")
             if sample.batch_iterations != self.plan.batch_iterations:
                 raise ValueError("sample batch_iterations does not match the measurement plan")
 
         if set(process_by_restart) != set(range(self.plan.restart_count)):
             raise ValueError("every planned restart must have samples")
         if len(set(process_by_restart.values())) != self.plan.restart_count:
-            raise ValueError("independent restarts require distinct process IDs")
+            raise ValueError("independent restarts require distinct process identities")
 
         observation_keys: set[tuple[ObservationPhase, int | None, int | None]] = set()
         for observation in self.observations:
@@ -504,6 +523,30 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
                     raise ValueError("after_restart telemetry must follow its restart")
 
         for restart_ordinal in range(self.plan.restart_count):
+            expected_process = process_by_restart[restart_ordinal]
+            before_restart_key = ("before_restart", restart_ordinal, None)
+            after_restart_key = ("after_restart", restart_ordinal, None)
+            if (
+                before_restart_key not in observation_keys
+                or after_restart_key not in observation_keys
+            ):
+                raise ValueError(
+                    "every restart requires before_restart and after_restart lifecycle evidence"
+                )
+            lifecycle = {
+                observation.phase: observation
+                for observation in self.observations
+                if observation.restart_ordinal == restart_ordinal
+                and observation.phase in {"before_restart", "after_restart"}
+            }
+            if any(
+                (observation.process_id, observation.process_start_token)
+                != expected_process
+                for observation in lifecycle.values()
+            ):
+                raise ValueError(
+                    "restart lifecycle evidence does not match sample process identity"
+                )
             restart_samples = [
                 sample for sample in self.samples if sample.restart_ordinal == restart_ordinal
             ]

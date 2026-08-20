@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -45,6 +47,7 @@ from hcuopt.evaluation.stage0_statistics import (
     recompute_clock_calibration,
 )
 from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.models import (
     DynamicObservationV2,
     MeasurementEvidenceV2,
@@ -187,16 +190,14 @@ class ProfilerKernelRecordV2(StrictMeasurementModel):
         return value
 
 
-class ProfilerEvidenceV2(_BoundRawEvidence):
-    parser_succeeded: bool
-    kernels: tuple[ProfilerKernelRecordV2, ...] = ()
+class RawEvidenceFileV2(StrictMeasurementModel):
+    uri: str = Field(min_length=1, max_length=4000)
+    sha256: str = Field(pattern=SHA256_PATTERN)
 
-    @field_validator("kernels", mode="before")
-    @classmethod
-    def freeze_kernels(cls, value: object) -> object:
-        if isinstance(value, list):
-            return tuple(value)
-        return value
+
+class ProfilerEvidenceV2(_BoundRawEvidence):
+    parser_version: Literal["rocprof-csv-v1"]
+    raw_output: RawEvidenceFileV2
 
 
 class OverlayMountEvidenceV2(StrictMeasurementModel):
@@ -216,22 +217,77 @@ class OverlayMountEvidenceV2(StrictMeasurementModel):
 
 class HotpatchEvidenceV2(_BoundRawEvidence):
     activation_mode: Literal["runtime_hot_patch", "startup_overlay", "none"]
-    original_state_hash: str = Field(pattern=SHA256_PATTERN)
-    activated_state_hash: str = Field(pattern=SHA256_PATTERN)
-    recovered_state_hash: str = Field(pattern=SHA256_PATTERN)
-    baseline_output_hash: str = Field(pattern=SHA256_PATTERN)
-    activated_output_hash: str = Field(pattern=SHA256_PATTERN)
-    baseline_cache_namespace_hash: str = Field(pattern=SHA256_PATTERN)
-    activated_cache_namespace_hash: str = Field(pattern=SHA256_PATTERN)
+    process_id: int | None = Field(default=None, ge=1)
+    process_start_token: str | None = Field(default=None, min_length=1, max_length=200)
+    source_snapshot: RawEvidenceFileV2 | None = None
+    artifact: RawEvidenceFileV2 | None = None
+    original_state: RawEvidenceFileV2 | None = None
+    activated_state: RawEvidenceFileV2 | None = None
+    recovered_state: RawEvidenceFileV2 | None = None
+    baseline_output: RawEvidenceFileV2 | None = None
+    activated_output: RawEvidenceFileV2 | None = None
+    baseline_cache_namespace: RawEvidenceFileV2 | None = None
+    activated_cache_namespace: RawEvidenceFileV2 | None = None
     overlay_mount: OverlayMountEvidenceV2 | None = None
 
     @model_validator(mode="after")
     def bind_overlay_capability(self) -> HotpatchEvidenceV2:
+        activation_evidence = (
+            self.process_id,
+            self.process_start_token,
+            self.source_snapshot,
+            self.artifact,
+            self.original_state,
+            self.activated_state,
+            self.recovered_state,
+            self.baseline_output,
+            self.activated_output,
+            self.baseline_cache_namespace,
+            self.activated_cache_namespace,
+        )
+        if self.activation_mode == "none" and any(
+            value is not None for value in activation_evidence
+        ):
+            raise ValueError("activation_mode=none cannot claim activation evidence")
+        if self.activation_mode != "none" and any(
+            value is None for value in activation_evidence
+        ):
+            raise ValueError("an activated hotpatch requires complete raw evidence")
         if self.activation_mode == "startup_overlay" and self.overlay_mount is None:
             raise ValueError("startup_overlay requires a verified read-only mount")
         if self.activation_mode != "startup_overlay" and self.overlay_mount is not None:
             raise ValueError("overlay mount evidence is only valid for startup_overlay")
         return self
+
+
+class HotpatchStateEntryV2(StrictMeasurementModel):
+    path: str = Field(min_length=1, max_length=2000)
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @field_validator("path")
+    @classmethod
+    def require_normalized_relative_path(cls, value: str) -> str:
+        parsed = PurePosixPath(value)
+        if parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != value:
+            raise ValueError("hotpatch state paths must be normalized relative paths")
+        return value
+
+
+class HotpatchStateManifestV2(StrictMeasurementModel):
+    schema_version: Literal["hotpatch-state-v1"] = "hotpatch-state-v1"
+    source_hash: str = Field(pattern=SHA256_PATTERN)
+    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    process_id: int = Field(ge=1)
+    process_start_token: str = Field(min_length=1, max_length=200)
+    active: bool
+    entries: tuple[HotpatchStateEntryV2, ...] = Field(min_length=1)
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def freeze_entries(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
 
 
 class Stage0VerificationResult(_VerifierModel):
@@ -294,6 +350,16 @@ class Stage0EvidenceReader:
         """Return verified canonical JSON bytes for strict Pydantic JSON validation."""
 
         encoded, _ = self._read_document(uri, expected_hash)
+        return encoded
+
+    def read_raw_bytes(self, uri: str, expected_hash: str) -> bytes:
+        """Return bounded, securely opened bytes after verifying their SHA-256."""
+
+        path = self._resolve_file_uri(uri)
+        encoded = self._secure_read(path)
+        actual_hash = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        if actual_hash != expected_hash:
+            raise Stage0EvidenceError("evidence_hash_mismatch", f"SHA-256 mismatch: {path}")
         return encoded
 
     def _read_document(self, uri: str, expected_hash: str) -> tuple[bytes, dict[str, Any]]:
@@ -517,17 +583,18 @@ class Stage0Verifier:
             Stage0ProbeType.PROFILER: profiler,
             Stage0ProbeType.HOTPATCH: hotpatch,
         }
-        environment_fingerprints: set[str] = set()
+        expected_environment_fingerprint = stable_fingerprint(
+            context.target.model_dump(mode="json")
+        )
         measurement_ids: set[UUID] = set()
         for probe_type, evidence in parsed.items():
             self._verify_binding(context, by_type[probe_type], evidence)
-            environment_fingerprints.add(evidence.binding.environment_fingerprint)
+            if evidence.binding.environment_fingerprint != expected_environment_fingerprint:
+                raise Stage0EvidenceError(
+                    "environment_fingerprint_mismatch",
+                    f"{probe_type.value} environment fingerprint does not match TargetSpec",
+                )
             measurement_ids.add(evidence.binding.measurement_id)
-        if len(environment_fingerprints) != 1:
-            raise Stage0EvidenceError(
-                "environment_fingerprint_mismatch",
-                "all seven probes must use one environment fingerprint",
-            )
         if len(measurement_ids) != len(Stage0ProbeType):
             raise Stage0EvidenceError(
                 "measurement_id_reused",
@@ -697,18 +764,51 @@ class Stage0Verifier:
                     )
                 )
 
-        profiler_capability = classify_profiler(profiler)
-        hotpatch_capability = classify_hotpatch(hotpatch)
+        profiler_capability = classify_profiler(profiler, self.reader)
+        hotpatch_capability = classify_hotpatch(hotpatch, self.reader)
         unique_failures = _deduplicate_failures(failures)
-        input_evidence = tuple(
+        input_evidence_items = [
             {
                 "probe_record_id": str(by_type[probe_type].probe_record_id),
                 "probe_type": probe_type.value,
+                "kind": "probe_envelope",
                 "uri": by_type[probe_type].raw_evidence_uri,
                 "sha256": by_type[probe_type].raw_evidence_hash,
             }
             for probe_type in sorted(Stage0ProbeType, key=lambda item: item.value)
+        ]
+        input_evidence_items.append(
+            {
+                "probe_type": Stage0ProbeType.PROFILER.value,
+                "kind": "rocprof_raw_output",
+                "uri": profiler.raw_output.uri,
+                "sha256": profiler.raw_output.sha256,
+                "parser_version": profiler.parser_version,
+            }
         )
+        if hotpatch.activation_mode != "none":
+            for field_name in (
+                "source_snapshot",
+                "artifact",
+                "original_state",
+                "activated_state",
+                "recovered_state",
+                "baseline_output",
+                "activated_output",
+                "baseline_cache_namespace",
+                "activated_cache_namespace",
+            ):
+                reference = getattr(hotpatch, field_name)
+                assert reference is not None
+                input_evidence_items.append(
+                    {
+                        "probe_type": Stage0ProbeType.HOTPATCH.value,
+                        "kind": field_name,
+                        "uri": reference.uri,
+                        "sha256": reference.sha256,
+                    }
+                )
+        input_evidence = tuple(input_evidence_items)
         return Stage0VerificationResult(
             protocol_version=self.protocol.protocol_version,
             protocol_hash=self.loaded_protocol.protocol_hash,
@@ -737,7 +837,7 @@ class Stage0Verifier:
                     }
                     for label, value in calibrations.items()
                 },
-                "environment_fingerprint": next(iter(environment_fingerprints)),
+                "environment_fingerprint": expected_environment_fingerprint,
             },
             input_evidence=input_evidence,
             verifier_provenance=self.provenance,
@@ -934,8 +1034,14 @@ class Stage0Verifier:
         return result
 
 
-def classify_profiler(evidence: ProfilerEvidenceV2) -> ProfilerCapability:
-    if not evidence.parser_succeeded or not evidence.kernels:
+def classify_profiler(
+    evidence: ProfilerEvidenceV2,
+    reader: Stage0EvidenceReader,
+) -> ProfilerCapability:
+    kernels = _parse_rocprof_csv(
+        reader.read_raw_bytes(evidence.raw_output.uri, evidence.raw_output.sha256)
+    )
+    if not kernels:
         return ProfilerCapability.NONE
     enriched = all(
         item.shapes
@@ -943,9 +1049,54 @@ def classify_profiler(evidence: ProfilerEvidenceV2) -> ProfilerCapability:
         and item.metadata
         and item.python_source is not None
         and item.hip_symbol is not None
-        for item in evidence.kernels
+        for item in kernels
     )
     return ProfilerCapability.FULL if enriched else ProfilerCapability.DEGRADED
+
+
+def _parse_rocprof_csv(encoded: bytes) -> tuple[ProfilerKernelRecordV2, ...]:
+    fieldnames = (
+        "kernel_name",
+        "duration_ns",
+        "call_count",
+        "shapes",
+        "dtypes",
+        "metadata_json",
+        "python_source",
+        "hip_symbol",
+    )
+    try:
+        text = encoded.decode("utf-8", errors="strict")
+        rows = csv.DictReader(io.StringIO(text, newline=""))
+        if tuple(rows.fieldnames or ()) != fieldnames:
+            raise ValueError("unexpected rocprof CSV header")
+        parsed: list[ProfilerKernelRecordV2] = []
+        for row in rows:
+            if None in row:
+                raise ValueError("rocprof CSV row has extra columns")
+            metadata = json.loads(
+                row["metadata_json"],
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite JSON constant: {value}")
+                ),
+            )
+            if not isinstance(metadata, dict):
+                raise ValueError("rocprof metadata_json must contain an object")
+            parsed.append(
+                ProfilerKernelRecordV2(
+                    kernel_name=row["kernel_name"],
+                    duration_ns=float(row["duration_ns"]),
+                    call_count=int(row["call_count"]),
+                    shapes=tuple(filter(None, row["shapes"].split("|"))),
+                    dtypes=tuple(filter(None, row["dtypes"].split("|"))),
+                    metadata=metadata,
+                    python_source=row["python_source"] or None,
+                    hip_symbol=row["hip_symbol"] or None,
+                )
+            )
+    except (UnicodeError, csv.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise Stage0EvidenceError("profiler_raw_invalid", str(exc)) from exc
+    return tuple(parsed)
 
 
 def _verify_claimed_calibration(
@@ -973,23 +1124,90 @@ def _verify_claimed_calibration(
             )
 
 
-def classify_hotpatch(evidence: HotpatchEvidenceV2) -> HotPatchCapability:
+def classify_hotpatch(
+    evidence: HotpatchEvidenceV2,
+    reader: Stage0EvidenceReader,
+) -> HotPatchCapability:
+    if evidence.activation_mode == "none":
+        return HotPatchCapability.NONE
+    assert evidence.process_id is not None
+    assert evidence.process_start_token is not None
+    assert evidence.source_snapshot is not None
+    assert evidence.artifact is not None
+    assert evidence.original_state is not None
+    assert evidence.activated_state is not None
+    assert evidence.recovered_state is not None
+    assert evidence.baseline_output is not None
+    assert evidence.activated_output is not None
+    assert evidence.baseline_cache_namespace is not None
+    assert evidence.activated_cache_namespace is not None
+    source_snapshot = reader.read_raw_bytes(
+        evidence.source_snapshot.uri, evidence.source_snapshot.sha256
+    )
+    artifact = reader.read_raw_bytes(evidence.artifact.uri, evidence.artifact.sha256)
+    original = _read_hotpatch_state(reader, evidence.original_state)
+    activated = _read_hotpatch_state(reader, evidence.activated_state)
+    recovered = _read_hotpatch_state(reader, evidence.recovered_state)
+    baseline_output = reader.read_raw_bytes(
+        evidence.baseline_output.uri, evidence.baseline_output.sha256
+    )
+    activated_output = reader.read_raw_bytes(
+        evidence.activated_output.uri, evidence.activated_output.sha256
+    )
+    baseline_cache = reader.read_raw_bytes(
+        evidence.baseline_cache_namespace.uri,
+        evidence.baseline_cache_namespace.sha256,
+    )
+    activated_cache = reader.read_raw_bytes(
+        evidence.activated_cache_namespace.uri,
+        evidence.activated_cache_namespace.sha256,
+    )
+    identity = (evidence.process_id, evidence.process_start_token)
+    manifests = (original, activated, recovered)
     safe = all(
         (
-            evidence.activated_state_hash != evidence.original_state_hash,
-            evidence.recovered_state_hash == evidence.original_state_hash,
-            evidence.activated_output_hash == evidence.baseline_output_hash,
-            evidence.activated_cache_namespace_hash
-            != evidence.baseline_cache_namespace_hash,
+            bool(source_snapshot),
+            bool(artifact),
+            all(
+                (manifest.process_id, manifest.process_start_token) == identity
+                for manifest in manifests
+            ),
+            all(manifest.source_hash == evidence.source_snapshot.sha256 for manifest in manifests),
+            original.active is False,
+            original.artifact_hash is None,
+            activated.active is True,
+            activated.artifact_hash == evidence.artifact.sha256,
+            recovered.active is False,
+            recovered.artifact_hash is None,
+            original.entries == recovered.entries,
+            activated.entries != original.entries,
+            baseline_output == activated_output,
+            baseline_cache != activated_cache,
         )
     )
     if not safe:
+        return HotPatchCapability.NONE
+    if (
+        evidence.overlay_mount is not None
+        and evidence.overlay_mount.source_hash != evidence.artifact.sha256
+    ):
         return HotPatchCapability.NONE
     if evidence.activation_mode == "runtime_hot_patch":
         return HotPatchCapability.HOT_PATCH
     if evidence.activation_mode == "startup_overlay":
         return HotPatchCapability.OVERLAY_ONLY
     return HotPatchCapability.NONE
+
+
+def _read_hotpatch_state(
+    reader: Stage0EvidenceReader,
+    reference: RawEvidenceFileV2,
+) -> HotpatchStateManifestV2:
+    encoded = reader.read_bytes(reference.uri, reference.sha256)
+    try:
+        return HotpatchStateManifestV2.model_validate_json(encoded)
+    except ValidationError as exc:
+        raise Stage0EvidenceError("hotpatch_state_invalid", str(exc)) from exc
 
 
 def target_fingerprint(target: TargetSpec) -> str:

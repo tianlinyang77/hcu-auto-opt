@@ -23,7 +23,10 @@ hash, metric, unit, measurement ID, exclusive lease, resource, fencing token,
 and real adapter provenance. Timing evidence also stores the complete plan,
 raw clock calibration points, process identity for every restart, acquisition
 order, ABBA arm and segment identity, device ticks, batching, and typed
-environment observations.
+environment observations. A process identity is the pair `(pid,
+process_start_token)`, not a PID alone. Every restart must include a
+`before_restart` observation proving that identity was live and an
+`after_restart` observation confirming it exited.
 
 Clock conversion is independently fitted by ordinary least squares over at
 least three raw `(device_ticks, host_midpoint_ns)` points. The maximum absolute
@@ -63,12 +66,16 @@ are not the repository's canonical representation.
 The verifier derives three typed inputs:
 
 - measurement trust from noise, known-signal and null-signal evidence;
-- profiler capability (`full`, `degraded`, or `none`) from raw profiler fields;
+- profiler capability (`full`, `degraded`, or `none`) by re-reading the bound
+  rocprof output and parsing it with the recorded parser version; producer
+  parser booleans and processed kernel lists are not trusted;
 - hot-patch capability (`hot_patch`, `overlay_only`, or `none`) from activation,
-  correctness, cache isolation, recovery and cleanup evidence. D derives these
-  checks from state, output and cache-namespace hash relations; producer-owned
-  pass/fail booleans are not accepted. Overlay-only capability additionally
-  requires a safe, normalized, bound read-only mount record.
+  correctness, cache isolation, recovery and cleanup evidence. D re-hashes the
+  source snapshot and Artifact, parses the before/activated/recovered state
+  manifests, checks their process identity, and compares the referenced output
+  and cache-namespace bytes. Producer-owned hashes or pass/fail booleans are not
+  accepted. Overlay-only capability additionally requires a safe, normalized,
+  bound read-only mount record.
 
 It does not choose `ProjectMode`. The control-plane Barrier combines those
 three inputs with the existing four-mode mapping. Producer-provided database

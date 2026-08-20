@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
+import json
 import os
+import stat
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +44,7 @@ from hcuopt.evaluation.stage0_verifier import (
     verification_input_digest,
 )
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence
+from hcuopt.measurement.fingerprint import stable_fingerprint
 
 requires_posix_reader = pytest.mark.skipif(
     os.name != "posix",
@@ -160,7 +165,7 @@ def _binding(
         "target_snapshot_id": str(TARGET_SNAPSHOT_ID),
         "target_id": target.target_id,
         "target_fingerprint": target_fingerprint(target),
-        "environment_fingerprint": SHA_B,
+        "environment_fingerprint": stable_fingerprint(target.model_dump(mode="json")),
         "workload_id": WORKLOAD_ID,
         "probe_type": probe_type.value,
         "run_mode": Stage0RunMode.FORMAL.value,
@@ -242,6 +247,7 @@ def _samples(
                 result.append(
                     {
                         "process_id": 10_000 + restart,
+                        "process_start_token": f"fixture-process-{restart}",
                         "restart_ordinal": restart,
                         "arm": arm,
                         "segment": segment,
@@ -280,6 +286,66 @@ def _measurement_evidence(
     else:
         segment_order = ("A1", "B1", "B2", "A2")
         samples_per_segment = 10
+    samples = _samples(
+        segment_order=segment_order,
+        samples_per_segment=samples_per_segment,
+        restart_values=restart_values,
+        comparison_effect=comparison_effect,
+        outlier_count=outlier_count,
+    )
+    observations: list[dict[str, Any]] = [
+        {
+            "phase": "before_run",
+            "captured_monotonic_ns": 1_000_000,
+            "restart_ordinal": None,
+            "acquisition_ordinal": None,
+            "process_id": None,
+            "process_start_token": None,
+            "process_alive": None,
+            "telemetry": before_telemetry or _telemetry(),
+        }
+    ]
+    for restart in range(10):
+        restart_samples = [item for item in samples if item["restart_ordinal"] == restart]
+        process_id = 10_000 + restart
+        process_start_token = f"fixture-process-{restart}"
+        observations.extend(
+            (
+                {
+                    "phase": "before_restart",
+                    "captured_monotonic_ns": restart_samples[0]["started_monotonic_ns"] - 10,
+                    "restart_ordinal": restart,
+                    "acquisition_ordinal": None,
+                    "process_id": process_id,
+                    "process_start_token": process_start_token,
+                    "process_alive": True,
+                    "telemetry": before_telemetry or _telemetry(),
+                },
+                {
+                    "phase": "after_restart",
+                    "captured_monotonic_ns": restart_samples[-1]["finished_monotonic_ns"] + 10,
+                    "restart_ordinal": restart,
+                    "acquisition_ordinal": None,
+                    "process_id": process_id,
+                    "process_start_token": process_start_token,
+                    "process_alive": False,
+                    "telemetry": after_telemetry or _telemetry(),
+                },
+            )
+        )
+    observations.append(
+        {
+            "phase": "after_run",
+            "captured_monotonic_ns": 1_000_000_000,
+            "restart_ordinal": None,
+            "acquisition_ordinal": None,
+            "process_id": None,
+            "process_start_token": None,
+            "process_alive": None,
+            "telemetry": after_telemetry or _telemetry(),
+        }
+    )
+    observations.sort(key=lambda item: item["captured_monotonic_ns"])
     return {
         "schema_version": "measurement-evidence-v2",
         "binding": _binding(probe_type, protocol, target),
@@ -294,29 +360,8 @@ def _measurement_evidence(
             timer_resolution_ns=timer_resolution_ns,
             max_residual_ns=max_residual_ns,
         ),
-        "samples": _samples(
-            segment_order=segment_order,
-            samples_per_segment=samples_per_segment,
-            restart_values=restart_values,
-            comparison_effect=comparison_effect,
-            outlier_count=outlier_count,
-        ),
-        "observations": [
-            {
-                "phase": "before_run",
-                "captured_monotonic_ns": 1_000_000,
-                "restart_ordinal": None,
-                "acquisition_ordinal": None,
-                "telemetry": before_telemetry or _telemetry(),
-            },
-            {
-                "phase": "after_run",
-                "captured_monotonic_ns": 1_000_000_000,
-                "restart_ordinal": None,
-                "acquisition_ordinal": None,
-                "telemetry": after_telemetry or _telemetry(),
-            },
-        ],
+        "samples": samples,
+        "observations": observations,
         "adapter_provenance": [PROVENANCE.model_dump(mode="json")],
         "synthetic": False,
     }
@@ -406,33 +451,122 @@ def _raw_suite(
         Stage0ProbeType.PROFILER: {
             **common,
             "binding": _binding(Stage0ProbeType.PROFILER, protocol, target),
-            "parser_succeeded": True,
-            "kernels": [
-                {
-                    "kernel_name": "hgemm_128x128",
-                    "duration_ns": 900.0,
-                    "call_count": 10,
-                    "shapes": ["1x128x128"],
-                    "dtypes": ["float16"],
-                    "metadata": {"grid": "128x1x1"},
-                    "python_source": "model.layers.0.mlp",
-                    "hip_symbol": "_Z17hgemm_128x128v",
-                }
-            ],
+            "parser_version": "rocprof-csv-v1",
         },
         Stage0ProbeType.HOTPATCH: {
             **common,
             "binding": _binding(Stage0ProbeType.HOTPATCH, protocol, target),
             "activation_mode": "runtime_hot_patch",
-            "original_state_hash": SHA_A,
-            "activated_state_hash": SHA_B,
-            "recovered_state_hash": SHA_A,
-            "baseline_output_hash": SHA_C,
-            "activated_output_hash": SHA_C,
-            "baseline_cache_namespace_hash": SHA_C,
-            "activated_cache_namespace_hash": SHA_D,
+            "process_id": 20_001,
+            "process_start_token": "hotpatch-process-1",
         },
     }
+
+
+def _raw_file_reference(path: Path, encoded: bytes) -> dict[str, str]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(encoded)
+    return {"uri": path.as_uri(), "sha256": _hash_bytes(encoded)}
+
+
+def _profiler_csv_bytes(
+    *,
+    metadata_json: str = '{"grid":"128x1x1"}',
+    python_source: str = "model.layers.0.mlp",
+    hip_symbol: str = "_Z17hgemm_128x128v",
+    include_kernel: bool = True,
+) -> bytes:
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(
+        (
+            "kernel_name",
+            "duration_ns",
+            "call_count",
+            "shapes",
+            "dtypes",
+            "metadata_json",
+            "python_source",
+            "hip_symbol",
+        )
+    )
+    if include_kernel:
+        writer.writerow(
+            (
+                "hgemm_128x128",
+                "900.0",
+                "10",
+                "1x128x128",
+                "float16",
+                metadata_json,
+                python_source,
+                hip_symbol,
+            )
+        )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _write_capability_auxiliary_evidence(
+    evidence_root: Path,
+    raw: dict[Stage0ProbeType, dict[str, Any]],
+) -> None:
+    raw[Stage0ProbeType.PROFILER]["raw_output"] = _raw_file_reference(
+        evidence_root / Stage0ProbeType.PROFILER.value / "rocprof.csv",
+        _profiler_csv_bytes(),
+    )
+
+    hotpatch_root = evidence_root / Stage0ProbeType.HOTPATCH.value
+    source_snapshot = _raw_file_reference(
+        hotpatch_root / "source.snapshot", b"locked source snapshot\n"
+    )
+    artifact = _raw_file_reference(hotpatch_root / "noop.artifact", b"noop artifact\n")
+    process = {"process_id": 20_001, "process_start_token": "hotpatch-process-1"}
+    original_state = {
+        "schema_version": "hotpatch-state-v1",
+        "source_hash": source_snapshot["sha256"],
+        "artifact_hash": None,
+        **process,
+        "active": False,
+        "entries": [{"path": "lib/kernel.so", "sha256": SHA_A}],
+    }
+    activated_state = {
+        "schema_version": "hotpatch-state-v1",
+        "source_hash": source_snapshot["sha256"],
+        "artifact_hash": artifact["sha256"],
+        **process,
+        "active": True,
+        "entries": [{"path": "lib/kernel.so", "sha256": SHA_B}],
+    }
+    output = canonical_json_bytes({"tokens": [1, 2, 3], "text": "fixture"})
+    raw[Stage0ProbeType.HOTPATCH].update(
+        {
+            "source_snapshot": source_snapshot,
+            "artifact": artifact,
+            "original_state": _raw_file_reference(
+                hotpatch_root / "state-original.json", canonical_json_bytes(original_state)
+            ),
+            "activated_state": _raw_file_reference(
+                hotpatch_root / "state-activated.json", canonical_json_bytes(activated_state)
+            ),
+            "recovered_state": _raw_file_reference(
+                hotpatch_root / "state-recovered.json", canonical_json_bytes(original_state)
+            ),
+            "baseline_output": _raw_file_reference(
+                hotpatch_root / "output-baseline.json", output
+            ),
+            "activated_output": _raw_file_reference(
+                hotpatch_root / "output-activated.json", output
+            ),
+            "baseline_cache_namespace": _raw_file_reference(
+                hotpatch_root / "cache-baseline.json",
+                canonical_json_bytes({"namespace": "baseline"}),
+            ),
+            "activated_cache_namespace": _raw_file_reference(
+                hotpatch_root / "cache-activated.json",
+                canonical_json_bytes({"namespace": "activated"}),
+            ),
+        }
+    )
 
 
 @dataclass
@@ -448,6 +582,7 @@ class _Suite:
         # Production evidence is write-once. These negative tests intentionally
         # replace a temporary fixture before verification to model a producer
         # that published malformed or incorrectly bound raw evidence.
+        self.paths[probe_type].chmod(stat.S_IREAD | stat.S_IWRITE)
         self.paths[probe_type].unlink()
         artifact = write_evidence(self.paths[probe_type], self.raw[probe_type])
         self.references[probe_type] = self.references[probe_type].model_copy(
@@ -477,6 +612,7 @@ def _build_suite(tmp_path: Path, **raw_options: Any) -> _Suite:
     evidence_root = tmp_path / "results" / "stage0" / str(RUN_ID)
     evidence_root.mkdir(parents=True)
     raw = _raw_suite(protocol, target, **raw_options)
+    _write_capability_auxiliary_evidence(evidence_root, raw)
     paths: dict[Stage0ProbeType, Path] = {}
     references: dict[Stage0ProbeType, Stage0ProbeEvidenceReference] = {}
     for probe_type in Stage0ProbeType:
@@ -650,7 +786,9 @@ def test_seven_probe_canonical_evidence_is_recomputed_to_full_pass(tmp_path: Pat
     assert result.mde_ratio == 0.0
     assert result.statistics["known_signal"]["effect_ratio"] == pytest.approx(0.12)
     assert result.statistics["null_signal"]["effect_ratio"] == 0.0
-    assert len(result.input_evidence) == 7
+    assert sum(item["kind"] == "probe_envelope" for item in result.input_evidence) == 7
+    assert any(item["kind"] == "rocprof_raw_output" for item in result.input_evidence)
+    assert any(item["kind"] == "artifact" for item in result.input_evidence)
     assert result.verifier_provenance.implementation_kind == "real"
 
 
@@ -756,6 +894,50 @@ def test_raw_identity_binding_mismatch_is_rejected(
     with pytest.raises(Stage0EvidenceError) as caught:
         suite.verify()
     assert caught.value.code == "evidence_binding_mismatch"
+
+
+def test_shared_environment_hash_must_still_match_the_target_snapshot(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path)
+    for probe_type in Stage0ProbeType:
+        suite.raw[probe_type]["binding"]["environment_fingerprint"] = SHA_A
+        suite.rewrite(probe_type)
+
+    with pytest.raises(Stage0EvidenceError) as caught:
+        suite.verify()
+
+    assert caught.value.code == "environment_fingerprint_mismatch"
+
+
+def test_restart_process_token_must_match_lifecycle_evidence(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path)
+    noise = suite.raw[Stage0ProbeType.NOISE]
+    for sample in noise["samples"]:
+        if sample["restart_ordinal"] == 0:
+            sample["process_start_token"] = "forged-start-token"
+    suite.rewrite(Stage0ProbeType.NOISE)
+
+    with pytest.raises(Stage0EvidenceError) as caught:
+        suite.verify()
+
+    assert caught.value.code == "evidence_schema_invalid"
+
+
+def test_each_restart_requires_confirmed_process_exit(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path)
+    noise = suite.raw[Stage0ProbeType.NOISE]
+    after_restart = next(
+        observation
+        for observation in noise["observations"]
+        if observation["phase"] == "after_restart"
+        and observation["restart_ordinal"] == 0
+    )
+    after_restart["process_alive"] = True
+    suite.rewrite(Stage0ProbeType.NOISE)
+
+    with pytest.raises(Stage0EvidenceError) as caught:
+        suite.verify()
+
+    assert caught.value.code == "evidence_schema_invalid"
 
 
 def test_context_target_mutation_is_detected_before_verification(tmp_path: Path) -> None:
@@ -1047,20 +1229,40 @@ def test_cache_must_be_cleared_and_consistent_across_probes(tmp_path: Path) -> N
 def test_profiler_classification_covers_full_degraded_and_none(tmp_path: Path) -> None:
     suite = _build_suite(tmp_path)
     raw = suite.raw[Stage0ProbeType.PROFILER]
+    reader = _verifier_reader(suite.root)
 
     full = _parse_profiler(raw)
     degraded_raw = deepcopy(raw)
-    degraded_raw["kernels"][0]["metadata"] = {}
-    degraded_raw["kernels"][0]["python_source"] = None
+    degraded_raw["raw_output"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.PROFILER.value / "rocprof-degraded.csv",
+        _profiler_csv_bytes(metadata_json="{}", python_source="", hip_symbol=""),
+    )
     degraded = _parse_profiler(degraded_raw)
     none_raw = deepcopy(raw)
-    none_raw["parser_succeeded"] = False
-    none_raw["kernels"] = []
+    none_raw["raw_output"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.PROFILER.value / "rocprof-empty.csv",
+        _profiler_csv_bytes(include_kernel=False),
+    )
     none = _parse_profiler(none_raw)
 
-    assert classify_profiler(full) is ProfilerCapability.FULL
-    assert classify_profiler(degraded) is ProfilerCapability.DEGRADED
-    assert classify_profiler(none) is ProfilerCapability.NONE
+    assert classify_profiler(full, reader) is ProfilerCapability.FULL
+    assert classify_profiler(degraded, reader) is ProfilerCapability.DEGRADED
+    assert classify_profiler(none, reader) is ProfilerCapability.NONE
+
+
+def test_profiler_capability_rejects_unparseable_raw_output(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path)
+    profiler = suite.raw[Stage0ProbeType.PROFILER]
+    profiler["raw_output"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.PROFILER.value / "rocprof-invalid.csv",
+        b"producer-says-parser-succeeded\n",
+    )
+    suite.rewrite(Stage0ProbeType.PROFILER)
+
+    with pytest.raises(Stage0EvidenceError) as caught:
+        suite.verify()
+
+    assert caught.value.code == "profiler_raw_invalid"
 
 
 def test_hotpatch_classification_covers_runtime_overlay_and_unsafe_none(
@@ -1068,24 +1270,61 @@ def test_hotpatch_classification_covers_runtime_overlay_and_unsafe_none(
 ) -> None:
     suite = _build_suite(tmp_path)
     raw = suite.raw[Stage0ProbeType.HOTPATCH]
+    reader = _verifier_reader(suite.root)
 
     runtime = _parse_hotpatch(raw)
     overlay_raw = deepcopy(raw)
     overlay_raw["activation_mode"] = "startup_overlay"
     overlay_raw["overlay_mount"] = {
-        "source_hash": SHA_C,
+        "source_hash": raw["artifact"]["sha256"],
         "target_path": "/opt/hcuopt/overlay",
         "read_only": True,
         "container_id": "stage0-overlay-1",
     }
     overlay = _parse_hotpatch(overlay_raw)
     unsafe_raw = deepcopy(raw)
-    unsafe_raw["activated_output_hash"] = SHA_D
+    unsafe_raw["activated_output"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.HOTPATCH.value / "output-unsafe.json",
+        canonical_json_bytes({"tokens": [9], "text": "regression"}),
+    )
     unsafe = _parse_hotpatch(unsafe_raw)
+    none_raw = deepcopy(raw)
+    none_raw["activation_mode"] = "none"
+    for field_name in (
+        "process_id",
+        "process_start_token",
+        "source_snapshot",
+        "artifact",
+        "original_state",
+        "activated_state",
+        "recovered_state",
+        "baseline_output",
+        "activated_output",
+        "baseline_cache_namespace",
+        "activated_cache_namespace",
+    ):
+        none_raw.pop(field_name)
+    none = _parse_hotpatch(none_raw)
 
-    assert classify_hotpatch(runtime) is HotPatchCapability.HOT_PATCH
-    assert classify_hotpatch(overlay) is HotPatchCapability.OVERLAY_ONLY
-    assert classify_hotpatch(unsafe) is HotPatchCapability.NONE
+    assert classify_hotpatch(runtime, reader) is HotPatchCapability.HOT_PATCH
+    assert classify_hotpatch(overlay, reader) is HotPatchCapability.OVERLAY_ONLY
+    assert classify_hotpatch(unsafe, reader) is HotPatchCapability.NONE
+    assert classify_hotpatch(none, reader) is HotPatchCapability.NONE
+
+
+def test_hotpatch_process_identity_is_recomputed_from_state_manifest(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path)
+    hotpatch = suite.raw[Stage0ProbeType.HOTPATCH]
+    activated_path = suite.root / Stage0ProbeType.HOTPATCH.value / "state-activated.json"
+    activated = json.loads(activated_path.read_text(encoding="utf-8"))
+    activated["process_start_token"] = "different-process"
+    hotpatch["activated_state"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.HOTPATCH.value / "state-wrong-process.json",
+        canonical_json_bytes(activated),
+    )
+    suite.rewrite(Stage0ProbeType.HOTPATCH)
+
+    assert suite.verify().hot_patch is HotPatchCapability.NONE
 
 
 def test_overlay_capability_requires_a_read_only_mount(tmp_path: Path) -> None:
@@ -1099,7 +1338,7 @@ def test_overlay_capability_requires_a_read_only_mount(tmp_path: Path) -> None:
     for unsafe_target in ("/", "/../../etc", "/opt//overlay"):
         mounted = deepcopy(raw)
         mounted["overlay_mount"] = {
-            "source_hash": SHA_C,
+            "source_hash": raw["artifact"]["sha256"],
             "target_path": unsafe_target,
             "read_only": True,
             "container_id": "stage0-overlay-1",

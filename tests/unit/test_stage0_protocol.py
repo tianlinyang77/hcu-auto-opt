@@ -81,6 +81,7 @@ def _evidence() -> MeasurementEvidenceV2:
     samples = tuple(
         RawSampleV2(
             process_id=100 + restart,
+            process_start_token=f"fixture-process-{restart}",
             restart_ordinal=restart,
             arm="single",
             segment="noise",
@@ -137,6 +138,42 @@ def _evidence() -> MeasurementEvidenceV2:
             DynamicObservationV2(
                 phase="before_run",
                 captured_monotonic_ns=900,
+                telemetry=_telemetry(),
+            ),
+            DynamicObservationV2(
+                phase="before_restart",
+                captured_monotonic_ns=950,
+                restart_ordinal=0,
+                process_id=100,
+                process_start_token="fixture-process-0",
+                process_alive=True,
+                telemetry=_telemetry(),
+            ),
+            DynamicObservationV2(
+                phase="after_restart",
+                captured_monotonic_ns=1020,
+                restart_ordinal=0,
+                process_id=100,
+                process_start_token="fixture-process-0",
+                process_alive=False,
+                telemetry=_telemetry(),
+            ),
+            DynamicObservationV2(
+                phase="before_restart",
+                captured_monotonic_ns=1050,
+                restart_ordinal=1,
+                process_id=101,
+                process_start_token="fixture-process-1",
+                process_alive=True,
+                telemetry=_telemetry(),
+            ),
+            DynamicObservationV2(
+                phase="after_restart",
+                captured_monotonic_ns=1120,
+                restart_ordinal=1,
+                process_id=101,
+                process_start_token="fixture-process-1",
+                process_alive=False,
                 telemetry=_telemetry(),
             ),
             DynamicObservationV2(
@@ -232,15 +269,17 @@ def test_raw_v2_is_strict_and_formal_evidence_fails_closed() -> None:
         _binding(lease_scope=LeaseScope.SHARED)
 
     evidence = _evidence()
-    duplicate_process = evidence.model_copy(
-        update={
-            "samples": tuple(
-                sample.model_copy(update={"process_id": 100}) for sample in evidence.samples
-            )
-        }
-    )
-    with pytest.raises(ValidationError, match="distinct process IDs"):
-        MeasurementEvidenceV2.model_validate(duplicate_process.model_dump(mode="python"))
+    duplicate_process = evidence.model_dump(mode="python")
+    for sample in duplicate_process["samples"]:
+        if sample["restart_ordinal"] == 1:
+            sample["process_id"] = 100
+            sample["process_start_token"] = "fixture-process-0"
+    for observation in duplicate_process["observations"]:
+        if observation["restart_ordinal"] == 1:
+            observation["process_id"] = 100
+            observation["process_start_token"] = "fixture-process-0"
+    with pytest.raises(ValidationError, match="distinct process identities"):
+        MeasurementEvidenceV2.model_validate(duplicate_process)
 
     huge_tick = evidence.model_dump(mode="python")
     huge_tick["calibration"]["points"][2]["device_ticks"] = 10**1000
@@ -260,7 +299,7 @@ def test_formal_observations_are_unique_ordered_and_plan_bound() -> None:
         update={
             "observations": (
                 evidence.observations[0].model_copy(update={"captured_monotonic_ns": 3_000}),
-                evidence.observations[1],
+                *evidence.observations[1:],
             )
         }
     )
@@ -271,7 +310,10 @@ def test_formal_observations_are_unique_ordered_and_plan_bound() -> None:
         update={
             "observations": (
                 evidence.observations[0].model_copy(update={"captured_monotonic_ns": 1_001}),
-                evidence.observations[1],
+                evidence.observations[1].model_copy(
+                    update={"captured_monotonic_ns": 1_002}
+                ),
+                *evidence.observations[2:],
             )
         }
     )
@@ -288,10 +330,7 @@ def test_formal_observations_are_unique_ordered_and_plan_bound() -> None:
     unbounded_dry_run = evidence.model_dump(mode="python")
     unbounded_dry_run["binding"]["run_mode"] = Stage0RunMode.DRY_RUN
     unbounded_dry_run["synthetic"] = True
-    unbounded_dry_run["observations"][0]["phase"] = "before_restart"
-    unbounded_dry_run["observations"][0]["restart_ordinal"] = 0
-    unbounded_dry_run["observations"][1]["phase"] = "after_restart"
-    unbounded_dry_run["observations"][1]["restart_ordinal"] = 0
+    unbounded_dry_run["observations"] = unbounded_dry_run["observations"][1:3]
     with pytest.raises(ValidationError, match="exactly one before_run and after_run"):
         MeasurementEvidenceV2.model_validate(unbounded_dry_run)
 
@@ -366,6 +405,7 @@ def test_calibration_and_sample_axes_reject_malformed_order() -> None:
     with pytest.raises(ValidationError, match="requires arm=baseline"):
         RawSampleV2(
             process_id=100,
+            process_start_token="fixture-process-0",
             restart_ordinal=0,
             arm="comparison",
             segment="A1",
