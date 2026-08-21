@@ -14,6 +14,7 @@ from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 import pytest
+import test_runtime_probe_formal_v2 as runtime_fixtures
 import yaml
 from pydantic import ValidationError
 
@@ -56,22 +57,6 @@ from hcuopt.runtime_probes.evidence import DeploymentContentAddressedEvidencePub
 from hcuopt.runtime_probes.overlay import OverlayCapabilityProbe
 from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
 from hcuopt.stage0 import evaluate_stage0
-from tests.unit.test_runtime_probe_formal_v2 import (
-    _Cleaner as RuntimeCleaner,
-)
-from tests.unit.test_runtime_probe_formal_v2 import (
-    _Clock as RuntimeClock,
-)
-from tests.unit.test_runtime_probe_formal_v2 import (
-    _formal_hotpatch_target_and_profile,
-    _FormalOverlayExecutor,
-)
-from tests.unit.test_runtime_probe_formal_v2 import (
-    _Runner as RuntimeRunner,
-)
-from tests.unit.test_runtime_probe_formal_v2 import (
-    _Telemetry as RuntimeTelemetry,
-)
 
 requires_posix_reader = pytest.mark.skipif(
     os.name != "posix",
@@ -1865,19 +1850,19 @@ def test_real_b_and_c_envelopes_cross_the_file_finalizer_barrier(
     tmp_path: Path,
 ) -> None:
     target, runtime_profile, phase_dirs, baseline_implementation, artifact_hash = (
-        _formal_hotpatch_target_and_profile(tmp_path / "producer")
+        runtime_fixtures._formal_hotpatch_target_and_profile(tmp_path / "producer")
     )
     runtime_profile = runtime_profile.model_copy(update={"profile": PROFILE})
     suite = _build_suite(tmp_path / "suite", target=target)
-    cleaner = RuntimeCleaner()
-    executor = _FormalOverlayExecutor(
+    cleaner = runtime_fixtures._Cleaner()
+    executor = runtime_fixtures._FormalOverlayExecutor(
         phase_dirs,
         baseline_implementation,
         artifact_hash,
     )
     adapter = RuntimeProbeAdapter(
         ProfilerCapabilityProbe(
-            RuntimeRunner(
+            runtime_fixtures._Runner(
                 [
                     b"rocprofiler-sdk 0.6\n",
                     (
@@ -1892,8 +1877,8 @@ def test_real_b_and_c_envelopes_cross_the_file_finalizer_barrier(
         target,
         runtime_profile,
         DeploymentContentAddressedEvidencePublisher(suite.root),
-        RuntimeTelemetry(),
-        RuntimeClock(),
+        runtime_fixtures._Telemetry(),
+        runtime_fixtures._Clock(),
     )
 
     def payload(probe_type: Stage0ProbeType) -> dict[str, Any]:
