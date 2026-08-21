@@ -342,6 +342,10 @@ def run_smoke(
                     process,
                 )
                 server_pid = int(lifecycle_start["process_id"])
+                # The lifecycle child starts the real server in its own session.
+                # Cleanup targets that server group while leaving the observer alive
+                # long enough to persist the raw waitpid result.
+                process_group_id = server_pid
             start_record = {
                 "status": "started",
                 "started_at": utc_now(),
@@ -715,11 +719,12 @@ def _wait_for_posix_group_exit(
     while True:
         process.poll()
         if not _posix_group_exists(process_group_id, process):
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                process.wait(timeout=0)
+                process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
-                pass
-            return True
+                return False
+            return process.returncode is not None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -914,6 +919,7 @@ def _lifecycle_child_main(argv: Sequence[str]) -> int:
         command,
         stdin=subprocess.DEVNULL,
         shell=False,
+        start_new_session=True,
     )
     proc_stat_line = Path(f"/proc/{child.pid}/stat").read_text(encoding="utf-8").strip()
     observer_pid = os.getpid()
@@ -934,7 +940,7 @@ def _lifecycle_child_main(argv: Sequence[str]) -> int:
 
     def relay(signum: int, _frame: FrameType | None) -> None:
         try:
-            os.kill(child.pid, signum)
+            os.killpg(child.pid, signum)
         except ProcessLookupError:
             pass
 
