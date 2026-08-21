@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -18,7 +19,15 @@ from pydantic import ConfigDict, Field, ValidationError, field_validator, model_
 
 from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.base import ContractModel
-from hcuopt.contracts.platform_v1 import SHA256_PATTERN, AdapterProvenance, TargetSpec
+from hcuopt.contracts.platform_v1 import (
+    SHA256_PATTERN,
+    AdapterProvenance,
+    ArtifactManifest,
+    ExecutionRequest,
+    ExecutionResult,
+    SourceSnapshot,
+    TargetSpec,
+)
 from hcuopt.domain.enums import (
     GateResult,
     HotPatchCapability,
@@ -51,6 +60,7 @@ from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.models import (
     DynamicObservationV2,
     MeasurementEvidenceV2,
+    RawEvidenceFileV2,
     Stage0AdapterProvenance,
     Stage0EvidenceBinding,
     StrictMeasurementModel,
@@ -190,17 +200,25 @@ class ProfilerKernelRecordV2(StrictMeasurementModel):
         return value
 
 
-class RawEvidenceFileV2(StrictMeasurementModel):
-    uri: str = Field(min_length=1, max_length=4000)
-    sha256: str = Field(pattern=SHA256_PATTERN)
-
-
 class ProfilerEvidenceV2(_BoundRawEvidence):
-    parser_version: Literal["rocprof-csv-v1"]
+    tool_name: Literal["rocprof", "profile-llm-torch"]
+    parser_version: Literal["rocprof-csv-v1", "torch-trace-v1"]
+    tool_version_output: RawEvidenceFileV2
     raw_output: RawEvidenceFileV2
+
+    @model_validator(mode="after")
+    def bind_tool_to_parser(self) -> ProfilerEvidenceV2:
+        expected = {
+            "rocprof": "rocprof-csv-v1",
+            "profile-llm-torch": "torch-trace-v1",
+        }
+        if expected[self.tool_name] != self.parser_version:
+            raise ValueError("profiler tool and parser version do not match")
+        return self
 
 
 class OverlayMountEvidenceV2(StrictMeasurementModel):
+    source_uri: str = Field(min_length=1, max_length=4000)
     source_hash: str = Field(pattern=SHA256_PATTERN)
     target_path: str = Field(pattern=r"^/[^\x00]*$")
     read_only: Literal[True]
@@ -217,41 +235,31 @@ class OverlayMountEvidenceV2(StrictMeasurementModel):
 
 class HotpatchEvidenceV2(_BoundRawEvidence):
     activation_mode: Literal["runtime_hot_patch", "startup_overlay", "none"]
-    process_id: int | None = Field(default=None, ge=1)
-    process_start_token: str | None = Field(default=None, min_length=1, max_length=200)
-    source_snapshot: RawEvidenceFileV2 | None = None
+    baseline_source: RawEvidenceFileV2 | None = None
+    candidate_source: RawEvidenceFileV2 | None = None
+    artifact_manifest: RawEvidenceFileV2 | None = None
     artifact: RawEvidenceFileV2 | None = None
-    original_state: RawEvidenceFileV2 | None = None
-    activated_state: RawEvidenceFileV2 | None = None
-    recovered_state: RawEvidenceFileV2 | None = None
-    baseline_output: RawEvidenceFileV2 | None = None
-    activated_output: RawEvidenceFileV2 | None = None
-    baseline_cache_namespace: RawEvidenceFileV2 | None = None
-    activated_cache_namespace: RawEvidenceFileV2 | None = None
+    baseline_state: RawEvidenceFileV2 | None = None
+    candidate_state: RawEvidenceFileV2 | None = None
+    recovery_state: RawEvidenceFileV2 | None = None
     overlay_mount: OverlayMountEvidenceV2 | None = None
 
     @model_validator(mode="after")
     def bind_overlay_capability(self) -> HotpatchEvidenceV2:
         activation_evidence = (
-            self.process_id,
-            self.process_start_token,
-            self.source_snapshot,
+            self.baseline_source,
+            self.candidate_source,
+            self.artifact_manifest,
             self.artifact,
-            self.original_state,
-            self.activated_state,
-            self.recovered_state,
-            self.baseline_output,
-            self.activated_output,
-            self.baseline_cache_namespace,
-            self.activated_cache_namespace,
+            self.baseline_state,
+            self.candidate_state,
+            self.recovery_state,
         )
         if self.activation_mode == "none" and any(
             value is not None for value in activation_evidence
         ):
             raise ValueError("activation_mode=none cannot claim activation evidence")
-        if self.activation_mode != "none" and any(
-            value is None for value in activation_evidence
-        ):
+        if self.activation_mode != "none" and any(value is None for value in activation_evidence):
             raise ValueError("an activated hotpatch requires complete raw evidence")
         if self.activation_mode == "startup_overlay" and self.overlay_mount is None:
             raise ValueError("startup_overlay requires a verified read-only mount")
@@ -262,7 +270,7 @@ class HotpatchEvidenceV2(_BoundRawEvidence):
 
 class HotpatchStateEntryV2(StrictMeasurementModel):
     path: str = Field(min_length=1, max_length=2000)
-    sha256: str = Field(pattern=SHA256_PATTERN)
+    content: RawEvidenceFileV2
 
     @field_validator("path")
     @classmethod
@@ -273,20 +281,93 @@ class HotpatchStateEntryV2(StrictMeasurementModel):
         return value
 
 
-class HotpatchStateManifestV2(StrictMeasurementModel):
-    schema_version: Literal["hotpatch-state-v1"] = "hotpatch-state-v1"
-    source_hash: str = Field(pattern=SHA256_PATTERN)
-    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+class HotpatchPhaseManifestV2(StrictMeasurementModel):
+    schema_version: Literal["hotpatch-phase-v2"] = "hotpatch-phase-v2"
+    phase: Literal["baseline", "candidate", "recovery"]
+    source_snapshot_id: UUID
+    execution_request: ExecutionRequest
+    execution_result: ExecutionResult
     process_id: int = Field(ge=1)
     process_start_token: str = Field(min_length=1, max_length=200)
-    active: bool
+    process_start_record: RawEvidenceFileV2
+    process_exit_record: RawEvidenceFileV2
+    container_id: str = Field(min_length=1, max_length=200)
     entries: tuple[HotpatchStateEntryV2, ...] = Field(min_length=1)
+    output: RawEvidenceFileV2
+    normalized_output: RawEvidenceFileV2
+    cache_namespace: RawEvidenceFileV2
 
     @field_validator("entries", mode="before")
     @classmethod
     def freeze_entries(cls, value: object) -> object:
         if isinstance(value, list):
             return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def bind_execution(self) -> HotpatchPhaseManifestV2:
+        if self.execution_result.request_id != self.execution_request.request_id:
+            raise ValueError("hotpatch phase result does not match its execution request")
+        if (
+            self.execution_result.status != "succeeded"
+            or self.execution_result.exit_code != 0
+            or self.execution_result.synthetic
+            or self.execution_result.adapter_provenance.implementation_kind != "real"
+        ):
+            raise ValueError("hotpatch phase requires a successful real execution")
+        if self.execution_result.metadata.get("container_name") != self.container_id:
+            raise ValueError("hotpatch container does not match execution metadata")
+        if self.execution_result.stdout_uri != self.output.uri:
+            raise ValueError("hotpatch output must be the execution stdout")
+        paths = [entry.path for entry in self.entries]
+        if len(paths) != len(set(paths)):
+            raise ValueError("hotpatch phase state paths must be unique")
+        return self
+
+
+class ProcessLifecycleRecordV2(StrictMeasurementModel):
+    """Raw executor observation used to derive process identity and reaping."""
+
+    schema_version: Literal["process-lifecycle-v1"] = "process-lifecycle-v1"
+    event: Literal["started", "reaped"]
+    restart_ordinal: int = Field(ge=0)
+    observer_process_id: int = Field(ge=1)
+    process_id: int = Field(ge=1)
+    proc_stat_line: str = Field(min_length=1, max_length=16_384)
+    captured_monotonic_ns: int = Field(ge=0)
+    waitpid_result_pid: int | None = Field(default=None, ge=1)
+    wait_status: int | None = Field(default=None, ge=0, le=0xFFFF)
+
+    @model_validator(mode="after")
+    def bind_wait_result(self) -> ProcessLifecycleRecordV2:
+        wait_fields = (self.waitpid_result_pid, self.wait_status)
+        if self.event == "started" and any(value is not None for value in wait_fields):
+            raise ValueError("process start record cannot contain a wait result")
+        if self.event == "reaped" and any(value is None for value in wait_fields):
+            raise ValueError("process exit record requires raw waitpid result and status")
+        if self.event == "reaped" and self.waitpid_result_pid != self.process_id:
+            raise ValueError("waitpid result does not identify the measured process")
+        return self
+
+
+class HotpatchExecutionObservationV2(StrictMeasurementModel):
+    """Versioned stdout emitted by the process that loaded the implementation."""
+
+    protocol_version: Literal["hcuopt-overlay-result-v2"]
+    activation_marker: str = Field(min_length=1, max_length=200)
+    output_hash: str = Field(pattern=SHA256_PATTERN)
+    workload_kind: Literal["sglang_python_triton"]
+    replacement_point: str = Field(pattern=r"^/[^\x00]*$")
+    implementation_hash: str = Field(pattern=SHA256_PATTERN)
+    process_id: int = Field(ge=1)
+    loaded_artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @field_validator("replacement_point")
+    @classmethod
+    def require_safe_replacement_point(cls, value: str) -> str:
+        parsed = PurePosixPath(value)
+        if parsed == PurePosixPath("/") or ".." in parsed.parts or parsed.as_posix() != value:
+            raise ValueError("replacement point must be a normalized non-root absolute path")
         return value
 
 
@@ -438,9 +519,7 @@ class Stage0EvidenceReader:
     def _secure_read_posix(self, path: Path) -> bytes:
         relative = path.relative_to(self.allowed_root)
         if not relative.parts:
-            raise Stage0EvidenceError(
-                "evidence_not_regular", f"not a regular file: {path}"
-            )
+            raise Stage0EvidenceError("evidence_not_regular", f"not a regular file: {path}")
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         directory_descriptors: list[int] = []
         file_descriptor: int | None = None
@@ -457,12 +536,8 @@ class Stage0EvidenceReader:
             )
             encoded = self._read_bounded_descriptor(file_descriptor, path)
             opened = os.fstat(file_descriptor)
-            current_path = os.stat(
-                relative.parts[-1], dir_fd=current, follow_symlinks=False
-            )
-            if _is_reparse_point(current_path) or not _same_file_identity(
-                opened, current_path
-            ):
+            current_path = os.stat(relative.parts[-1], dir_fd=current, follow_symlinks=False)
+            if _is_reparse_point(current_path) or not _same_file_identity(opened, current_path):
                 raise Stage0EvidenceError(
                     "evidence_changed_during_read",
                     "evidence path identity changed while it was being read",
@@ -481,13 +556,9 @@ class Stage0EvidenceReader:
     def _read_bounded_descriptor(self, descriptor: int, path: Path) -> bytes:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
-            raise Stage0EvidenceError(
-                "evidence_not_regular", f"not a regular file: {path}"
-            )
+            raise Stage0EvidenceError("evidence_not_regular", f"not a regular file: {path}")
         if opened.st_size > self.max_bytes:
-            raise Stage0EvidenceError(
-                "evidence_too_large", f"evidence exceeds size limit: {path}"
-            )
+            raise Stage0EvidenceError("evidence_too_large", f"evidence exceeds size limit: {path}")
         chunks: list[bytes] = []
         remaining = self.max_bytes + 1
         while remaining:
@@ -498,9 +569,7 @@ class Stage0EvidenceReader:
             remaining -= len(chunk)
         encoded = b"".join(chunks)
         if len(encoded) > self.max_bytes:
-            raise Stage0EvidenceError(
-                "evidence_too_large", f"evidence exceeds size limit: {path}"
-            )
+            raise Stage0EvidenceError("evidence_too_large", f"evidence exceeds size limit: {path}")
         finished = os.fstat(descriptor)
         if not _same_file_identity(opened, finished) or finished.st_size != len(encoded):
             raise Stage0EvidenceError(
@@ -604,9 +673,7 @@ class Stage0Verifier:
             (evidence.binding.metric_name, evidence.binding.unit)
             for evidence in (timer, noise, known, null)
         }
-        expected_timing_metric = {
-            (self.protocol.timing_metric_name, self.protocol.timing_unit)
-        }
+        expected_timing_metric = {(self.protocol.timing_metric_name, self.protocol.timing_unit)}
         if timing_metric_units != expected_timing_metric:
             raise Stage0EvidenceError(
                 "metric_binding_mismatch",
@@ -617,6 +684,14 @@ class Stage0Verifier:
         self._verify_measurement_plan(Stage0ProbeType.NOISE, noise)
         self._verify_measurement_plan(Stage0ProbeType.KNOWN_SIGNAL, known)
         self._verify_measurement_plan(Stage0ProbeType.NULL_SIGNAL, null)
+        lifecycle_evidence: list[tuple[str, RawEvidenceFileV2]] = []
+        for label, evidence in (
+            ("timer", timer),
+            ("noise", noise),
+            ("known_signal", known),
+            ("null_signal", null),
+        ):
+            lifecycle_evidence.extend(_verify_measurement_lifecycle(label, evidence, self.reader))
 
         try:
             calibrations = {
@@ -765,7 +840,7 @@ class Stage0Verifier:
                 )
 
         profiler_capability = classify_profiler(profiler, self.reader)
-        hotpatch_capability = classify_hotpatch(hotpatch, self.reader)
+        hotpatch_capability = classify_hotpatch(hotpatch, self.reader, context.target)
         unique_failures = _deduplicate_failures(failures)
         input_evidence_items = [
             {
@@ -777,26 +852,42 @@ class Stage0Verifier:
             }
             for probe_type in sorted(Stage0ProbeType, key=lambda item: item.value)
         ]
+        input_evidence_items.extend(
+            {
+                "probe_type": label,
+                "kind": "process_lifecycle_record",
+                "uri": reference.uri,
+                "sha256": reference.sha256,
+            }
+            for label, reference in lifecycle_evidence
+        )
         input_evidence_items.append(
             {
                 "probe_type": Stage0ProbeType.PROFILER.value,
-                "kind": "rocprof_raw_output",
+                "kind": "profiler_raw_output",
                 "uri": profiler.raw_output.uri,
                 "sha256": profiler.raw_output.sha256,
+                "tool_name": profiler.tool_name,
                 "parser_version": profiler.parser_version,
+            }
+        )
+        input_evidence_items.append(
+            {
+                "probe_type": Stage0ProbeType.PROFILER.value,
+                "kind": "profiler_tool_version",
+                "uri": profiler.tool_version_output.uri,
+                "sha256": profiler.tool_version_output.sha256,
             }
         )
         if hotpatch.activation_mode != "none":
             for field_name in (
-                "source_snapshot",
+                "baseline_source",
+                "candidate_source",
+                "artifact_manifest",
                 "artifact",
-                "original_state",
-                "activated_state",
-                "recovered_state",
-                "baseline_output",
-                "activated_output",
-                "baseline_cache_namespace",
-                "activated_cache_namespace",
+                "baseline_state",
+                "candidate_state",
+                "recovery_state",
             ):
                 reference = getattr(hotpatch, field_name)
                 assert reference is not None
@@ -808,6 +899,36 @@ class Stage0Verifier:
                         "sha256": reference.sha256,
                     }
                 )
+            for state_name in ("baseline_state", "candidate_state", "recovery_state"):
+                state_reference = getattr(hotpatch, state_name)
+                assert state_reference is not None
+                phase = _read_hotpatch_phase(self.reader, state_reference)
+                for kind, reference in (
+                    ("process_start_record", phase.process_start_record),
+                    ("process_exit_record", phase.process_exit_record),
+                    ("output", phase.output),
+                    ("cache_namespace", phase.cache_namespace),
+                ):
+                    input_evidence_items.append(
+                        {
+                            "probe_type": Stage0ProbeType.HOTPATCH.value,
+                            "phase": phase.phase,
+                            "kind": kind,
+                            "uri": reference.uri,
+                            "sha256": reference.sha256,
+                        }
+                    )
+                for entry in phase.entries:
+                    input_evidence_items.append(
+                        {
+                            "probe_type": Stage0ProbeType.HOTPATCH.value,
+                            "phase": phase.phase,
+                            "kind": "state_entry",
+                            "path": entry.path,
+                            "uri": entry.content.uri,
+                            "sha256": entry.content.sha256,
+                        }
+                    )
         input_evidence = tuple(input_evidence_items)
         return Stage0VerificationResult(
             protocol_version=self.protocol.protocol_version,
@@ -1038,9 +1159,18 @@ def classify_profiler(
     evidence: ProfilerEvidenceV2,
     reader: Stage0EvidenceReader,
 ) -> ProfilerCapability:
-    kernels = _parse_rocprof_csv(
-        reader.read_raw_bytes(evidence.raw_output.uri, evidence.raw_output.sha256)
+    tool_version = reader.read_raw_bytes(
+        evidence.tool_version_output.uri, evidence.tool_version_output.sha256
     )
+    if not tool_version.strip():
+        raise Stage0EvidenceError("profiler_version_invalid", "profiler version output is empty")
+    raw_output = reader.read_raw_bytes(evidence.raw_output.uri, evidence.raw_output.sha256)
+    if evidence.parser_version == "rocprof-csv-v1":
+        kernels = _parse_rocprof_csv(raw_output)
+    elif evidence.parser_version == "torch-trace-v1":
+        kernels = _parse_torch_trace(raw_output)
+    else:  # pragma: no cover - Literal plus parser/tool validator closes this path.
+        raise Stage0EvidenceError("profiler_parser_unsupported", evidence.parser_version)
     if not kernels:
         return ProfilerCapability.NONE
     enriched = all(
@@ -1055,48 +1185,159 @@ def classify_profiler(
 
 
 def _parse_rocprof_csv(encoded: bytes) -> tuple[ProfilerKernelRecordV2, ...]:
-    fieldnames = (
-        "kernel_name",
-        "duration_ns",
-        "call_count",
-        "shapes",
-        "dtypes",
-        "metadata_json",
-        "python_source",
-        "hip_symbol",
-    )
     try:
         text = encoded.decode("utf-8", errors="strict")
         rows = csv.DictReader(io.StringIO(text, newline=""))
-        if tuple(rows.fieldnames or ()) != fieldnames:
-            raise ValueError("unexpected rocprof CSV header")
+        fieldnames = set(rows.fieldnames or ())
+        trace_header = {"Kernel_Name", "Start_Timestamp", "End_Timestamp"}
+        duration_header = {"Kernel_Name", "DurationNs"}
+        statistics_header = {"Name", "Calls", "TotalDurationNs"}
+        if not any(
+            required.issubset(fieldnames)
+            for required in (trace_header, duration_header, statistics_header)
+        ):
+            raise ValueError("unexpected raw rocprof CSV header")
         parsed: list[ProfilerKernelRecordV2] = []
         for row in rows:
             if None in row:
                 raise ValueError("rocprof CSV row has extra columns")
-            metadata = json.loads(
-                row["metadata_json"],
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"non-finite JSON constant: {value}")
-                ),
-            )
-            if not isinstance(metadata, dict):
-                raise ValueError("rocprof metadata_json must contain an object")
+            name = (row.get("Kernel_Name") or row.get("Name") or "").strip()
+            if not name:
+                continue
+            if row.get("DurationNs") not in (None, ""):
+                duration_ns = float(row["DurationNs"])
+            elif row.get("TotalDurationNs") not in (None, ""):
+                duration_ns = float(row["TotalDurationNs"])
+            else:
+                duration_ns = float(row["End_Timestamp"]) - float(row["Start_Timestamp"])
+            calls = int(row.get("Calls") or 1)
+            metadata = {
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "Kernel_Name",
+                    "Name",
+                    "DurationNs",
+                    "TotalDurationNs",
+                    "Calls",
+                }
+                and value not in (None, "")
+            }
             parsed.append(
                 ProfilerKernelRecordV2(
-                    kernel_name=row["kernel_name"],
-                    duration_ns=float(row["duration_ns"]),
-                    call_count=int(row["call_count"]),
-                    shapes=tuple(filter(None, row["shapes"].split("|"))),
-                    dtypes=tuple(filter(None, row["dtypes"].split("|"))),
+                    kernel_name=name,
+                    duration_ns=duration_ns,
+                    call_count=calls,
+                    shapes=(),
+                    dtypes=(),
                     metadata=metadata,
-                    python_source=row["python_source"] or None,
-                    hip_symbol=row["hip_symbol"] or None,
+                    python_source=None,
+                    hip_symbol=name,
                 )
             )
     except (UnicodeError, csv.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise Stage0EvidenceError("profiler_raw_invalid", str(exc)) from exc
     return tuple(parsed)
+
+
+def _parse_torch_trace(encoded: bytes) -> tuple[ProfilerKernelRecordV2, ...]:
+    try:
+        if encoded.startswith(b"\x1f\x8b"):
+            encoded = gzip.decompress(encoded)
+        value = json.loads(
+            encoded.decode("utf-8", errors="strict"),
+            parse_constant=lambda item: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant: {item}")
+            ),
+        )
+        events = value.get("traceEvents") if isinstance(value, dict) else value
+        if not isinstance(events, list):
+            raise ValueError("PyTorch trace must contain traceEvents")
+        grouped: dict[str, dict[str, Any]] = {}
+        for event in events:
+            if not isinstance(event, dict) or event.get("ph") != "X":
+                continue
+            categories = {
+                item.strip().lower()
+                for item in str(event.get("cat", "")).replace(";", ",").split(",")
+            }
+            if "kernel" not in categories:
+                continue
+            name = str(event.get("name", "")).strip()
+            duration_us = event.get("dur")
+            if (
+                not name
+                or isinstance(duration_us, bool)
+                or not isinstance(duration_us, (int, float))
+                or not math.isfinite(float(duration_us))
+                or float(duration_us) <= 0
+            ):
+                continue
+            args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            record = grouped.setdefault(
+                name,
+                {
+                    "duration_ns": 0.0,
+                    "call_count": 0,
+                    "shapes": set(),
+                    "dtypes": set(),
+                    "metadata": {},
+                    "python_source": None,
+                    "hip_symbol": None,
+                },
+            )
+            record["duration_ns"] += float(duration_us) * 1_000.0
+            record["call_count"] += 1
+            record["shapes"].update(
+                _trace_text_values(args, ("Input Dims", "Input shapes", "shape"))
+            )
+            record["dtypes"].update(_trace_text_values(args, ("Input type", "dtype")))
+            metadata = _trace_first(args, ("Concrete Inputs", "metadata", "meta"))
+            if metadata not in (None, "", [], {}):
+                record["metadata"] = (
+                    metadata if isinstance(metadata, dict) else {"trace_metadata": metadata}
+                )
+            python_source = _trace_first(args, ("Call stack", "python_location"))
+            if python_source not in (None, ""):
+                record["python_source"] = _trace_text(python_source)
+            hip_symbol = _trace_first(args, ("hip_symbol", "hip_api"))
+            if hip_symbol not in (None, ""):
+                record["hip_symbol"] = _trace_text(hip_symbol)
+        return tuple(
+            ProfilerKernelRecordV2(
+                kernel_name=name,
+                duration_ns=record["duration_ns"],
+                call_count=record["call_count"],
+                shapes=tuple(sorted(record["shapes"])),
+                dtypes=tuple(sorted(record["dtypes"])),
+                metadata=record["metadata"],
+                python_source=record["python_source"],
+                hip_symbol=record["hip_symbol"],
+            )
+            for name, record in grouped.items()
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise Stage0EvidenceError("profiler_raw_invalid", str(exc)) from exc
+
+
+def _trace_first(args: dict[str, Any], names: tuple[str, ...]) -> Any:
+    return next((args[name] for name in names if args.get(name) not in (None, "")), None)
+
+
+def _trace_text_values(args: dict[str, Any], names: tuple[str, ...]) -> set[str]:
+    value = _trace_first(args, names)
+    if value in (None, "", [], {}):
+        return set()
+    if isinstance(value, (list, tuple)):
+        return {_trace_text(item) for item in value if item not in (None, "")}
+    return {_trace_text(value)}
+
+
+def _trace_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _verify_claimed_calibration(
@@ -1124,90 +1365,427 @@ def _verify_claimed_calibration(
             )
 
 
+def _verify_measurement_lifecycle(
+    label: str,
+    evidence: MeasurementEvidenceV2,
+    reader: Stage0EvidenceReader,
+) -> list[tuple[str, RawEvidenceFileV2]]:
+    references: list[tuple[str, RawEvidenceFileV2]] = []
+    for restart_ordinal in range(evidence.plan.restart_count):
+        samples = [
+            sample for sample in evidence.samples if sample.restart_ordinal == restart_ordinal
+        ]
+        expected_identity = (samples[0].process_id, samples[0].process_start_token)
+        observations = {
+            observation.phase: observation
+            for observation in evidence.observations
+            if observation.restart_ordinal == restart_ordinal
+            and observation.phase in {"before_restart", "after_restart"}
+        }
+        before = observations["before_restart"]
+        after = observations["after_restart"]
+        assert before.process_lifecycle_record is not None
+        assert after.process_lifecycle_record is not None
+        started = _read_process_lifecycle(reader, before.process_lifecycle_record)
+        reaped = _read_process_lifecycle(reader, after.process_lifecycle_record)
+        if started.event != "started" or reaped.event != "reaped":
+            raise Stage0EvidenceError(
+                "process_lifecycle_invalid",
+                f"{label} restart {restart_ordinal} has invalid lifecycle event order",
+            )
+        if (
+            started.restart_ordinal != restart_ordinal
+            or reaped.restart_ordinal != restart_ordinal
+            or started.process_id != expected_identity[0]
+            or reaped.process_id != expected_identity[0]
+            or started.observer_process_id != reaped.observer_process_id
+        ):
+            raise Stage0EvidenceError(
+                "process_lifecycle_invalid",
+                f"{label} restart {restart_ordinal} lifecycle does not bind the sample process",
+            )
+        start_token = _proc_start_token(started.proc_stat_line, started.process_id)
+        exit_token = _proc_start_token(reaped.proc_stat_line, reaped.process_id)
+        if start_token != expected_identity[1] or exit_token != expected_identity[1]:
+            raise Stage0EvidenceError(
+                "process_lifecycle_invalid",
+                f"{label} restart {restart_ordinal} start token is not derived from procfs",
+            )
+        if (
+            before.captured_monotonic_ns != started.captured_monotonic_ns
+            or after.captured_monotonic_ns != reaped.captured_monotonic_ns
+            or started.captured_monotonic_ns > samples[0].started_monotonic_ns
+            or reaped.captured_monotonic_ns < samples[-1].finished_monotonic_ns
+            or not _terminal_wait_status(reaped.wait_status)
+        ):
+            raise Stage0EvidenceError(
+                "process_lifecycle_invalid",
+                f"{label} restart {restart_ordinal} lacks an ordered terminal wait result",
+            )
+        references.extend(
+            (
+                (f"{label}:restart:{restart_ordinal}:started", before.process_lifecycle_record),
+                (f"{label}:restart:{restart_ordinal}:reaped", after.process_lifecycle_record),
+            )
+        )
+    return references
+
+
+def _read_process_lifecycle(
+    reader: Stage0EvidenceReader,
+    reference: RawEvidenceFileV2,
+) -> ProcessLifecycleRecordV2:
+    encoded = reader.read_bytes(reference.uri, reference.sha256)
+    try:
+        return ProcessLifecycleRecordV2.model_validate_json(encoded)
+    except ValidationError as exc:
+        raise Stage0EvidenceError("process_lifecycle_invalid", str(exc)) from exc
+
+
+def _proc_start_token(proc_stat_line: str, expected_pid: int) -> str:
+    match = re.fullmatch(r"([1-9][0-9]*) \((.*)\) ([A-Za-z]) (.*)", proc_stat_line)
+    if match is None or int(match.group(1)) != expected_pid:
+        raise Stage0EvidenceError(
+            "process_lifecycle_invalid", "procfs stat record does not identify the process"
+        )
+    remaining_fields = match.group(4).split()
+    if len(remaining_fields) < 19:
+        raise Stage0EvidenceError(
+            "process_lifecycle_invalid", "procfs stat record does not contain starttime"
+        )
+    try:
+        start_ticks = int(remaining_fields[18])
+    except ValueError as exc:
+        raise Stage0EvidenceError(
+            "process_lifecycle_invalid", "procfs starttime is not an integer"
+        ) from exc
+    if start_ticks < 1:
+        raise Stage0EvidenceError("process_lifecycle_invalid", "procfs starttime must be positive")
+    return f"linux-proc-startticks:{start_ticks}"
+
+
+def _terminal_wait_status(wait_status: int | None) -> bool:
+    if wait_status is None or not 0 <= wait_status <= 0xFFFF or wait_status == 0xFFFF:
+        return False
+    signal = wait_status & 0x7F
+    if signal == 0:
+        return wait_status & 0xFF == 0
+    if signal == 0x7F:
+        return False
+    return wait_status >> 8 == 0
+
+
 def classify_hotpatch(
     evidence: HotpatchEvidenceV2,
     reader: Stage0EvidenceReader,
+    target: TargetSpec,
 ) -> HotPatchCapability:
     if evidence.activation_mode == "none":
         return HotPatchCapability.NONE
-    assert evidence.process_id is not None
-    assert evidence.process_start_token is not None
-    assert evidence.source_snapshot is not None
+    assert evidence.baseline_source is not None
+    assert evidence.candidate_source is not None
+    assert evidence.artifact_manifest is not None
     assert evidence.artifact is not None
-    assert evidence.original_state is not None
-    assert evidence.activated_state is not None
-    assert evidence.recovered_state is not None
-    assert evidence.baseline_output is not None
-    assert evidence.activated_output is not None
-    assert evidence.baseline_cache_namespace is not None
-    assert evidence.activated_cache_namespace is not None
-    source_snapshot = reader.read_raw_bytes(
-        evidence.source_snapshot.uri, evidence.source_snapshot.sha256
+    assert evidence.baseline_state is not None
+    assert evidence.candidate_state is not None
+    assert evidence.recovery_state is not None
+    baseline_source = _read_contract(
+        reader, evidence.baseline_source, SourceSnapshot, "hotpatch_baseline_source_invalid"
+    )
+    candidate_source = _read_contract(
+        reader, evidence.candidate_source, SourceSnapshot, "hotpatch_candidate_source_invalid"
+    )
+    artifact_manifest = _read_contract(
+        reader, evidence.artifact_manifest, ArtifactManifest, "hotpatch_artifact_manifest_invalid"
     )
     artifact = reader.read_raw_bytes(evidence.artifact.uri, evidence.artifact.sha256)
-    original = _read_hotpatch_state(reader, evidence.original_state)
-    activated = _read_hotpatch_state(reader, evidence.activated_state)
-    recovered = _read_hotpatch_state(reader, evidence.recovered_state)
-    baseline_output = reader.read_raw_bytes(
-        evidence.baseline_output.uri, evidence.baseline_output.sha256
-    )
-    activated_output = reader.read_raw_bytes(
-        evidence.activated_output.uri, evidence.activated_output.sha256
-    )
-    baseline_cache = reader.read_raw_bytes(
-        evidence.baseline_cache_namespace.uri,
-        evidence.baseline_cache_namespace.sha256,
-    )
-    activated_cache = reader.read_raw_bytes(
-        evidence.activated_cache_namespace.uri,
-        evidence.activated_cache_namespace.sha256,
-    )
-    identity = (evidence.process_id, evidence.process_start_token)
-    manifests = (original, activated, recovered)
-    safe = all(
-        (
-            bool(source_snapshot),
-            bool(artifact),
-            all(
-                (manifest.process_id, manifest.process_start_token) == identity
-                for manifest in manifests
-            ),
-            all(manifest.source_hash == evidence.source_snapshot.sha256 for manifest in manifests),
-            original.active is False,
-            original.artifact_hash is None,
-            activated.active is True,
-            activated.artifact_hash == evidence.artifact.sha256,
-            recovered.active is False,
-            recovered.artifact_hash is None,
-            original.entries == recovered.entries,
-            activated.entries != original.entries,
-            baseline_output == activated_output,
-            baseline_cache != activated_cache,
-        )
-    )
-    if not safe:
+    baseline = _read_hotpatch_phase(reader, evidence.baseline_state)
+    candidate = _read_hotpatch_phase(reader, evidence.candidate_state)
+    recovery = _read_hotpatch_phase(reader, evidence.recovery_state)
+    phases = (baseline, candidate, recovery)
+    if [phase.phase for phase in phases] != ["baseline", "candidate", "recovery"]:
         return HotPatchCapability.NONE
-    if (
-        evidence.overlay_mount is not None
-        and evidence.overlay_mount.source_hash != evidence.artifact.sha256
+    if not _valid_source_and_artifact_chain(
+        baseline_source,
+        candidate_source,
+        artifact_manifest,
+        evidence.artifact,
+        artifact,
+        target,
     ):
         return HotPatchCapability.NONE
+    for ordinal, phase in enumerate(phases):
+        if not _valid_hotpatch_execution(evidence, phase, target):
+            return HotPatchCapability.NONE
+        expected_process_ordinal = ordinal if evidence.activation_mode == "startup_overlay" else 0
+        if not _verify_hotpatch_process(reader, phase, expected_process_ordinal):
+            return HotPatchCapability.NONE
+
+    baseline_entries = _verified_state_entries(reader, baseline.entries)
+    candidate_entries = _verified_state_entries(reader, candidate.entries)
+    recovery_entries = _verified_state_entries(reader, recovery.entries)
+    observations = tuple(_read_hotpatch_observation(reader, phase) for phase in phases)
+    normalized_outputs = tuple(
+        reader.read_raw_bytes(phase.normalized_output.uri, phase.normalized_output.sha256)
+        for phase in phases
+    )
+    caches = tuple(
+        reader.read_raw_bytes(phase.cache_namespace.uri, phase.cache_namespace.sha256)
+        for phase in phases
+    )
+    artifact_hash = artifact_manifest.content_hash
+    baseline_implementation_hashes = {digest for _, digest in baseline_entries}
+    candidate_implementation_hashes = {digest for _, digest in candidate_entries}
+    recovery_implementation_hashes = {digest for _, digest in recovery_entries}
+    cache_directories = tuple(
+        phase.execution_request.environment.get("HCUOPT_CANDIDATE_CACHE_DIR") for phase in phases
+    )
+    phase_relations_are_safe = all(
+        (
+            bool(artifact),
+            baseline.source_snapshot_id == baseline_source.snapshot_id,
+            candidate.source_snapshot_id == candidate_source.snapshot_id,
+            recovery.source_snapshot_id == baseline_source.snapshot_id,
+            observations[0].process_id == baseline.process_id,
+            observations[1].process_id == candidate.process_id,
+            observations[2].process_id == recovery.process_id,
+            observations[0].loaded_artifact_hash is None,
+            observations[0].activation_marker == "baseline",
+            observations[1].loaded_artifact_hash == artifact_hash,
+            observations[1].implementation_hash == artifact_hash,
+            observations[1].activation_marker != "baseline",
+            observations[2].loaded_artifact_hash is None,
+            observations[2].activation_marker == "baseline",
+            observations[0].implementation_hash == observations[2].implementation_hash,
+            observations[0].implementation_hash in baseline_implementation_hashes,
+            observations[1].implementation_hash in candidate_implementation_hashes,
+            observations[2].implementation_hash in recovery_implementation_hashes,
+            observations[0].replacement_point
+            == observations[1].replacement_point
+            == observations[2].replacement_point,
+            baseline_entries == recovery_entries,
+            candidate_entries != baseline_entries,
+            observations[0].output_hash
+            == observations[1].output_hash
+            == observations[2].output_hash,
+            normalized_outputs[0] == normalized_outputs[1] == normalized_outputs[2],
+            caches[0] == caches[2],
+            caches[1] != caches[0],
+            cache_directories[0] == cache_directories[2],
+            bool(cache_directories[1]),
+            cache_directories[1] != cache_directories[0],
+        )
+    )
+    if not phase_relations_are_safe:
+        return HotPatchCapability.NONE
+    identities = {(phase.process_id, phase.process_start_token) for phase in phases}
+    request_ids = {phase.execution_request.request_id for phase in phases}
     if evidence.activation_mode == "runtime_hot_patch":
+        if len(identities) != 1 or len(request_ids) != 1:
+            return HotPatchCapability.NONE
+        if (
+            len(
+                {
+                    (phase.process_start_record.uri, phase.process_start_record.sha256)
+                    for phase in phases
+                }
+            )
+            != 1
+            or len(
+                {
+                    (phase.process_exit_record.uri, phase.process_exit_record.sha256)
+                    for phase in phases
+                }
+            )
+            != 1
+        ):
+            return HotPatchCapability.NONE
         return HotPatchCapability.HOT_PATCH
     if evidence.activation_mode == "startup_overlay":
+        if len(identities) != 3 or len(request_ids) != 3:
+            return HotPatchCapability.NONE
+        if not _valid_startup_overlay_mount(
+            evidence,
+            artifact_manifest,
+            observations[1],
+            baseline,
+            candidate,
+            recovery,
+        ):
+            return HotPatchCapability.NONE
         return HotPatchCapability.OVERLAY_ONLY
     return HotPatchCapability.NONE
 
 
-def _read_hotpatch_state(
+def _read_hotpatch_phase(
     reader: Stage0EvidenceReader,
     reference: RawEvidenceFileV2,
-) -> HotpatchStateManifestV2:
+) -> HotpatchPhaseManifestV2:
     encoded = reader.read_bytes(reference.uri, reference.sha256)
     try:
-        return HotpatchStateManifestV2.model_validate_json(encoded)
+        return HotpatchPhaseManifestV2.model_validate_json(encoded)
     except ValidationError as exc:
         raise Stage0EvidenceError("hotpatch_state_invalid", str(exc)) from exc
+
+
+def _read_hotpatch_observation(
+    reader: Stage0EvidenceReader,
+    phase: HotpatchPhaseManifestV2,
+) -> HotpatchExecutionObservationV2:
+    encoded = reader.read_raw_bytes(phase.output.uri, phase.output.sha256)
+    try:
+        observation = HotpatchExecutionObservationV2.model_validate_json(encoded)
+    except ValidationError as exc:
+        raise Stage0EvidenceError("hotpatch_output_invalid", str(exc)) from exc
+    reader.read_raw_bytes(phase.normalized_output.uri, phase.normalized_output.sha256)
+    if observation.output_hash != phase.normalized_output.sha256:
+        raise Stage0EvidenceError(
+            "hotpatch_output_invalid",
+            f"{phase.phase} output hash does not bind the normalized output bytes",
+        )
+    return observation
+
+
+def _read_contract(
+    reader: Stage0EvidenceReader,
+    reference: RawEvidenceFileV2,
+    model: type[SourceSnapshot] | type[ArtifactManifest],
+    error_code: str,
+) -> SourceSnapshot | ArtifactManifest:
+    encoded = reader.read_bytes(reference.uri, reference.sha256)
+    try:
+        return model.model_validate_json(encoded)
+    except ValidationError as exc:
+        raise Stage0EvidenceError(error_code, str(exc)) from exc
+
+
+def _valid_source_and_artifact_chain(
+    baseline: SourceSnapshot,
+    candidate: SourceSnapshot,
+    artifact_manifest: ArtifactManifest,
+    artifact_reference: RawEvidenceFileV2,
+    artifact: bytes,
+    target: TargetSpec,
+) -> bool:
+    baseline_path = unquote(urlparse(baseline.worktree_uri).path)
+    return all(
+        (
+            baseline.kind == "baseline",
+            baseline.clean,
+            baseline.parent_snapshot_id is None,
+            baseline.repository == target.source_baseline.repository,
+            baseline.commit == target.source_baseline.commit,
+            baseline_path == target.source_baseline.clean_checkout,
+            candidate.kind == "candidate",
+            candidate.clean,
+            candidate.parent_snapshot_id == baseline.snapshot_id,
+            candidate.repository == baseline.repository,
+            candidate.commit == baseline.commit,
+            candidate.source_hash != baseline.source_hash,
+            not artifact_manifest.synthetic,
+            artifact_manifest.candidate_id is not None,
+            artifact_manifest.kind in {"python_overlay", "triton_source_overlay"},
+            artifact_manifest.source_snapshot_id == candidate.snapshot_id,
+            artifact_manifest.uri == artifact_reference.uri,
+            artifact_manifest.content_hash == artifact_reference.sha256,
+            bool(artifact),
+        )
+    )
+
+
+def _valid_hotpatch_execution(
+    evidence: HotpatchEvidenceV2,
+    phase: HotpatchPhaseManifestV2,
+    target: TargetSpec,
+) -> bool:
+    request = phase.execution_request
+    result = phase.execution_result
+    binding = evidence.binding
+    return all(
+        (
+            request.target_id == binding.target_id == target.target_id,
+            request.lease_scope is LeaseScope.EXCLUSIVE,
+            request.resource_id == binding.lease.resource_id,
+            request.fencing_token == binding.lease.fencing_token,
+            request.container_image == target.inference_image.immutable_reference,
+            result.metadata.get("target_id") == target.target_id,
+            result.metadata.get("resource_id") == binding.lease.resource_id,
+            result.metadata.get("fencing_token") == binding.lease.fencing_token,
+            result.metadata.get("container_image") == target.inference_image.immutable_reference,
+        )
+    )
+
+
+def _verify_hotpatch_process(
+    reader: Stage0EvidenceReader,
+    phase: HotpatchPhaseManifestV2,
+    ordinal: int,
+) -> bool:
+    started = _read_process_lifecycle(reader, phase.process_start_record)
+    reaped = _read_process_lifecycle(reader, phase.process_exit_record)
+    try:
+        start_token = _proc_start_token(started.proc_stat_line, started.process_id)
+        exit_token = _proc_start_token(reaped.proc_stat_line, reaped.process_id)
+    except Stage0EvidenceError:
+        return False
+    identity = (phase.process_id, phase.process_start_token)
+    return all(
+        (
+            started.event == "started",
+            reaped.event == "reaped",
+            started.restart_ordinal == ordinal,
+            reaped.restart_ordinal == ordinal,
+            started.observer_process_id == reaped.observer_process_id,
+            (started.process_id, start_token) == identity,
+            (reaped.process_id, exit_token) == identity,
+            started.captured_monotonic_ns < reaped.captured_monotonic_ns,
+            _terminal_wait_status(reaped.wait_status),
+        )
+    )
+
+
+def _verified_state_entries(
+    reader: Stage0EvidenceReader,
+    entries: tuple[HotpatchStateEntryV2, ...],
+) -> tuple[tuple[str, str], ...]:
+    verified: list[tuple[str, str]] = []
+    for entry in entries:
+        reader.read_raw_bytes(entry.content.uri, entry.content.sha256)
+        verified.append((entry.path, entry.content.sha256))
+    return tuple(verified)
+
+
+def _valid_startup_overlay_mount(
+    evidence: HotpatchEvidenceV2,
+    artifact: ArtifactManifest,
+    observation: HotpatchExecutionObservationV2,
+    baseline: HotpatchPhaseManifestV2,
+    candidate: HotpatchPhaseManifestV2,
+    recovery: HotpatchPhaseManifestV2,
+) -> bool:
+    mount = evidence.overlay_mount
+    if mount is None:
+        return False
+    if (
+        mount.source_uri != artifact.uri
+        or mount.source_hash != artifact.content_hash
+        or mount.target_path != observation.replacement_point
+        or mount.container_id != candidate.container_id
+    ):
+        return False
+    artifact_source = unquote(urlparse(artifact.uri).path)
+    candidate_mounts = [
+        item
+        for item in candidate.execution_request.mounts
+        if item.source == artifact_source and item.target == mount.target_path
+    ]
+    if len(candidate_mounts) != 1 or not candidate_mounts[0].read_only:
+        return False
+    return all(
+        item.source != artifact_source
+        for phase in (baseline, recovery)
+        for item in phase.execution_request.mounts
+    )
 
 
 def target_fingerprint(target: TargetSpec) -> str:
@@ -1325,8 +1903,10 @@ def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
 
 
 def _is_auditable_text(value: str) -> bool:
-    return bool(value) and value == value.strip() and not any(
-        ord(character) < 32 or ord(character) == 127 for character in value
+    return (
+        bool(value)
+        and value == value.strip()
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
     )
 
 

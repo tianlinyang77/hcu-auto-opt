@@ -77,11 +77,18 @@ def _binding(*, lease_scope: LeaseScope = LeaseScope.EXCLUSIVE) -> Stage0Evidenc
     )
 
 
+def _lifecycle_reference(restart: int, event: str) -> dict[str, str]:
+    return {
+        "uri": f"file:///evidence/restart-{restart}-{event}.json",
+        "sha256": SHA_A if event == "started" else SHA_B,
+    }
+
+
 def _evidence() -> MeasurementEvidenceV2:
     samples = tuple(
         RawSampleV2(
             process_id=100 + restart,
-            process_start_token=f"fixture-process-{restart}",
+            process_start_token=f"linux-proc-startticks:{1_000 + restart}",
             restart_ordinal=restart,
             arm="single",
             segment="noise",
@@ -145,8 +152,8 @@ def _evidence() -> MeasurementEvidenceV2:
                 captured_monotonic_ns=950,
                 restart_ordinal=0,
                 process_id=100,
-                process_start_token="fixture-process-0",
-                process_alive=True,
+                process_start_token="linux-proc-startticks:1000",
+                process_lifecycle_record=_lifecycle_reference(0, "started"),
                 telemetry=_telemetry(),
             ),
             DynamicObservationV2(
@@ -154,8 +161,8 @@ def _evidence() -> MeasurementEvidenceV2:
                 captured_monotonic_ns=1020,
                 restart_ordinal=0,
                 process_id=100,
-                process_start_token="fixture-process-0",
-                process_alive=False,
+                process_start_token="linux-proc-startticks:1000",
+                process_lifecycle_record=_lifecycle_reference(0, "reaped"),
                 telemetry=_telemetry(),
             ),
             DynamicObservationV2(
@@ -163,8 +170,8 @@ def _evidence() -> MeasurementEvidenceV2:
                 captured_monotonic_ns=1050,
                 restart_ordinal=1,
                 process_id=101,
-                process_start_token="fixture-process-1",
-                process_alive=True,
+                process_start_token="linux-proc-startticks:1001",
+                process_lifecycle_record=_lifecycle_reference(1, "started"),
                 telemetry=_telemetry(),
             ),
             DynamicObservationV2(
@@ -172,8 +179,8 @@ def _evidence() -> MeasurementEvidenceV2:
                 captured_monotonic_ns=1120,
                 restart_ordinal=1,
                 process_id=101,
-                process_start_token="fixture-process-1",
-                process_alive=False,
+                process_start_token="linux-proc-startticks:1001",
+                process_lifecycle_record=_lifecycle_reference(1, "reaped"),
                 telemetry=_telemetry(),
             ),
             DynamicObservationV2(
@@ -273,11 +280,11 @@ def test_raw_v2_is_strict_and_formal_evidence_fails_closed() -> None:
     for sample in duplicate_process["samples"]:
         if sample["restart_ordinal"] == 1:
             sample["process_id"] = 100
-            sample["process_start_token"] = "fixture-process-0"
+            sample["process_start_token"] = "linux-proc-startticks:1000"
     for observation in duplicate_process["observations"]:
         if observation["restart_ordinal"] == 1:
             observation["process_id"] = 100
-            observation["process_start_token"] = "fixture-process-0"
+            observation["process_start_token"] = "linux-proc-startticks:1000"
     with pytest.raises(ValidationError, match="distinct process identities"):
         MeasurementEvidenceV2.model_validate(duplicate_process)
 
@@ -310,9 +317,7 @@ def test_formal_observations_are_unique_ordered_and_plan_bound() -> None:
         update={
             "observations": (
                 evidence.observations[0].model_copy(update={"captured_monotonic_ns": 1_001}),
-                evidence.observations[1].model_copy(
-                    update={"captured_monotonic_ns": 1_002}
-                ),
+                evidence.observations[1].model_copy(update={"captured_monotonic_ns": 1_002}),
                 *evidence.observations[2:],
             )
         }
@@ -405,7 +410,7 @@ def test_calibration_and_sample_axes_reject_malformed_order() -> None:
     with pytest.raises(ValidationError, match="requires arm=baseline"):
         RawSampleV2(
             process_id=100,
-            process_start_token="fixture-process-0",
+            process_start_token="linux-proc-startticks:1000",
             restart_ordinal=0,
             arm="comparison",
             segment="A1",

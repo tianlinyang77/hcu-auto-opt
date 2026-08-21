@@ -24,9 +24,13 @@ and real adapter provenance. Timing evidence also stores the complete plan,
 raw clock calibration points, process identity for every restart, acquisition
 order, ABBA arm and segment identity, device ticks, batching, and typed
 environment observations. A process identity is the pair `(pid,
-process_start_token)`, not a PID alone. Every restart must include a
-`before_restart` observation proving that identity was live and an
-`after_restart` observation confirming it exited.
+process_start_token)`, not a PID alone. The token is not caller-chosen text: D
+derives `linux-proc-startticks:<starttime>` from the bound raw
+`/proc/<pid>/stat` line. Every restart references a canonical start record and
+a canonical reaping record. D requires the same procfs identity in both,
+matches it to every sample, and accepts the exit only when the raw `waitpid`
+result names that PID and contains a terminal wait status. Producer-owned
+`process_alive` booleans are not part of the Formal schema.
 
 Clock conversion is independently fitted by ordinary least squares over at
 least three raw `(device_ticks, host_midpoint_ns)` points. The maximum absolute
@@ -67,15 +71,28 @@ The verifier derives three typed inputs:
 
 - measurement trust from noise, known-signal and null-signal evidence;
 - profiler capability (`full`, `degraded`, or `none`) by re-reading the bound
-  rocprof output and parsing it with the recorded parser version; producer
-  parser booleans and processed kernel lists are not trusted;
+  tool-version output and original rocprof CSV or PyTorch trace. Parser
+  versions are bound to the tool (`rocprof-csv-v1` or `torch-trace-v1`). The
+  rocprof parser accepts vendor trace/statistics headers, and the PyTorch parser
+  derives kernel records from `traceEvents`; a producer-normalized
+  `kernel_name,duration_ns,...` CSV is rejected;
 - hot-patch capability (`hot_patch`, `overlay_only`, or `none`) from activation,
-  correctness, cache isolation, recovery and cleanup evidence. D re-hashes the
-  source snapshot and Artifact, parses the before/activated/recovered state
-  manifests, checks their process identity, and compares the referenced output
-  and cache-namespace bytes. Producer-owned hashes or pass/fail booleans are not
-  accepted. Overlay-only capability additionally requires a safe, normalized,
-  bound read-only mount record.
+  correctness, cache isolation, recovery and cleanup evidence. D parses typed
+  Baseline/Candidate `SourceSnapshot` and `ArtifactManifest` documents, requires
+  the Candidate to be a clean child of the Baseline, binds the Artifact back to
+  that Candidate, and re-hashes the Artifact and every referenced state entry.
+  Each phase carries a successful real `ExecutionRequest`/`ExecutionResult`,
+  procfs/wait lifecycle records, the versioned execution stdout, separately
+  hashed normalized output bytes and cache evidence. The stdout-derived process,
+  activation marker, implementation Hash, replacement point and output Hash must
+  agree with those raw references. The Baseline source must match the Target
+  Lock repository, Commit and checkout. Runtime hot patch requires one shared
+  execution identity; startup overlay requires three distinct request and
+  process identities. For startup overlay, only Candidate may mount the Artifact,
+  the mount must be read-only and bound to the Candidate container, and
+  Baseline/Recovery must return to identical state, output and cache. A generic
+  Artifact-mount observation cannot authorize the SGLang Python/Triton overlay.
+  Producer-owned hashes or pass/fail booleans are not accepted.
 
 It does not choose `ProjectMode`. The control-plane Barrier combines those
 three inputs with the existing four-mode mapping. Producer-provided database
@@ -95,7 +112,9 @@ threshold.
 This verifier does not launch processes, collect HCU samples, implement a
 profiler or overlay, reserve hardware, or change the Target Lock. Formal HCU
 execution and the seven-probe combined adapter profile remain integration work
-for the Stage 0 environment and control-plane owners.
+for the Stage 0 environment and control-plane owners. In particular, S0-C must
+publish its existing raw PyTorch trace and three isolated overlay executions in
+these typed envelopes; translating only S0-C's summary fields is not sufficient.
 
 Every human-readable report must retain this statement:
 

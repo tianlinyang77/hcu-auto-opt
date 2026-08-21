@@ -169,6 +169,13 @@ class Stage0EvidenceBinding(StrictMeasurementModel):
         return self
 
 
+class RawEvidenceFileV2(StrictMeasurementModel):
+    """One immutable auxiliary file that the verifier must read and hash itself."""
+
+    uri: str = Field(min_length=1, max_length=4000)
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+
 class MeasurementPlanV2(StrictMeasurementModel):
     restart_count: int = Field(ge=1, le=MAX_PLAN_COUNT)
     warmup_count: int = Field(ge=0, le=MAX_PLAN_COUNT)
@@ -307,7 +314,7 @@ class DynamicObservationV2(StrictMeasurementModel):
     acquisition_ordinal: int | None = Field(default=None, ge=0, le=MAX_PLAN_COUNT)
     process_id: int | None = Field(default=None, ge=1, le=INT64_MAX)
     process_start_token: str | None = Field(default=None, min_length=1, max_length=200)
-    process_alive: bool | None = None
+    process_lifecycle_record: RawEvidenceFileV2 | None = None
     telemetry: TelemetrySnapshotV2
 
     @model_validator(mode="after")
@@ -328,17 +335,17 @@ class DynamicObservationV2(StrictMeasurementModel):
         if self.phase not in sample_phases and self.acquisition_ordinal is not None:
             raise ValueError(f"{self.phase} observation cannot bind an acquisition")
         lifecycle_phases = {"before_restart", "after_restart"}
-        process_fields = (self.process_id, self.process_start_token, self.process_alive)
+        process_fields = (
+            self.process_id,
+            self.process_start_token,
+            self.process_lifecycle_record,
+        )
         if self.phase in lifecycle_phases and any(value is None for value in process_fields):
             raise ValueError(f"{self.phase} observation requires process lifecycle identity")
         if self.phase not in lifecycle_phases and any(
             value is not None for value in process_fields
         ):
             raise ValueError(f"{self.phase} observation cannot contain process lifecycle identity")
-        if self.phase == "before_restart" and self.process_alive is not True:
-            raise ValueError("before_restart must observe a live workload process")
-        if self.phase == "after_restart" and self.process_alive is not False:
-            raise ValueError("after_restart must confirm the workload process exited")
         return self
 
 
@@ -397,9 +404,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
     def validate_evidence_shape(self) -> MeasurementEvidenceV2:
         phases = [observation.phase for observation in self.observations]
         if phases.count("before_run") != 1 or phases.count("after_run") != 1:
-            raise ValueError(
-                "measurement evidence requires exactly one before_run and after_run"
-            )
+            raise ValueError("measurement evidence requires exactly one before_run and after_run")
         if self.binding.run_mode is Stage0RunMode.FORMAL:
             if self.synthetic:
                 raise ValueError("formal measurement evidence cannot be synthetic")
@@ -408,8 +413,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
 
         captured = [observation.captured_monotonic_ns for observation in self.observations]
         if any(
-            current <= previous
-            for previous, current in zip(captured, captured[1:], strict=False)
+            current <= previous for previous, current in zip(captured, captured[1:], strict=False)
         ):
             raise ValueError("observation timestamps must be strictly increasing")
         if self.observations[0].phase != "before_run" or self.observations[-1].phase != "after_run":
@@ -437,9 +441,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
             if sample.restart_ordinal >= self.plan.restart_count:
                 raise ValueError("sample restart_ordinal is outside the measurement plan")
             process_identity = (sample.process_id, sample.process_start_token)
-            known_process = process_by_restart.setdefault(
-                sample.restart_ordinal, process_identity
-            )
+            known_process = process_by_restart.setdefault(sample.restart_ordinal, process_identity)
             if known_process != process_identity:
                 raise ValueError("one restart group cannot contain multiple process identities")
             if sample.batch_iterations != self.plan.batch_iterations:
@@ -489,9 +491,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
         if after_run.captured_monotonic_ns < self.samples[-1].finished_monotonic_ns:
             raise ValueError("after_run telemetry must follow all timing samples")
         samples_by_restart = {
-            restart: tuple(
-                sample for sample in self.samples if sample.restart_ordinal == restart
-            )
+            restart: tuple(sample for sample in self.samples if sample.restart_ordinal == restart)
             for restart in range(self.plan.restart_count)
         }
         for observation in self.observations:
@@ -511,8 +511,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
                 restart_samples = samples_by_restart[observation.restart_ordinal]  # type: ignore[index]
                 if (
                     observation.phase == "before_restart"
-                    and observation.captured_monotonic_ns
-                    > restart_samples[0].started_monotonic_ns
+                    and observation.captured_monotonic_ns > restart_samples[0].started_monotonic_ns
                 ):
                     raise ValueError("before_restart telemetry must precede its restart")
                 if (
@@ -540,8 +539,7 @@ class MeasurementEvidenceV2(StrictMeasurementModel):
                 and observation.phase in {"before_restart", "after_restart"}
             }
             if any(
-                (observation.process_id, observation.process_start_token)
-                != expected_process
+                (observation.process_id, observation.process_start_token) != expected_process
                 for observation in lifecycle.values()
             ):
                 raise ValueError(
