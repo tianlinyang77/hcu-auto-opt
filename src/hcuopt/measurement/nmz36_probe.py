@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lease-id", required=True, type=UUID)
     parser.add_argument("--fencing-token", required=True, type=int)
     parser.add_argument("--workload-id", default="stage0-short-kernel-v1")
+    parser.add_argument(
+        "--probe",
+        action="append",
+        choices=("fingerprint", "timer", "noise", "known_signal", "null_signal"),
+        help="run only the selected probe; repeat to select more than one",
+    )
     return parser
 
 
@@ -45,12 +51,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.fencing_token < 1:
         raise ValueError("fencing token must be positive")
     results: dict[str, Any] = {}
-    probe_types = (
+    all_probe_types = (
         Stage0ProbeType.FINGERPRINT,
         Stage0ProbeType.TIMER,
         Stage0ProbeType.NOISE,
         Stage0ProbeType.KNOWN_SIGNAL,
         Stage0ProbeType.NULL_SIGNAL,
+    )
+    probe_types = (
+        tuple(Stage0ProbeType(value) for value in args.probe)
+        if args.probe
+        else all_probe_types
     )
     for probe_type in probe_types:
         registry = ManagedProcessRegistry()
