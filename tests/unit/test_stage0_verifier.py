@@ -1959,7 +1959,7 @@ def test_real_b_and_c_envelopes_cross_the_file_finalizer_barrier(
 
     assert verification.profiler is ProfilerCapability.DEGRADED
     assert verification.hot_patch is HotPatchCapability.OVERLAY_ONLY
-    assert decision.mode is ProjectMode.FULL_MVP
+    assert decision.mode is ProjectMode.DEGRADED_MANUAL_INTAKE
     machine = json.loads(
         Path(unquote(urlparse(artifacts.machine_report_uri).path)).read_text(encoding="utf-8")
     )
