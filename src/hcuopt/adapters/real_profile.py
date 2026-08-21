@@ -125,6 +125,8 @@ def build_nmz36_runtime_probe_registry(
     *,
     configuration: RuntimeProbeProfile,
     evidence_publisher: EvidencePublisher | None = None,
+    telemetry: TelemetryCollector | None = None,
+    clock: HostClock | None = None,
     runner: CommandRunner | None = None,
 ) -> AdapterRegistry:
     """Compose the real S0-C probes under the shared Stage 0 profile."""
@@ -144,6 +146,8 @@ def build_nmz36_runtime_probe_registry(
         target,
         configuration,
         evidence_publisher,
+        telemetry,
+        clock,
     )
     return AdapterRegistry(
         profile=profile,

@@ -117,10 +117,12 @@ transaction, and publishes hashed JSON and Markdown reports. The HCU 7 reservati
 risk is recorded as accepted rather than falsely described as proven exclusivity.
 S0-B now emits the exact fingerprint and timing V2 envelopes when a deployment injects
 the required real segmented workload, device timer, typed telemetry, lifecycle recorder,
-and cleanup controller. No nmz36 Formal measurement has been claimed yet. The seven-probe
-Barrier remains disabled because S0-C must still
-publish its existing raw PyTorch trace and three isolated overlay executions in
-these typed envelopes; translating only S0-C's summary fields is not sufficient.
+and cleanup controller. S0-C can now publish the raw Profiler output and three isolated
+overlay executions in the same typed envelopes when deployment injects the trusted
+evidence root, telemetry, Worker-owned output mounts and instrumented SGLang lifecycle
+runner. This completes the software path to the seven-probe Barrier; it does not claim
+that nmz36 has executed a real Formal seven-probe run. `stage0_not_measured` remains
+open until that hardware run and D-owned finalization both succeed.
 
 Every human-readable report must retain this statement:
 

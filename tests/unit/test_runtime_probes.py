@@ -35,7 +35,7 @@ from hcuopt.runtime_probes.overlay import (
 )
 from hcuopt.runtime_probes.profile import RuntimeProbeProfile
 from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
-from hcuopt.source_hash import canonical_source_hash
+from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 from hcuopt.targets import load_target, target_fingerprint
 
 ROOT = Path(__file__).parents[2]
@@ -761,7 +761,7 @@ def test_runtime_adapter_uses_frozen_profile_not_job_commands(tmp_path: Path) ->
     assert output.adapter_provenance == (adapter.provenance,)
 
 
-def test_formal_runtime_probe_is_disabled_until_d_side_verification_is_wired(
+def test_formal_runtime_probe_requires_deployment_authorized_publisher(
     tmp_path: Path,
 ) -> None:
     cleaner = ScriptedCleaner([])
@@ -773,7 +773,7 @@ def test_formal_runtime_probe_is_disabled_until_d_side_verification_is_wired(
         _runtime_profile(tmp_path),
     )
 
-    with pytest.raises(ValueError, match="D-side evidence verification"):
+    with pytest.raises(ValueError, match="deployment-authorized evidence publisher"):
         adapter.run_probe(
             {
                 "stage0_run_id": str(uuid4()),
@@ -793,7 +793,7 @@ def test_formal_runtime_probe_is_disabled_until_d_side_verification_is_wired(
         )
 
 
-def test_trusted_publisher_cannot_bypass_the_formal_runtime_interlock(
+def test_trusted_publisher_cannot_bypass_typed_telemetry_interlock(
     tmp_path: Path,
 ) -> None:
     class VerifierOwnedPublisher(LocalContentAddressedEvidencePublisher):
@@ -810,7 +810,7 @@ def test_trusted_publisher_cannot_bypass_the_formal_runtime_interlock(
         _runtime_profile(tmp_path),
         VerifierOwnedPublisher(),
     )
-    with pytest.raises(ValueError, match="D-side evidence verification"):
+    with pytest.raises(ValueError, match="typed deployment telemetry"):
         adapter.run_probe(
             {
                 "stage0_run_id": str(uuid4()),
@@ -1111,6 +1111,7 @@ def test_overlay_runner_proves_candidate_load_without_changing_output(tmp_path: 
     assert candidate_result["output_hash"] == baseline_result["output_hash"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="fixture records a POSIX process group")
 def test_sglang_overlay_runner_requires_import_from_server_process_group(
     tmp_path: Path,
 ) -> None:
@@ -1213,7 +1214,7 @@ def test_evidence_is_atomic_immutable_and_content_addressed(tmp_path: Path) -> N
         probe_type="profiler",
         payload={"capability": "degraded"},
     )
-    path = Path(uri.removeprefix("file://"))
+    path = file_uri_to_path(uri)
 
     assert path.is_file()
     assert digest == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1232,4 +1233,4 @@ def test_evidence_is_atomic_immutable_and_content_addressed(tmp_path: Path) -> N
     )
     assert other_uri != uri
     assert other_digest != digest
-    assert path.read_bytes() != Path(other_uri.removeprefix("file://")).read_bytes()
+    assert path.read_bytes() != file_uri_to_path(other_uri).read_bytes()

@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import math
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from time import monotonic
@@ -16,6 +17,7 @@ from hcuopt.contracts.platform_v1 import ExecutionRequest, MountSpec, TargetSpec
 from hcuopt.domain.enums import LeaseScope, ProfilerCapability
 from hcuopt.runtime_probes.evidence import sha256_file
 from hcuopt.runtime_probes.profile import ProfilerProbeConfiguration
+from hcuopt.source_hash import file_uri_to_path
 
 CORE_FIELDS = (
     "kernel_name",
@@ -26,7 +28,14 @@ CORE_FIELDS = (
 )
 DETAIL_FIELDS = ("shape", "dtype", "meta", "python_location", "hip_location")
 ALIASES = {
-    "kernel_name": ("kernel_name", "kernel", "name", "KernelName", "Name"),
+    "kernel_name": (
+        "kernel_name",
+        "kernel",
+        "name",
+        "KernelName",
+        "Kernel_Name",
+        "Name",
+    ),
     "call_count": ("call_count", "calls", "count", "Calls"),
     "kernel_category": ("kernel_category", "category", "cat"),
     "shape": ("shape", "tensor_shape"),
@@ -60,6 +69,7 @@ class ProfilerCapabilityProbe:
         resource_id: str | None = None,
         fencing_token: int | None = None,
         max_wall_seconds: int | None = None,
+        require_formal_raw: bool = False,
     ) -> dict[str, Any]:
         if max_wall_seconds is not None and (
             isinstance(max_wall_seconds, bool) or max_wall_seconds < 1
@@ -73,10 +83,11 @@ class ProfilerCapabilityProbe:
         attempts: list[dict[str, Any]] = []
         normalized_records: list[dict[str, Any]] = []
         selected_tool: str | None = None
+        selected_raw: dict[str, Any] | None = None
+        formal_raw: dict[str, Any] | None = None
+        formal_score = -1
         best_score = -1
-        deadline = (
-            monotonic() + max_wall_seconds if max_wall_seconds is not None else None
-        )
+        deadline = monotonic() + max_wall_seconds if max_wall_seconds is not None else None
         for raw_candidate in candidates:
             candidate = raw_candidate
             name = candidate.name
@@ -84,7 +95,11 @@ class ProfilerCapabilityProbe:
             profile_argv = candidate.profile_argv
             output_format = candidate.output_format
             timeout = float(candidate.timeout_seconds)
-            if output_format == "torch_trace" and self.executor is not None:
+            if (
+                output_format == "torch_trace"
+                and self.executor is not None
+                and candidate.output_host_uri is None
+            ):
                 attempts.append(
                     {
                         "tool": name,
@@ -93,11 +108,13 @@ class ProfilerCapabilityProbe:
                         "output_format": output_format,
                         "execution_error": (
                             "executor torch_trace requires a worker-owned output mount "
-                            "and explicit container-to-host export"
+                            "and output_host_uri for container-to-host export"
                         ),
                     }
                 )
                 continue
+            if output_format == "torch_trace" and self.executor is not None:
+                self._validate_executor_trace_export(candidate, frozen.mounts)
 
             try:
                 version = self._run_command(
@@ -134,7 +151,11 @@ class ProfilerCapabilityProbe:
             trace_path: Path | None = None
             if output_format == "torch_trace":
                 assert candidate.output_path is not None
-                trace_path = Path(candidate.output_path)
+                trace_path = (
+                    file_uri_to_path(candidate.output_host_uri)
+                    if self.executor is not None and candidate.output_host_uri is not None
+                    else Path(candidate.output_path)
+                )
                 try:
                     self._prepare_trace_output(trace_path)
                 except (OSError, ValueError) as error:
@@ -180,8 +201,10 @@ class ProfilerCapabilityProbe:
                         "byte_count": trace_path.stat().st_size,
                     }
                     records = self._parse_torch_trace(trace_path)
+                    raw_output = trace_path.read_bytes()
                 else:
                     records = self._parse_records(profile.stdout, output_format)
+                    raw_output = profile.stdout
             except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
                 attempt["parse_error"] = f"{error.__class__.__name__}: {error}"
                 continue
@@ -190,13 +213,42 @@ class ProfilerCapabilityProbe:
             candidate_score = max(
                 (self._record_score(item) for item in candidate_records), default=-1
             )
-            if candidate_score > best_score:
+            parser_version = {
+                ("rocprof", "csv"): "rocprof-csv-v1",
+                ("profile-llm-torch", "torch_trace"): "torch-trace-v1",
+            }.get((name, output_format))
+            if parser_version is not None and (
+                candidate_score > formal_score or formal_raw is None
+            ):
+                formal_score = candidate_score
+                formal_raw = {
+                    "tool_name": name,
+                    "output_format": output_format,
+                    "tool_version_output": version.stdout,
+                    "raw_output": raw_output,
+                    "parser_version": parser_version,
+                }
+            if candidate_score > best_score or selected_raw is None:
                 best_score = candidate_score
                 normalized_records = candidate_records
                 selected_tool = name
-            if any(self._valid_core(item) for item in candidate_records):
+                selected_raw = {
+                    "tool_name": name,
+                    "output_format": output_format,
+                    "tool_version_output": version.stdout,
+                    "raw_output": raw_output,
+                }
+            if any(self._valid_core(item) for item in candidate_records) and (
+                not require_formal_raw or parser_version is not None
+            ):
                 normalized_records = candidate_records
                 selected_tool = name
+                selected_raw = {
+                    "tool_name": name,
+                    "output_format": output_format,
+                    "tool_version_output": version.stdout,
+                    "raw_output": raw_output,
+                }
                 break
 
         observed = sorted(
@@ -243,6 +295,7 @@ class ProfilerCapabilityProbe:
             "attempts": attempts,
             "capture_contract": capture_contract,
             "triage_artifacts": self._triage_artifacts(configuration),
+            "_formal_evidence": formal_raw,
         }
 
     @staticmethod
@@ -265,6 +318,25 @@ class ProfilerCapabilityProbe:
         path.unlink()
 
     @staticmethod
+    def _validate_executor_trace_export(
+        candidate: Any,
+        mounts: tuple[MountSpec, ...],
+    ) -> None:
+        assert candidate.output_path is not None
+        assert candidate.output_host_uri is not None
+        host_output = file_uri_to_path(candidate.output_host_uri)
+        host_parent = host_output.parent.resolve(strict=True)
+        source = host_parent.as_posix()
+        if os.name == "nt":
+            source = f"/{source}"
+        container_parent = str(Path(candidate.output_path).parent).replace("\\", "/")
+        matching = [
+            mount for mount in mounts if mount.source == source and mount.target == container_parent
+        ]
+        if len(matching) != 1 or matching[0].read_only:
+            raise ValueError("executor torch_trace requires one worker-owned writable output mount")
+
+    @staticmethod
     def _fresh_trace_path(path: Path) -> Path:
         if path.is_symlink() or not path.is_file():
             raise ValueError("profiler command did not produce a fresh torch trace")
@@ -273,8 +345,7 @@ class ProfilerCapabilityProbe:
     @staticmethod
     def _record_score(record: Mapping[str, Any]) -> int:
         return sum(
-            record.get(field) not in (None, "", [], {})
-            for field in (*CORE_FIELDS, *DETAIL_FIELDS)
+            record.get(field) not in (None, "", [], {}) for field in (*CORE_FIELDS, *DETAIL_FIELDS)
         )
 
     def _run_command(
@@ -289,14 +360,8 @@ class ProfilerCapabilityProbe:
     ) -> CommandResult:
         if self.runner is not None:
             return self.runner.run(argv, timeout)
-        if (
-            self.executor is None
-            or target is None
-            or output_dir is None
-        ):
-            raise ValueError(
-                "real profiler execution requires Target Lock and output directory"
-            )
+        if self.executor is None or target is None or output_dir is None:
+            raise ValueError("real profiler execution requires Target Lock and output directory")
         if (resource_id is None) != (fencing_token is None):
             raise ValueError("profiler resource_id and fencing_token must be present together")
         if resource_id is not None and not resource_id:
@@ -340,9 +405,9 @@ class ProfilerCapabilityProbe:
     def _read_execution_stream(uri: str | None) -> bytes:
         if uri is None:
             return b""
-        if not uri.startswith("file://"):
+        if not uri.startswith("file:"):
             raise ValueError("profiler execution streams must use file URIs")
-        path = Path(uri.removeprefix("file://")).resolve(strict=True)
+        path = file_uri_to_path(uri).resolve(strict=True)
         if path.is_symlink() or not path.is_file():
             raise ValueError("profiler execution stream is not a regular file")
         return path.read_bytes()
@@ -351,9 +416,7 @@ class ProfilerCapabilityProbe:
     def _capture_contract(configuration: Mapping[str, Any]) -> dict[str, Any]:
         workload = str(configuration.get("profile_workload", "both"))
         if workload not in {"both", "prefill", "decode"}:
-            raise ValueError(
-                "S0-C profiler requires stage-separated both/prefill/decode capture"
-            )
+            raise ValueError("S0-C profiler requires stage-separated both/prefill/decode capture")
         warmup_steps = int(configuration.get("warmup_steps", 10))
         active_steps = int(configuration.get("num_steps", 5))
         if warmup_steps < 1 or active_steps < 1:

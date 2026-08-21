@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -56,14 +58,38 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
 
 
 def _output_hash(normalized_output: Any) -> str:
-    encoded = json.dumps(
-        normalized_output,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
+    return _sha256_bytes(_canonical_json_bytes(normalized_output))
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
     ).encode("utf-8")
-    return _sha256_bytes(encoded)
+
+
+def _write_canonical_json(path: Path, value: Any) -> None:
+    descriptor, name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_canonical_json_bytes(value))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o444)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--activation-marker", required=True)
     parser.add_argument("--candidate-import-marker", type=Path)
     parser.add_argument("--expected-artifact-hash")
+    parser.add_argument("--formal-evidence", action="store_true")
     return parser
 
 
@@ -94,15 +121,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.candidate_import_marker is not None:
         args.candidate_import_marker.unlink(missing_ok=True)
 
+    smoke_argv = [
+        sys.executable,
+        str(args.smoke_runner),
+        "--spec",
+        str(args.spec),
+        "--evidence-dir",
+        str(args.evidence_dir),
+    ]
+    if args.formal_evidence:
+        restart_ordinal = {"baseline": 0, "candidate": 1, "recovery": 2}[args.phase]
+        smoke_argv.extend(("--formal-lifecycle", "--restart-ordinal", str(restart_ordinal)))
     completed = subprocess.run(
-        [
-            sys.executable,
-            str(args.smoke_runner),
-            "--spec",
-            str(args.spec),
-            "--evidence-dir",
-            str(args.evidence_dir),
-        ],
+        smoke_argv,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -115,6 +146,16 @@ def main(argv: list[str] | None = None) -> int:
     if result.get("cleanup_succeeded") is not True:
         raise SystemExit("SGLang runner did not prove process cleanup")
     server_pid = start.get("pid")
+    if args.formal_evidence:
+        lifecycle_start = _read_json(
+            args.evidence_dir / "process-start.json",
+            "process lifecycle start evidence",
+        )
+        _read_json(
+            args.evidence_dir / "process-exit.json",
+            "process lifecycle exit evidence",
+        )
+        server_pid = lifecycle_start.get("process_id")
     server_process_group = start.get("process_group_id")
     if isinstance(server_pid, bool) or not isinstance(server_pid, int) or server_pid < 1:
         raise SystemExit("SGLang start evidence has no valid server PID")
@@ -142,9 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(marker_pid, bool) or not isinstance(marker_pid, int) or marker_pid < 1:
             raise SystemExit("candidate import marker has no valid process ID")
         if marker.get("process_group_id") != server_process_group:
-            raise SystemExit(
-                "candidate module was not imported by the SGLang server process group"
-            )
+            raise SystemExit("candidate module was not imported by the SGLang server process group")
         if marker.get("module_file") != str(args.replacement_point):
             raise SystemExit("candidate import marker names a different replacement point")
         if marker.get("module_sha256") != implementation_hash:
@@ -153,8 +192,20 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "activation_marker": args.activation_marker,
                 "loaded_artifact_hash": implementation_hash,
-                "process_id": marker_pid,
             }
+        )
+
+    if args.formal_evidence:
+        _write_canonical_json(
+            args.evidence_dir / "normalized-output.json",
+            result.get("normalized_output"),
+        )
+        cache_directory = os.environ.get("HCUOPT_CANDIDATE_CACHE_DIR")
+        if not cache_directory:
+            raise SystemExit("Formal overlay requires HCUOPT_CANDIDATE_CACHE_DIR")
+        _write_canonical_json(
+            args.evidence_dir / "cache-namespace.json",
+            {"cache_directory": cache_directory},
         )
 
     print(json.dumps(observation, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
