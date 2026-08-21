@@ -51,7 +51,27 @@ from hcuopt.evaluation.stage0_verifier import (
 )
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence
 from hcuopt.measurement.fingerprint import stable_fingerprint
+from hcuopt.runtime_probes.adapter import RuntimeProbeAdapter
+from hcuopt.runtime_probes.evidence import DeploymentContentAddressedEvidencePublisher
+from hcuopt.runtime_probes.overlay import OverlayCapabilityProbe
+from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
 from hcuopt.stage0 import evaluate_stage0
+from tests.unit.test_runtime_probe_formal_v2 import (
+    _Cleaner as RuntimeCleaner,
+)
+from tests.unit.test_runtime_probe_formal_v2 import (
+    _Clock as RuntimeClock,
+)
+from tests.unit.test_runtime_probe_formal_v2 import (
+    _formal_hotpatch_target_and_profile,
+    _FormalOverlayExecutor,
+)
+from tests.unit.test_runtime_probe_formal_v2 import (
+    _Runner as RuntimeRunner,
+)
+from tests.unit.test_runtime_probe_formal_v2 import (
+    _Telemetry as RuntimeTelemetry,
+)
 
 requires_posix_reader = pytest.mark.skipif(
     os.name != "posix",
@@ -881,9 +901,14 @@ class _Suite:
         )
 
 
-def _build_suite(tmp_path: Path, **raw_options: Any) -> _Suite:
+def _build_suite(
+    tmp_path: Path,
+    *,
+    target: TargetSpec | None = None,
+    **raw_options: Any,
+) -> _Suite:
     protocol = load_registered_stage0_protocol("s0-g0-v1", config_root=PROTOCOL_ROOT)
-    target = _load_target()
+    target = target or _load_target()
     context = Stage0VerificationContext(
         task_id=TASK_ID,
         stage0_run_id=RUN_ID,
@@ -1833,3 +1858,110 @@ def test_file_finalizer_verifies_and_publishes_both_report_formats(
     assert machine["accepted_target_risks"] == ["device_isolation_not_reserved"]
     assert FORMAL_STAGE0_SCOPE_WARNING in markdown
     assert "device_isolation_not_reserved" in markdown
+
+
+@requires_posix_reader
+def test_real_b_and_c_envelopes_cross_the_file_finalizer_barrier(
+    tmp_path: Path,
+) -> None:
+    target, runtime_profile, phase_dirs, baseline_implementation, artifact_hash = (
+        _formal_hotpatch_target_and_profile(tmp_path / "producer")
+    )
+    runtime_profile = runtime_profile.model_copy(update={"profile": PROFILE})
+    suite = _build_suite(tmp_path / "suite", target=target)
+    cleaner = RuntimeCleaner()
+    executor = _FormalOverlayExecutor(
+        phase_dirs,
+        baseline_implementation,
+        artifact_hash,
+    )
+    adapter = RuntimeProbeAdapter(
+        ProfilerCapabilityProbe(
+            RuntimeRunner(
+                [
+                    b"rocprofiler-sdk 0.6\n",
+                    (
+                        b"Kernel_Name,Start_Timestamp,End_Timestamp,GPU_ID,Queue_ID\n"
+                        b"hgemm_128x128,100,1000,7,1\n"
+                    ),
+                ]
+            )
+        ),
+        OverlayCapabilityProbe(executor, cleaner),
+        cleaner,
+        target,
+        runtime_profile,
+        DeploymentContentAddressedEvidencePublisher(suite.root),
+        RuntimeTelemetry(),
+        RuntimeClock(),
+    )
+
+    def payload(probe_type: Stage0ProbeType) -> dict[str, Any]:
+        reference = suite.references[probe_type]
+        return {
+            "task_id": str(suite.context.task_id),
+            "stage0_run_id": str(suite.context.stage0_run_id),
+            "target_snapshot_id": str(suite.context.target_snapshot_id),
+            "target_fingerprint": suite.context.target_fingerprint,
+            "target": target.model_dump(mode="json"),
+            "workload_id": suite.context.workload_id,
+            "adapter_profile": PROFILE,
+            "probe_type": probe_type.value,
+            "protocol_version": suite.protocol.protocol.protocol_version,
+            "mode": "formal",
+            "_job_context": {
+                "lease_id": str(reference.lease_id),
+                "lease_scope": "exclusive",
+                "resource_id": reference.resource_id,
+                "fencing_token": reference.fencing_token,
+            },
+        }
+
+    profiler_output = adapter.run_probe(
+        payload(Stage0ProbeType.PROFILER),
+        tmp_path / "worker-output",
+    )
+    hotpatch_output = adapter.run_probe(
+        payload(Stage0ProbeType.HOTPATCH),
+        tmp_path / "worker-output",
+    )
+    for probe_type, output in (
+        (Stage0ProbeType.PROFILER, profiler_output),
+        (Stage0ProbeType.HOTPATCH, hotpatch_output),
+    ):
+        suite.references[probe_type] = suite.references[probe_type].model_copy(
+            update={
+                "raw_evidence_uri": output.raw_evidence_uri,
+                "raw_evidence_hash": output.raw_evidence_hash,
+                "adapter_provenance": output.adapter_provenance,
+                "cleanup_evidence": output.cleanup_evidence,
+            }
+        )
+
+    # Producer-owned summaries are deliberately outside the verifier input.
+    profiler_output.summary["capability"] = "full"
+    finalizer = FileStage0Finalizer(suite.root)
+    verification = finalizer.verify(
+        suite.context,
+        tuple(suite.references.values()),
+        protocol_version="s0-g0-v1",
+    )
+    decision = evaluate_stage0(
+        verification.to_stage0_evidence(evidence_uri="stage0://real-producer-test")
+    )
+    artifacts = finalizer.publish_report(
+        suite.context,
+        verification,
+        mode=decision.mode,
+        reasons=tuple(decision.reasons),
+        accepted_target_risks=("device_isolation_not_reserved",),
+    )
+
+    assert verification.profiler is ProfilerCapability.DEGRADED
+    assert verification.hot_patch is HotPatchCapability.OVERLAY_ONLY
+    assert decision.mode is ProjectMode.FULL_MVP
+    machine = json.loads(
+        Path(unquote(urlparse(artifacts.machine_report_uri).path)).read_text(encoding="utf-8")
+    )
+    assert machine["automatic_release_allowed"] is False
+    assert machine["accepted_target_risks"] == ["device_isolation_not_reserved"]
