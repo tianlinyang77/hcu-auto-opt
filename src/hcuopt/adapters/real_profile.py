@@ -19,7 +19,12 @@ from hcuopt.adapters.sglang_evaluator import SGLangSmokeEvaluator
 from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
-from hcuopt.measurement.harness import EvidenceMeasurementHarness, TelemetryCollector
+from hcuopt.measurement.harness import (
+    EvidenceMeasurementHarness,
+    FormalStage0Workload,
+    ProcessLifecycleRecorder,
+    TelemetryCollector,
+)
 from hcuopt.measurement.sampling import SampledWorkload
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
 from hcuopt.measurement.timers import DeviceTimer, HostClock
@@ -72,6 +77,8 @@ def build_nmz36_stage0_measurement_registry(
     synchronize: Callable[[], None] | None = None,
     clock: HostClock | None = None,
     runner: CommandRunner | None = None,
+    formal_workload_factory: (Callable[[Stage0ProbeType, int], FormalStage0Workload] | None) = None,
+    lifecycle_recorder: ProcessLifecycleRecorder | None = None,
 ) -> AdapterRegistry:
     """Compose the real S0-B adapters without guessing a driver-specific timer API.
 
@@ -95,6 +102,8 @@ def build_nmz36_stage0_measurement_registry(
         synchronize=synchronize,
         clock=clock,
         cleaner=cleaner,
+        formal_workload_factory=formal_workload_factory,
+        lifecycle_recorder=lifecycle_recorder,
     )
     return AdapterRegistry(
         profile=profile,
@@ -124,8 +133,7 @@ def build_nmz36_runtime_probe_registry(
     profile = REAL_STAGE0_PROFILE
     if configuration.profile != profile:
         raise ValueError(
-            f"runtime probe configuration profile must be {profile}, "
-            f"got {configuration.profile}"
+            f"runtime probe configuration profile must be {profile}, got {configuration.profile}"
         )
     executor = ContainerExecutionAdapter(runner, profile=profile)
     cleaner = ContainerResourceCleaner(target, runner, profile=profile)

@@ -195,6 +195,8 @@ class Stage0ControlPlanePostgresTests(unittest.TestCase):
         for _ in range(len(Stage0ProbeType)):
             job = self.repository.claim_job("stage0-gpu")
             assert job is not None
+            self.assertEqual(job["payload"]["workload_id"], "sglang-qwen2.5-0.5b")
+            self.assertEqual(job["payload"]["adapter_profile"], PROFILE)
             probe_type = Stage0ProbeType(job["payload"]["probe_type"])
             result = Stage0ProbeResult(
                 stage0_run_id=run["stage0_run_id"],

@@ -115,8 +115,10 @@ immutable Target Snapshot and seven probe references into this verifier, ignores
 producer summaries, rechecks the input digest inside the PostgreSQL finalize
 transaction, and publishes hashed JSON and Markdown reports. The HCU 7 reservation
 risk is recorded as accepted rather than falsely described as proven exclusivity.
-Formal probe production remains disabled until B/C emit this exact v2 evidence.
-In particular, S0-C must
+S0-B now emits the exact fingerprint and timing V2 envelopes when a deployment injects
+the required real segmented workload, device timer, typed telemetry, lifecycle recorder,
+and cleanup controller. No nmz36 Formal measurement has been claimed yet. The seven-probe
+Barrier remains disabled because S0-C must still
 publish its existing raw PyTorch trace and three isolated overlay executions in
 these typed envelopes; translating only S0-C's summary fields is not sufficient.
 
