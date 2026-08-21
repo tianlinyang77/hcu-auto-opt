@@ -95,9 +95,7 @@ class OverlayCapabilityProbe:
         )
         baseline_path = file_uri_to_path(baseline.worktree_uri).resolve(strict=True)
         baseline_hash_before = canonical_source_hash(baseline_path)
-        deadline = (
-            monotonic() + max_wall_seconds if max_wall_seconds is not None else None
-        )
+        deadline = monotonic() + max_wall_seconds if max_wall_seconds is not None else None
 
         baseline_request = self._bounded_request(baseline_request, deadline)
         baseline_result = self.executor.execute(baseline_request, target, output_dir)
@@ -135,9 +133,10 @@ class OverlayCapabilityProbe:
             and candidate_metadata.get("implementation_hash") == artifact.content_hash
             and candidate_metadata.get("replacement_point") == frozen.replacement_point
         )
-        correctness_passed = (
-            baseline_metadata.get("output_hash") is not None
-            and candidate_metadata.get("output_hash") == baseline_metadata.get("output_hash")
+        correctness_passed = baseline_metadata.get(
+            "output_hash"
+        ) is not None and candidate_metadata.get("output_hash") == baseline_metadata.get(
+            "output_hash"
         )
         recovery_passed = (
             recovery_metadata.get("output_hash") == baseline_metadata.get("output_hash")
@@ -174,9 +173,7 @@ class OverlayCapabilityProbe:
         )
         sglang_overlay_proved = passed and frozen.workload_kind == "sglang_python_triton"
         capability = (
-            HotPatchCapability.OVERLAY_ONLY
-            if sglang_overlay_proved
-            else HotPatchCapability.NONE
+            HotPatchCapability.OVERLAY_ONLY if sglang_overlay_proved else HotPatchCapability.NONE
         )
 
         return {
@@ -212,23 +209,35 @@ class OverlayCapabilityProbe:
                 "candidate": candidate_health,
                 "recovery": recovery_health,
             },
+            "_formal_evidence": {
+                "configuration": frozen,
+                "requests": {
+                    "baseline": baseline_request,
+                    "candidate": candidate_request,
+                    "recovery": recovery_request,
+                },
+                "results": {
+                    "baseline": baseline_result,
+                    "candidate": candidate_result,
+                    "recovery": recovery_result,
+                },
+                "observations": {
+                    "baseline": baseline_metadata,
+                    "candidate": candidate_metadata,
+                    "recovery": recovery_metadata,
+                },
+            },
         }
 
     @staticmethod
-    def _bounded_request(
-        request: ExecutionRequest, deadline: float | None
-    ) -> ExecutionRequest:
+    def _bounded_request(request: ExecutionRequest, deadline: float | None) -> ExecutionRequest:
         if deadline is None:
             return request
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("runtime probe wall-clock budget exhausted")
         return request.model_copy(
-            update={
-                "timeout_seconds": max(
-                    1, min(request.timeout_seconds, math.ceil(remaining))
-                )
-            }
+            update={"timeout_seconds": max(1, min(request.timeout_seconds, math.ceil(remaining)))}
         )
 
     @staticmethod
@@ -304,7 +313,9 @@ class OverlayCapabilityProbe:
                 raise ValueError("candidate overlay requires a mount target")
             mounts.append(
                 MountSpec(
-                    source=file_uri_to_path(artifact.uri).resolve(strict=True).as_posix(),
+                    source=OverlayCapabilityProbe._mount_source(
+                        file_uri_to_path(artifact.uri).resolve(strict=True)
+                    ),
                     target=overlay_target,
                     read_only=True,
                 )
@@ -328,6 +339,11 @@ class OverlayCapabilityProbe:
             return False
         digest = value.removeprefix("sha256:")
         return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+
+    @staticmethod
+    def _mount_source(path: Path) -> str:
+        value = path.as_posix()
+        return f"/{value}" if os.name == "nt" else value
 
     @staticmethod
     def _validate_sources(
@@ -367,13 +383,18 @@ class OverlayCapabilityProbe:
         resource_id: str,
         fencing_token: int,
     ) -> None:
-        for request in (baseline, candidate, recovery):
+        for phase, request in zip(
+            (configuration.baseline, configuration.candidate, configuration.recovery),
+            (baseline, candidate, recovery),
+            strict=True,
+        ):
             if request.target_id != target.target_id:
                 raise ValueError("overlay execution request targets a different Target Lock")
             if request.container_image != target.inference_image.immutable_reference:
                 raise ValueError("overlay execution must use the digest-locked image")
             if request.resource_id != resource_id or request.fencing_token != fencing_token:
                 raise ValueError("overlay execution must use the live lease and fencing token")
+            OverlayCapabilityProbe._validate_formal_phase_mount(phase, request)
 
         if (
             configuration.workload_kind == "sglang_python_triton"
@@ -381,7 +402,9 @@ class OverlayCapabilityProbe:
         ):
             raise ValueError("SGLang overlay must mount the artifact at its replacement point")
 
-        artifact_path = file_uri_to_path(artifact.uri).resolve(strict=True).as_posix()
+        artifact_path = OverlayCapabilityProbe._mount_source(
+            file_uri_to_path(artifact.uri).resolve(strict=True)
+        )
         matching_mounts = [
             mount
             for mount in candidate.mounts
@@ -400,3 +423,32 @@ class OverlayCapabilityProbe:
             recovery.environment.get(CACHE_ENVIRONMENT_KEY),
         }:
             raise ValueError("candidate cache must be isolated from baseline and recovery")
+
+    @staticmethod
+    def _validate_formal_phase_mount(
+        phase: OverlayPhaseConfiguration,
+        request: ExecutionRequest,
+    ) -> None:
+        if phase.evidence_directory_uri is None:
+            return
+        evidence_path = file_uri_to_path(phase.evidence_directory_uri)
+        if evidence_path.is_symlink():
+            raise ValueError("Formal overlay evidence directory cannot be a symlink")
+        evidence_path = evidence_path.resolve(strict=True)
+        if not evidence_path.is_dir():
+            raise ValueError("Formal overlay evidence URI must name a directory")
+        source = OverlayCapabilityProbe._mount_source(evidence_path)
+        try:
+            argument_index = request.argv.index("--evidence-dir")
+            mount_target = request.argv[argument_index + 1]
+        except (ValueError, IndexError) as exc:
+            raise ValueError("Formal overlay argv must declare its evidence directory") from exc
+        mounts = [
+            mount
+            for mount in request.mounts
+            if mount.source == source and mount.target == mount_target
+        ]
+        if len(mounts) != 1 or mounts[0].read_only:
+            raise ValueError("Formal overlay requires one worker-owned writable evidence mount")
+        if "--formal-evidence" not in request.argv:
+            raise ValueError("Formal overlay runner must enable raw evidence capture")

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from math import isfinite
+from statistics import fmean
 from typing import Any, Protocol
 
-from hcuopt.measurement.models import ClockCalibration
+from hcuopt.measurement.models import (
+    ClockCalibration,
+    ClockCalibrationPointV2,
+    ClockCalibrationV2,
+)
 
 
 class CalibrationError(ValueError):
@@ -25,6 +30,8 @@ class DeviceTimer(Protocol):
     def read_ticks(self) -> int: ...
 
     def measure_resolution_ns(self, sample_count: int) -> float: ...
+
+    def sample_resolution_ticks(self, sample_count: int) -> Sequence[int]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,11 @@ class TorchCudaEventTimer:
     def measure_resolution_ns(self, sample_count: int = 64) -> float:
         """Measure the smallest positive interval observable by paired events."""
 
+        return float(min(self.sample_resolution_ticks(sample_count)))
+
+    def sample_resolution_ticks(self, sample_count: int = 64) -> tuple[int, ...]:
+        """Return the raw positive event deltas used by Formal Stage 0."""
+
         if sample_count < 2:
             raise CalibrationError("timer resolution requires at least two event pairs")
         pairs = []
@@ -95,7 +107,7 @@ class TorchCudaEventTimer:
             finished.record()
             pairs.append((started, finished))
         self._torch.cuda.synchronize()
-        intervals_ns = []
+        intervals_ns: list[int] = []
         for started, finished in pairs:
             elapsed_ns = float(started.elapsed_time(finished)) * 1_000_000
             if not isfinite(elapsed_ns) or elapsed_ns < 0:
@@ -103,10 +115,10 @@ class TorchCudaEventTimer:
                     f"invalid CUDA/HIP event resolution sample: {elapsed_ns!r} ns"
                 )
             if elapsed_ns > 0:
-                intervals_ns.append(elapsed_ns)
+                intervals_ns.append(round(elapsed_ns))
         if not intervals_ns:
             raise CalibrationError("CUDA/HIP event timer produced no positive resolution sample")
-        return min(intervals_ns)
+        return tuple(intervals_ns)
 
 
 def calibrate_device_timer(
@@ -129,20 +141,14 @@ def calibrate_device_timer(
         finished = host_clock.now_ns()
         points.append((ticks, started + (finished - started) // 2))
 
-    tick_deltas = [
-        points[index][0] - points[index - 1][0] for index in range(1, len(points))
-    ]
-    host_deltas = [
-        points[index][1] - points[index - 1][1] for index in range(1, len(points))
-    ]
+    tick_deltas = [points[index][0] - points[index - 1][0] for index in range(1, len(points))]
+    host_deltas = [points[index][1] - points[index - 1][1] for index in range(1, len(points))]
     if any(value <= 0 for value in tick_deltas):
         raise CalibrationError("device timer ticks must strictly increase")
     if any(value <= 0 for value in host_deltas):
         raise CalibrationError("host monotonic time must strictly increase")
     ns_per_tick = sum(host_deltas) / sum(tick_deltas)
-    timer_resolution_ns = float(
-        device_timer.measure_resolution_ns(resolution_sample_count)
-    )
+    timer_resolution_ns = float(device_timer.measure_resolution_ns(resolution_sample_count))
     if not isfinite(timer_resolution_ns) or timer_resolution_ns <= 0:
         raise CalibrationError(
             f"device timer returned invalid resolution: {timer_resolution_ns!r} ns"
@@ -161,6 +167,109 @@ def calibrate_device_timer(
         max_residual_ns=max(residuals),
         point_count=len(points),
     )
+
+
+def calibrate_device_timer_v2(
+    host_clock: HostClock,
+    device_timer: DeviceTimer,
+    *,
+    device_index: int,
+    sample_count: int = 5,
+    resolution_sample_count: int = 64,
+    synchronize: Callable[[], None] | None = None,
+    device_name: str = "device-timer",
+) -> ClockCalibrationV2:
+    """Capture raw calibration inputs and a separately reproducible producer fit."""
+
+    if sample_count < 3:
+        raise CalibrationError("Formal device timer calibration requires at least three points")
+    points: list[ClockCalibrationPointV2] = []
+    for point_ordinal in range(sample_count):
+        if synchronize is not None:
+            synchronize()
+        started = host_clock.now_ns()
+        ticks = device_timer.read_ticks()
+        finished = host_clock.now_ns()
+        if finished <= started:
+            raise CalibrationError("Formal clock calibration requires positive host intervals")
+        points.append(
+            ClockCalibrationPointV2(
+                point_ordinal=point_ordinal,
+                device_ticks=ticks,
+                host_started_monotonic_ns=started,
+                host_finished_monotonic_ns=finished,
+            )
+        )
+
+    sampler = getattr(device_timer, "sample_resolution_ticks", None)
+    if not callable(sampler):
+        raise DeviceTimerUnavailableError(
+            "Formal Stage 0 requires raw device timer resolution tick samples"
+        )
+    resolution_tick_deltas = tuple(sampler(resolution_sample_count))
+    if len(resolution_tick_deltas) < 3:
+        raise CalibrationError(
+            "Formal device timer calibration requires at least three resolution samples"
+        )
+    timer_resolution_ns, ns_per_tick, max_residual_ns = _fit_v2_calibration(
+        points,
+        resolution_tick_deltas,
+    )
+    return ClockCalibrationV2(
+        device_name=device_name,
+        device_index=device_index,
+        timer_resolution_ns=timer_resolution_ns,
+        ns_per_tick=ns_per_tick,
+        max_residual_ns=max_residual_ns,
+        points=tuple(points),
+        resolution_tick_deltas=resolution_tick_deltas,
+    )
+
+
+def _fit_v2_calibration(
+    points: Sequence[ClockCalibrationPointV2],
+    resolution_tick_deltas: Sequence[int],
+) -> tuple[float, float, float]:
+    """Producer-side fit; D recomputes the same claims from raw inputs independently."""
+
+    device_ticks = [float(point.device_ticks) for point in points]
+    host_midpoints = [
+        point.host_started_monotonic_ns
+        + (point.host_finished_monotonic_ns - point.host_started_monotonic_ns) / 2.0
+        for point in points
+    ]
+    mean_ticks = fmean(device_ticks)
+    mean_host = fmean(host_midpoints)
+    sum_squares = sum((value - mean_ticks) ** 2 for value in device_ticks)
+    if sum_squares <= 0:
+        raise CalibrationError("Formal device timer calibration has no tick variance")
+    slope = (
+        sum(
+            (device - mean_ticks) * (host - mean_host)
+            for device, host in zip(device_ticks, host_midpoints, strict=True)
+        )
+        / sum_squares
+    )
+    if not isfinite(slope) or slope <= 0:
+        raise CalibrationError("Formal device timer ns_per_tick must be finite and positive")
+    intercept = mean_host - slope * mean_ticks
+    max_residual = max(
+        abs(host - (intercept + slope * device))
+        + (point.host_finished_monotonic_ns - point.host_started_monotonic_ns) / 2.0
+        for point, device, host in zip(
+            points,
+            device_ticks,
+            host_midpoints,
+            strict=True,
+        )
+    )
+    try:
+        resolution = min(resolution_tick_deltas) * slope
+    except (TypeError, ValueError) as exc:
+        raise CalibrationError("Formal device timer resolution samples are invalid") from exc
+    if not isfinite(resolution) or resolution <= 0:
+        raise CalibrationError("Formal device timer resolution must be finite and positive")
+    return resolution, slope, max_residual
 
 
 def device_elapsed_ns(

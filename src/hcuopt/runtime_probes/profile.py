@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -16,6 +16,12 @@ def _absolute_path(value: str, field_name: str) -> str:
     return value
 
 
+def _host_absolute_path(value: str, field_name: str) -> str:
+    if not Path(value).is_absolute() and not PurePosixPath(value).is_absolute():
+        raise ValueError(f"{field_name} must be an absolute host path")
+    return value
+
+
 class ProfilerToolConfiguration(ContractModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -24,7 +30,9 @@ class ProfilerToolConfiguration(ContractModel):
     profile_argv: tuple[str, ...] = Field(min_length=1)
     output_format: Literal["json", "jsonl", "csv", "torch_trace"]
     output_path: str | None = None
+    output_host_uri: str | None = None
     timeout_seconds: int = Field(default=300, ge=1, le=86_400)
+
     @field_validator("version_argv", "profile_argv")
     @classmethod
     def validate_argv(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -38,6 +46,10 @@ class ProfilerToolConfiguration(ContractModel):
             raise ValueError("torch_trace profiler requires output_path")
         if self.output_path is not None:
             _absolute_path(self.output_path, "output_path")
+        if self.output_host_uri is not None and not self.output_host_uri.startswith("file:"):
+            raise ValueError("output_host_uri must be a file URI")
+        if self.output_format != "torch_trace" and self.output_host_uri is not None:
+            raise ValueError("output_host_uri is only valid for torch_trace")
         return self
 
 
@@ -65,16 +77,15 @@ class ProfilerProbeConfiguration(ContractModel):
     @field_validator("triage_work_dir")
     @classmethod
     def validate_triage_work_dir(cls, value: str | None) -> str | None:
-        return None if value is None else _absolute_path(value, "triage_work_dir")
+        return None if value is None else _host_absolute_path(value, "triage_work_dir")
 
-    @field_validator("mounts")
-    @classmethod
-    def require_read_only_mounts(
-        cls, mounts: tuple[MountSpec, ...]
-    ) -> tuple[MountSpec, ...]:
-        if any(not mount.read_only for mount in mounts):
-            raise ValueError("profiler profile mounts must be read-only")
-        return mounts
+    @model_validator(mode="after")
+    def validate_writable_output_mounts(self) -> ProfilerProbeConfiguration:
+        if any(not mount.read_only for mount in self.mounts) and not any(
+            candidate.output_host_uri is not None for candidate in self.tool_candidates
+        ):
+            raise ValueError("profiler writable mounts require a worker-owned output_host_uri")
+        return self
 
 
 class OverlayPhaseConfiguration(ContractModel):
@@ -85,6 +96,8 @@ class OverlayPhaseConfiguration(ContractModel):
     environment: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=600, ge=1, le=86_400)
     mounts: tuple[MountSpec, ...] = ()
+    evidence_directory_uri: str | None = None
+    implementation_source_uri: str | None = None
 
     @field_validator("argv")
     @classmethod
@@ -98,14 +111,23 @@ class OverlayPhaseConfiguration(ContractModel):
     def validate_working_directory(cls, value: str) -> str:
         return _absolute_path(value, "working_directory")
 
-    @field_validator("mounts")
-    @classmethod
-    def require_read_only_mounts(
-        cls, mounts: tuple[MountSpec, ...]
-    ) -> tuple[MountSpec, ...]:
-        if any(not mount.read_only for mount in mounts):
-            raise ValueError("overlay profile mounts must be read-only")
-        return mounts
+    @model_validator(mode="after")
+    def validate_formal_evidence_inputs(self) -> OverlayPhaseConfiguration:
+        formal_values = (self.evidence_directory_uri, self.implementation_source_uri)
+        if any(value is not None for value in formal_values) and any(
+            value is None for value in formal_values
+        ):
+            raise ValueError("overlay phase Formal evidence URI fields must be supplied together")
+        for value in formal_values:
+            if value is not None and not value.startswith("file:"):
+                raise ValueError("overlay Formal evidence inputs must be file URIs")
+        if self.evidence_directory_uri is None and any(
+            not mount.read_only for mount in self.mounts
+        ):
+            raise ValueError(
+                "overlay writable mounts require an explicit Formal evidence directory"
+            )
+        return self
 
 
 class OverlayProbeConfiguration(ContractModel):
@@ -126,6 +148,23 @@ class OverlayProbeConfiguration(ContractModel):
     @classmethod
     def validate_overlay_mount_target(cls, value: str) -> str:
         return _absolute_path(value, "overlay_mount_target")
+
+    @model_validator(mode="after")
+    def validate_formal_phase_inputs(self) -> OverlayProbeConfiguration:
+        phases = (self.baseline, self.candidate, self.recovery)
+        evidence_directories = [phase.evidence_directory_uri for phase in phases]
+        if any(value is not None for value in evidence_directories):
+            if any(value is None for value in evidence_directories):
+                raise ValueError("all overlay phases must declare Formal evidence directories")
+            if len(set(evidence_directories)) != 3:
+                raise ValueError("overlay Formal phase evidence directories must be distinct")
+            if self.candidate.implementation_source_uri != self.artifact.uri:
+                raise ValueError(
+                    "candidate Formal implementation source must be the frozen Artifact"
+                )
+            if self.baseline.implementation_source_uri != self.recovery.implementation_source_uri:
+                raise ValueError("baseline and recovery Formal implementation sources must match")
+        return self
 
 
 class RuntimeProbeProfile(ContractModel):

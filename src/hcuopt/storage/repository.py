@@ -12,6 +12,7 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
@@ -49,7 +50,18 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from hcuopt.domain.transitions import transition_candidate, transition_task
-from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
+from hcuopt.evaluation.stage0_finalizer import Stage0FinalizationService
+from hcuopt.evaluation.stage0_protocol import (
+    Stage0ProtocolError,
+    load_registered_stage0_protocol,
+)
+from hcuopt.evaluation.stage0_verifier import (
+    Stage0EvidenceError,
+    Stage0ProbeEvidenceReference,
+    Stage0VerificationContext,
+    verification_input_digest,
+)
+from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
 
@@ -61,8 +73,14 @@ class PostgresRepository:
     workers and never holds a database transaction open.
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        stage0_finalizer: Stage0FinalizationService | None = None,
+    ) -> None:
         self.database_url = database_url
+        self.stage0_finalizer = stage0_finalizer
 
     @contextmanager
     def connection(self) -> Iterator[Connection[dict[str, Any]]]:
@@ -82,9 +100,7 @@ class PostgresRepository:
             )
             applied = {
                 row["version"]
-                for row in connection.execute(
-                    "SELECT version FROM schema_migrations"
-                ).fetchall()
+                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
             }
             for version, sql in migration_plan():
                 if version not in applied:
@@ -131,9 +147,7 @@ class PostgresRepository:
         source_path: str,
     ) -> dict[str, Any]:
         fingerprint = self._target_fingerprint(target)
-        snapshot_id = uuid5(
-            NAMESPACE_URL, f"hcuopt:target:{target.target_id}:{fingerprint}"
-        )
+        snapshot_id = uuid5(NAMESPACE_URL, f"hcuopt:target:{target.target_id}:{fingerprint}")
         specification = target.model_dump(mode="json")
         row = connection.execute(
             """
@@ -173,9 +187,7 @@ class PostgresRepository:
             raise Conflict("target snapshot identity was reused with different content")
         return row
 
-    def upsert_target_snapshot(
-        self, target: TargetSpec, source_path: str
-    ) -> dict[str, Any]:
+    def upsert_target_snapshot(self, target: TargetSpec, source_path: str) -> dict[str, Any]:
         with self.connection() as connection:
             return self._upsert_target_snapshot(connection, target, source_path)
 
@@ -185,6 +197,14 @@ class PostgresRepository:
         target: TargetSpec,
         source_path: str,
     ) -> dict[str, Any]:
+        if request.mode is Stage0RunMode.FORMAL:
+            try:
+                load_registered_stage0_protocol(request.protocol_version)
+            except Stage0ProtocolError as exc:
+                raise Conflict(
+                    "formal Stage 0 requires a repository-registered protocol: "
+                    f"{request.protocol_version}"
+                ) from exc
         task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
         run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
         budget = request.budget.model_dump(mode="json", exclude_none=True)
@@ -286,6 +306,8 @@ class PostgresRepository:
                     "target_snapshot_id": str(snapshot["target_snapshot_id"]),
                     "target_fingerprint": snapshot["target_fingerprint"],
                     "target": target.model_dump(mode="json"),
+                    "workload_id": task["workload_id"],
+                    "adapter_profile": run["adapter_profile"],
                     "protocol_version": request.protocol_version,
                     "mode": request.mode.value,
                     "budget": budget,
@@ -327,9 +349,7 @@ class PostgresRepository:
                             "target_snapshot_id": str(snapshot["target_snapshot_id"]),
                             "mode": request.mode.value,
                             "protocol_version": request.protocol_version,
-                            "probe_types": sorted(
-                                item.value for item in REQUIRED_STAGE0_PROBES
-                            ),
+                            "probe_types": sorted(item.value for item in REQUIRED_STAGE0_PROBES),
                         }
                     ),
                     task["task_id"],
@@ -551,9 +571,7 @@ class PostgresRepository:
             raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
         return row
 
-    def list_stage0_probe_records(
-        self, stage0_run_id: UUID
-    ) -> list[dict[str, Any]]:
+    def list_stage0_probe_records(self, stage0_run_id: UUID) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return connection.execute(
                 """
@@ -625,28 +643,21 @@ class PostgresRepository:
 
             if run["mode"] == Stage0RunMode.FORMAL.value:
                 if result.synthetic or any(
-                    item.implementation_kind != "real"
-                    for item in result.adapter_provenance
+                    item.implementation_kind != "real" for item in result.adapter_provenance
                 ):
                     raise Conflict("formal Stage 0 requires real probe provenance")
                 if job["lease_scope"] != LeaseScope.EXCLUSIVE.value:
                     raise Conflict("formal Stage 0 probes require an exclusive lease")
                 if any(
-                    job.get(name) is None
-                    for name in ("lease_id", "resource_id", "fencing_token")
+                    job.get(name) is None for name in ("lease_id", "resource_id", "fencing_token")
                 ):
                     raise Conflict("formal Stage 0 probes require lease and fencing identity")
                 if not _cleanup_is_healthy(result.cleanup_evidence):
                     raise Conflict("formal Stage 0 probes require healthy fenced cleanup")
-            if any(
-                item.profile != run["adapter_profile"]
-                for item in result.adapter_provenance
-            ):
+            if any(item.profile != run["adapter_profile"] for item in result.adapter_provenance):
                 raise Conflict("Stage 0 probe provenance does not match the run profile")
 
-            provenance = [
-                item.model_dump(mode="json") for item in result.adapter_provenance
-            ]
+            provenance = [item.model_dump(mode="json") for item in result.adapter_provenance]
             row = connection.execute(
                 """
                 INSERT INTO stage0_probe_records (
@@ -678,9 +689,7 @@ class PostgresRepository:
                     job.get("lease_id"),
                     job.get("resource_id"),
                     job.get("fencing_token"),
-                    Jsonb(result.cleanup_evidence)
-                    if result.cleanup_evidence is not None
-                    else None,
+                    Jsonb(result.cleanup_evidence) if result.cleanup_evidence is not None else None,
                 ),
             ).fetchone()
             created = row is not None
@@ -752,6 +761,46 @@ class PostgresRepository:
         return row
 
     def finalize_stage0_run(self, stage0_run_id: UUID) -> dict[str, Any]:
+        initial = self._load_stage0_verification_input(stage0_run_id)
+        run = initial["run"]
+        if run["state"] == Stage0RunState.FINALIZED.value:
+            assert run["report"] is not None
+            return run["report"]
+        self._require_stage0_ready_for_verification(initial)
+        if self.stage0_finalizer is None:
+            raise Conflict(
+                "formal Stage 0 verifier is not configured; set the deployment evidence root"
+            )
+        context = initial["context"]
+        references = initial["references"]
+        try:
+            verification = self.stage0_finalizer.verify(
+                context,
+                references,
+                protocol_version=run["protocol_version"],
+            )
+        except (Stage0EvidenceError, Stage0ProtocolError, ValidationError, ValueError) as exc:
+            code = getattr(exc, "code", "formal_evidence_invalid")
+            raise Conflict(f"formal Stage 0 evidence verification failed [{code}]: {exc}") from exc
+
+        evidence = verification.to_stage0_evidence(
+            evidence_uri=(
+                f"stage0://runs/{stage0_run_id}/verification/"
+                f"{verification.input_digest.removeprefix('sha256:')}"
+            )
+        )
+        decision = evaluate_stage0(evidence)
+        accepted_target_risks = tuple(
+            blocker.id for blocker in context.target.blockers if blocker.status == "accepted"
+        )
+        artifacts = self.stage0_finalizer.publish_report(
+            context,
+            verification,
+            mode=decision.mode,
+            reasons=tuple(decision.reasons),
+            accepted_target_risks=accepted_target_risks,
+        )
+
         with self.connection() as connection:
             run = connection.execute(
                 "SELECT * FROM stage0_runs WHERE stage0_run_id = %s FOR UPDATE",
@@ -762,17 +811,19 @@ class PostgresRepository:
             if run["state"] == Stage0RunState.FINALIZED.value:
                 assert run["report"] is not None
                 return run["report"]
-            if run["mode"] != Stage0RunMode.FORMAL.value:
-                raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
-            if run["state"] != Stage0RunState.READY.value:
-                raise Conflict("Stage 0 probe barrier is not ready")
             task = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
                 (run["task_id"],),
             ).fetchone()
             assert task is not None
-            if task["state"] != TaskState.STAGE0_PENDING.value:
-                raise Conflict("formal Stage 0 requires a stage0_pending task")
+            target_snapshot = connection.execute(
+                """
+                SELECT * FROM target_snapshots
+                WHERE target_snapshot_id = %s
+                """,
+                (run["target_snapshot_id"],),
+            ).fetchone()
+            assert target_snapshot is not None
             records = connection.execute(
                 """
                 SELECT * FROM stage0_probe_records
@@ -780,20 +831,35 @@ class PostgresRepository:
                 """,
                 (stage0_run_id,),
             ).fetchall()
-            probes = {
-                Stage0ProbeType(row["probe_type"]): row["summary"] for row in records
-            }
-            evidence = evidence_from_probe_summaries(
-                probes,
-                evidence_uri=f"stage0://runs/{stage0_run_id}",
+            current = self._project_stage0_verification_input(
+                run,
+                task,
+                target_snapshot,
+                records,
             )
-            decision = evaluate_stage0(evidence)
+            self._require_stage0_ready_for_verification(current)
+            protocol = load_registered_stage0_protocol(run["protocol_version"])
+            current_references = {
+                reference.probe_type: reference for reference in current["references"]
+            }
+            current_digest = verification_input_digest(
+                current["context"], current_references, protocol
+            )
+            if current_digest != verification.input_digest:
+                raise Conflict("Stage 0 evidence changed during independent verification")
+            if (
+                verification.protocol_version != run["protocol_version"]
+                or verification.protocol_hash != protocol.protocol_hash
+            ):
+                raise Conflict("Stage 0 verifier used a different registered protocol")
+            if current["context"] != context:
+                raise Conflict("Stage 0 verification context changed before commit")
+
             target_state = (
                 TaskState.STOPPED_MEASUREMENT
                 if decision.mode is ProjectMode.STOPPED_MEASUREMENT
                 else TaskState.DEGRADED
-                if decision.mode
-                in {ProjectMode.DEGRADED_MANUAL_INTAKE, ProjectMode.CONFIG_ONLY}
+                if decision.mode in {ProjectMode.DEGRADED_MANUAL_INTAKE, ProjectMode.CONFIG_ONLY}
                 else TaskState.BASELINE_PENDING
             )
             transition_task(TaskState(task["state"]), target_state)
@@ -803,22 +869,48 @@ class PostgresRepository:
                 "reasons": list(decision.reasons),
                 "automatic_release_allowed": False,
                 "evidence_authority": "formal",
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "machine_report_uri": artifacts.machine_report_uri,
+                "machine_report_hash": artifacts.machine_report_hash,
+                "markdown_report_uri": artifacts.markdown_report_uri,
+                "markdown_report_hash": artifacts.markdown_report_hash,
+                "accepted_target_risks": list(accepted_target_risks),
             }
             aggregate = {
-                "source": "target-bound-stage0-run",
+                "source": "independently-verified-raw-evidence",
                 "stage0_run_id": str(stage0_run_id),
                 "target_snapshot_id": str(run["target_snapshot_id"]),
-                "protocol_version": run["protocol_version"],
-                "measurement": evidence.measurement.value,
-                "profiler": evidence.profiler.value,
-                "hot_patch": evidence.hot_patch.value,
-                "hardware_fingerprint": evidence.hardware_fingerprint,
-                "software_fingerprint": evidence.software_fingerprint,
-                "timer_resolution_ns": evidence.timer_resolution_ns,
-                "noise_sigma_ns": evidence.noise_sigma_ns,
-                "noise_cv": evidence.noise_cv,
-                "mde_ratio": evidence.mde_ratio,
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "measurement": verification.measurement.value,
+                "profiler": verification.profiler.value,
+                "hot_patch": verification.hot_patch.value,
+                "hardware_fingerprint": verification.hardware_fingerprint,
+                "software_fingerprint": verification.software_fingerprint,
+                "timer_resolution_ns": verification.timer_resolution_ns,
+                "noise_sigma_ns": verification.noise_sigma_ns,
+                "noise_cv": verification.noise_cv,
+                "mde_ratio": verification.mde_ratio,
+                "failure_codes": list(verification.failure_codes),
+                "verification_reasons": list(verification.reasons),
+                "statistics": verification.statistics,
+                "input_evidence": list(verification.input_evidence),
+                "verifier_provenance": verification.verifier_provenance.model_dump(mode="json"),
                 "probe_record_ids": [str(row["probe_record_id"]) for row in records],
+                "accepted_target_risks": list(accepted_target_risks),
+                "reports": {
+                    "machine": {
+                        "uri": artifacts.machine_report_uri,
+                        "sha256": artifacts.machine_report_hash,
+                    },
+                    "markdown": {
+                        "uri": artifacts.markdown_report_uri,
+                        "sha256": artifacts.markdown_report_hash,
+                    },
+                },
                 "synthetic": False,
             }
             connection.execute(
@@ -856,12 +948,108 @@ class PostgresRepository:
                         {
                             "stage0_run_id": str(stage0_run_id),
                             "mode": decision.mode.value,
+                            "input_digest": verification.input_digest,
+                            "accepted_target_risks": list(accepted_target_risks),
                             "automatic_release_allowed": False,
                         }
                     ),
                 ),
             )
         return report
+
+    def _load_stage0_verification_input(self, stage0_run_id: UUID) -> dict[str, Any]:
+        with self.connection() as connection:
+            run = connection.execute(
+                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s",
+                (stage0_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s",
+                (run["task_id"],),
+            ).fetchone()
+            assert task is not None
+            target_snapshot = connection.execute(
+                """
+                SELECT * FROM target_snapshots
+                WHERE target_snapshot_id = %s
+                """,
+                (run["target_snapshot_id"],),
+            ).fetchone()
+            assert target_snapshot is not None
+            records = connection.execute(
+                """
+                SELECT * FROM stage0_probe_records
+                WHERE stage0_run_id = %s ORDER BY probe_type
+                """,
+                (stage0_run_id,),
+            ).fetchall()
+        return self._project_stage0_verification_input(
+            run,
+            task,
+            target_snapshot,
+            records,
+        )
+
+    @staticmethod
+    def _project_stage0_verification_input(
+        run: Mapping[str, Any],
+        task: Mapping[str, Any],
+        target_snapshot: Mapping[str, Any],
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        try:
+            target = TargetSpec.model_validate(target_snapshot["specification"])
+            context = Stage0VerificationContext(
+                task_id=task["task_id"],
+                stage0_run_id=run["stage0_run_id"],
+                target_snapshot_id=run["target_snapshot_id"],
+                target=target,
+                target_fingerprint=target_snapshot["target_fingerprint"],
+                workload_id=task["workload_id"],
+                adapter_profile=run["adapter_profile"],
+                expected_resource_id=(f"hcu-{target.execution_host.accelerator.device_index}"),
+            )
+            references = tuple(
+                Stage0ProbeEvidenceReference(
+                    probe_record_id=row["probe_record_id"],
+                    probe_type=Stage0ProbeType(row["probe_type"]),
+                    raw_evidence_uri=row["raw_evidence_uri"],
+                    raw_evidence_hash=row["raw_evidence_hash"],
+                    adapter_provenance=tuple(row["adapter_provenance"]),
+                    synthetic=row["synthetic"],
+                    lease_id=row["lease_id"],
+                    resource_id=row["resource_id"],
+                    fencing_token=row["fencing_token"],
+                    cleanup_evidence=row["cleanup_evidence"],
+                )
+                for row in records
+            )
+        except (KeyError, TypeError, ValidationError, ValueError) as exc:
+            raise Conflict(f"Stage 0 persisted evidence references are invalid: {exc}") from exc
+        return {
+            "run": run,
+            "task": task,
+            "target_snapshot": target_snapshot,
+            "records": records,
+            "context": context,
+            "references": references,
+        }
+
+    @staticmethod
+    def _require_stage0_ready_for_verification(value: Mapping[str, Any]) -> None:
+        run = value["run"]
+        task = value["task"]
+        references = value["references"]
+        if run["mode"] != Stage0RunMode.FORMAL.value:
+            raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
+        if run["state"] != Stage0RunState.READY.value:
+            raise Conflict("Stage 0 probe barrier is not ready")
+        if task["state"] != TaskState.STAGE0_PENDING.value:
+            raise Conflict("formal Stage 0 requires a stage0_pending task")
+        if len(references) != len(REQUIRED_STAGE0_PROBES):
+            raise Conflict("Stage 0 seven-probe barrier is incomplete")
 
     def freeze_baseline(self, task_id: UUID, request: BaselineCreate) -> dict[str, Any]:
         epoch_id = uuid4()
@@ -1224,10 +1412,7 @@ class PostgresRepository:
             lease_id: UUID | None = None
             resource_id: str | None = None
             fencing_token: int | None = None
-            if (
-                worker_type is WorkerType.GPU
-                and job["lease_scope"] == LeaseScope.EXCLUSIVE.value
-            ):
+            if worker_type is WorkerType.GPU and job["lease_scope"] == LeaseScope.EXCLUSIVE.value:
                 requested_resource = worker["capabilities"].get("resource_id")
                 if requested_resource:
                     resource = connection.execute(
@@ -1582,9 +1767,7 @@ class PostgresRepository:
         if candidate_target is not None:
             raw_candidate_id = job["payload"].get("candidate_id")
             if raw_candidate_id is None:
-                raise Conflict(
-                    f"{job['job_type']} job is missing its candidate_id binding"
-                )
+                raise Conflict(f"{job['job_type']} job is missing its candidate_id binding")
             candidate_id = UUID(str(raw_candidate_id))
             candidate = connection.execute(
                 "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE",
@@ -1618,9 +1801,7 @@ class PostgresRepository:
                     {
                         "job_id": str(job["job_id"]),
                         "job_type": job["job_type"],
-                        "candidate_id": (
-                            str(candidate_id) if candidate_id is not None else None
-                        ),
+                        "candidate_id": (str(candidate_id) if candidate_id is not None else None),
                         "attempts": job["attempts"],
                         "max_attempts": job["max_attempts"],
                         "error": error,
@@ -1738,9 +1919,7 @@ class PostgresRepository:
                 created.append(row)
         return created
 
-    def transition_candidate(
-        self, candidate_id: UUID, target: CandidateState
-    ) -> dict[str, Any]:
+    def transition_candidate(self, candidate_id: UUID, target: CandidateState) -> dict[str, Any]:
         with self.connection() as connection:
             current = connection.execute(
                 "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE", (candidate_id,)
@@ -1981,9 +2160,7 @@ class PostgresRepository:
                         (f"{task_id}:framework-smoke:0:v1",),
                     ).fetchone()
                     if existing_job is None:
-                        raise Conflict(
-                            "Framework Smoke task is executing without its durable job"
-                        )
+                        raise Conflict("Framework Smoke task is executing without its durable job")
                     return existing_job
 
             data = connection.execute(
@@ -2018,9 +2195,7 @@ class PostgresRepository:
 
             candidate_state = CandidateState(data["state"])
             if candidate_state is not CandidateState.FRAMEWORK_SMOKE_RUNNING:
-                transition_candidate(
-                    candidate_state, CandidateState.FRAMEWORK_SMOKE_RUNNING
-                )
+                transition_candidate(candidate_state, CandidateState.FRAMEWORK_SMOKE_RUNNING)
                 connection.execute(
                     """
                     UPDATE candidates SET state = %s, updated_at = now()
@@ -2047,12 +2222,8 @@ class PostgresRepository:
             run_key = f"{task_id}:framework-smoke:{retest_ordinal}:v1"
             evaluation_run_id = uuid5(NAMESPACE_URL, run_key + ":evaluation")
             execution_request_id = uuid5(NAMESPACE_URL, run_key + ":request")
-            baseline_execution_request_id = uuid5(
-                NAMESPACE_URL, run_key + ":baseline:request"
-            )
-            noop_execution_request_id = uuid5(
-                NAMESPACE_URL, run_key + ":noop:request"
-            )
+            baseline_execution_request_id = uuid5(NAMESPACE_URL, run_key + ":baseline:request")
+            noop_execution_request_id = uuid5(NAMESPACE_URL, run_key + ":noop:request")
             evidence_id = uuid5(NAMESPACE_URL, run_key + ":evidence")
             job_id = uuid5(NAMESPACE_URL, run_key + ":job")
             payload = {
@@ -2077,9 +2248,7 @@ class PostgresRepository:
                 },
                 "evaluation_run_id": str(evaluation_run_id),
                 "execution_request_id": str(execution_request_id),
-                "baseline_execution_request_id": str(
-                    baseline_execution_request_id
-                ),
+                "baseline_execution_request_id": str(baseline_execution_request_id),
                 "noop_execution_request_id": str(noop_execution_request_id),
                 "evidence_id": str(evidence_id),
                 "retest_ordinal": retest_ordinal,
@@ -2131,9 +2300,7 @@ class PostgresRepository:
     def record_evaluation(self, run: EvaluationRun) -> dict[str, Any]:
         evidence_uri = run.evidence_uris[0] if run.evidence_uris else None
         measurement = (
-            Jsonb(run.measurement.model_dump(mode="json"))
-            if run.measurement is not None
-            else None
+            Jsonb(run.measurement.model_dump(mode="json")) if run.measurement is not None else None
         )
         with self.connection() as connection:
             row = connection.execute(
@@ -2167,22 +2334,16 @@ class PostgresRepository:
                     measurement,
                     evidence_uri,
                     Jsonb(run.evidence_uris),
-                    Jsonb(
-                        [item.model_dump(mode="json") for item in run.adapter_provenance]
-                    ),
+                    Jsonb([item.model_dump(mode="json") for item in run.adapter_provenance]),
                     run.synthetic,
                     run.created_at,
                 ),
             ).fetchone()
         assert row is not None
         expected_measurement = (
-            run.measurement.model_dump(mode="json")
-            if run.measurement is not None
-            else None
+            run.measurement.model_dump(mode="json") if run.measurement is not None else None
         )
-        expected_provenance = [
-            item.model_dump(mode="json") for item in run.adapter_provenance
-        ]
+        expected_provenance = [item.model_dump(mode="json") for item in run.adapter_provenance]
         if any(
             (
                 row["task_id"] != run.task_id,
@@ -2417,9 +2578,7 @@ class PostgresRepository:
                 (request.evidence_bundle_id,),
             ).fetchone()
             if evidence is None:
-                raise NotFound(
-                    f"evidence bundle not found: {request.evidence_bundle_id}"
-                )
+                raise NotFound(f"evidence bundle not found: {request.evidence_bundle_id}")
             if evidence["task_id"] != task_id:
                 raise Conflict("signoff evidence belongs to a different task")
             if evidence["evaluation_passed"] is not True:
@@ -2732,13 +2891,9 @@ class PostgresRepository:
         self, workflow_type: WorkflowType | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
         with self.connection() as connection:
-            workflow_filter = (
-                "AND task.workflow_type = %s" if workflow_type is not None else ""
-            )
+            workflow_filter = "AND task.workflow_type = %s" if workflow_type is not None else ""
             parameters: tuple[Any, ...] = (
-                (workflow_type.value, limit)
-                if workflow_type is not None
-                else (limit,)
+                (workflow_type.value, limit) if workflow_type is not None else (limit,)
             )
             return connection.execute(
                 f"""

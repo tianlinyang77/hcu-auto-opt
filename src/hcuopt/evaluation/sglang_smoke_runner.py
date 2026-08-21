@@ -131,24 +131,16 @@ def validate_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
 
     _require_exact(spec, "ready_path", "/health_generate")
     _require_exact(spec, "generate_path", "/generate")
-    ready_timeout = _require_number(
-        spec, "ready_timeout_seconds", minimum=0.001, maximum=1_800
-    )
+    ready_timeout = _require_number(spec, "ready_timeout_seconds", minimum=0.001, maximum=1_800)
     _require_number(
         spec,
         "ready_poll_interval_seconds",
         minimum=0.001,
         maximum=30,
     )
-    request_timeout = _require_number(
-        spec, "request_timeout_seconds", minimum=0.001, maximum=600
-    )
-    stop_grace = _require_number(
-        spec, "stop_grace_seconds", minimum=0.001, maximum=120
-    )
-    execution_timeout = _require_int(
-        spec, "execution_timeout_seconds", minimum=1, maximum=86_400
-    )
+    request_timeout = _require_number(spec, "request_timeout_seconds", minimum=0.001, maximum=600)
+    stop_grace = _require_number(spec, "stop_grace_seconds", minimum=0.001, maximum=120)
+    execution_timeout = _require_int(spec, "execution_timeout_seconds", minimum=1, maximum=86_400)
     if execution_timeout <= ready_timeout + request_timeout + stop_grace:
         raise SpecValidationError(
             "execution_timeout_seconds must exceed ready, request, and stop timeouts"
@@ -159,9 +151,7 @@ def validate_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
     _require_exact(spec, "trust_remote_code", True)
     _require_exact(spec, "attention_backend", "fa3")
     _require_exact(spec, "page_size", 64)
-    mem_fraction_static = _require_number(
-        spec, "mem_fraction_static", minimum=0.001, maximum=0.999
-    )
+    mem_fraction_static = _require_number(spec, "mem_fraction_static", minimum=0.001, maximum=0.999)
     if mem_fraction_static != 0.85:
         raise SpecValidationError("mem_fraction_static must equal 0.85")
     _require_exact(
@@ -253,6 +243,8 @@ def run_smoke(
     *,
     server_argv_override: Sequence[str] | None = None,
     enable_child_subreaper: bool = False,
+    formal_lifecycle: bool = False,
+    restart_ordinal: int | None = None,
 ) -> dict[str, Any]:
     """Run exactly one baseline or no-op variant in a fresh server process."""
 
@@ -268,9 +260,7 @@ def run_smoke(
 
     process: subprocess.Popen[bytes] | None = None
     process_group_id: int | None = None
-    child_subreaper_enabled = (
-        _set_child_subreaper(True) if enable_child_subreaper else False
-    )
+    child_subreaper_enabled = _set_child_subreaper(True) if enable_child_subreaper else False
     normalized: dict[str, Any] | None = None
     primary_error: dict[str, str] | None = None
     start_record: dict[str, Any] = {
@@ -310,6 +300,17 @@ def run_smoke(
         spec = validate_spec(raw_spec)
         _atomic_write_json(paths["spec.json"], spec)
         argv = _resolve_server_argv(spec, server_argv_override)
+        launched_argv = argv
+        if formal_lifecycle:
+            if os.name != "posix" or not sys.platform.startswith("linux"):
+                raise SmokeRunnerError("Formal process lifecycle capture requires Linux")
+            if restart_ordinal is None or restart_ordinal < 0:
+                raise SmokeRunnerError("Formal process lifecycle capture requires restart_ordinal")
+            launched_argv = _lifecycle_wrapper_argv(
+                argv,
+                evidence_dir=evidence_dir,
+                restart_ordinal=restart_ordinal,
+            )
         request_record = {
             "attempted": False,
             "method": "POST",
@@ -319,7 +320,7 @@ def run_smoke(
         _atomic_write_json(paths["request.json"], request_record)
 
         popen_options: dict[str, Any] = {
-            "args": argv,
+            "args": launched_argv,
             "stdin": subprocess.DEVNULL,
             "stdout": log_handle,
             "stderr": subprocess.STDOUT,
@@ -334,11 +335,22 @@ def run_smoke(
             process = subprocess.Popen(**popen_options)
             if os.name == "posix":
                 process_group_id = process.pid
+            server_pid = process.pid
+            if formal_lifecycle:
+                lifecycle_start = _wait_for_lifecycle_start(
+                    evidence_dir / "process-start.json",
+                    process,
+                )
+                server_pid = int(lifecycle_start["process_id"])
+                # The lifecycle child starts the real server in its own session.
+                # Cleanup targets that server group while leaving the observer alive
+                # long enough to persist the raw waitpid result.
+                process_group_id = server_pid
             start_record = {
                 "status": "started",
                 "started_at": utc_now(),
                 "argv": argv,
-                "pid": process.pid,
+                "pid": server_pid,
                 "process_group_id": process_group_id,
                 "child_subreaper_enabled": child_subreaper_enabled,
             }
@@ -394,9 +406,7 @@ def run_smoke(
                 "message": "; ".join(finalization_errors),
             }
         elif finalization_errors:
-            primary_error["message"] += "; evidence finalization: " + "; ".join(
-                finalization_errors
-            )
+            primary_error["message"] += "; evidence finalization: " + "; ".join(finalization_errors)
         if child_subreaper_enabled:
             _set_child_subreaper(False)
         _restore_signal_handlers(previous_signal_handlers)
@@ -508,9 +518,7 @@ def _wait_until_ready(
             }
         _append_jsonl(ready_handle, outcome)
         if not retry:
-            raise SmokeRunnerError(
-                f"ready probe failed with HTTP {outcome.get('http_status')}"
-            )
+            raise SmokeRunnerError(f"ready probe failed with HTTP {outcome.get('http_status')}")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _append_jsonl(
@@ -547,8 +555,7 @@ def _generate_once(
         exc.close()
         preview = envelope["body_text"][:1_024]
         raise GenerateResponseError(
-            f"generate request returned HTTP {envelope['http_status']}: "
-            f"{preview}",
+            f"generate request returned HTTP {envelope['http_status']}: {preview}",
             envelope,
         ) from exc
     with response:
@@ -712,20 +719,19 @@ def _wait_for_posix_group_exit(
     while True:
         process.poll()
         if not _posix_group_exists(process_group_id, process):
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                process.wait(timeout=0)
+                process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
-                pass
-            return True
+                return False
+            return process.returncode is not None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
         time.sleep(min(0.05, remaining))
 
 
-def _posix_group_exists(
-    process_group_id: int, process: subprocess.Popen[bytes]
-) -> bool:
+def _posix_group_exists(process_group_id: int, process: subprocess.Popen[bytes]) -> bool:
     process.poll()
     _reap_adopted_children(process)
     try:
@@ -841,13 +847,130 @@ def _environment_record() -> dict[str, Any]:
     }
 
 
-def _resolve_server_argv(
-    spec: Mapping[str, Any], override: Sequence[str] | None
-) -> list[str]:
+def _resolve_server_argv(spec: Mapping[str, Any], override: Sequence[str] | None) -> list[str]:
     values = list(override) if override is not None else server_argv(spec)
     if not values or any(not isinstance(value, str) or not value for value in values):
         raise SmokeRunnerError("server argv must contain non-empty strings")
     return values
+
+
+def _lifecycle_wrapper_argv(
+    server_argv: Sequence[str],
+    *,
+    evidence_dir: Path,
+    restart_ordinal: int,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--lifecycle-child",
+        "--lifecycle-dir",
+        str(evidence_dir),
+        "--restart-ordinal",
+        str(restart_ordinal),
+        "--",
+        *server_argv,
+    ]
+
+
+def _wait_for_lifecycle_start(
+    path: Path,
+    process: subprocess.Popen[bytes],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if path.is_file():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                isinstance(value, dict)
+                and value.get("event") == "started"
+                and isinstance(value.get("process_id"), int)
+                and not isinstance(value.get("process_id"), bool)
+            ):
+                return value
+            raise SmokeRunnerError("Formal process start record is invalid")
+        if process.poll() is not None:
+            raise SmokeRunnerError("lifecycle wrapper exited before publishing process identity")
+        time.sleep(0.01)
+    raise SmokeRunnerError("timed out waiting for Formal process identity")
+
+
+def _lifecycle_child_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--lifecycle-child", action="store_true")
+    parser.add_argument("--lifecycle-dir", type=Path, required=True)
+    parser.add_argument("--restart-ordinal", type=int, required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = list(args.command)
+    if command and command[0] == "--":
+        command.pop(0)
+    if not args.lifecycle_child or not command or args.restart_ordinal < 0:
+        return 125
+    lifecycle_dir = args.lifecycle_dir.resolve(strict=True)
+    if lifecycle_dir.is_symlink() or not lifecycle_dir.is_dir():
+        return 125
+    start_path = lifecycle_dir / "process-start.json"
+    exit_path = lifecycle_dir / "process-exit.json"
+    if any(path.exists() or path.is_symlink() for path in (start_path, exit_path)):
+        return 125
+
+    child = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        shell=False,
+        start_new_session=True,
+    )
+    proc_stat_line = Path(f"/proc/{child.pid}/stat").read_text(encoding="utf-8").strip()
+    observer_pid = os.getpid()
+    _atomic_write_canonical_json(
+        start_path,
+        {
+            "schema_version": "process-lifecycle-v1",
+            "event": "started",
+            "restart_ordinal": args.restart_ordinal,
+            "observer_process_id": observer_pid,
+            "process_id": child.pid,
+            "proc_stat_line": proc_stat_line,
+            "captured_monotonic_ns": time.monotonic_ns(),
+            "waitpid_result_pid": None,
+            "wait_status": None,
+        },
+    )
+
+    def relay(signum: int, _frame: FrameType | None) -> None:
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    previous = {signum: signal.signal(signum, relay) for signum in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        while True:
+            try:
+                waited_pid, wait_status = os.waitpid(child.pid, 0)
+                break
+            except InterruptedError:
+                continue
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    child.returncode = os.waitstatus_to_exitcode(wait_status)
+    _atomic_write_canonical_json(
+        exit_path,
+        {
+            "schema_version": "process-lifecycle-v1",
+            "event": "reaped",
+            "restart_ordinal": args.restart_ordinal,
+            "observer_process_id": observer_pid,
+            "process_id": child.pid,
+            "proc_stat_line": proc_stat_line,
+            "captured_monotonic_ns": time.monotonic_ns(),
+            "waitpid_result_pid": waited_pid,
+            "wait_status": wait_status,
+        },
+    )
+    return child.returncode if child.returncode >= 0 else 128 - child.returncode
 
 
 def _url(spec: Mapping[str, Any], path: str) -> str:
@@ -952,9 +1075,7 @@ def _stream_temporary_path(final_path: Path) -> Path:
 
 
 def _append_jsonl(handle: TextIO, value: Any) -> None:
-    handle.write(
-        json.dumps(value, allow_nan=False, ensure_ascii=False, sort_keys=True) + "\n"
-    )
+    handle.write(json.dumps(value, allow_nan=False, ensure_ascii=False, sort_keys=True) + "\n")
     handle.flush()
 
 
@@ -1000,6 +1121,37 @@ def _atomic_write_json(path: Path, value: Any) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
+def _atomic_write_canonical_json(path: Path, value: Any) -> None:
+    encoded = (
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    temporary_path: Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+        path.chmod(0o444)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _load_spec(path: Path) -> Mapping[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -1011,15 +1163,22 @@ def _load_spec(path: Path) -> Mapping[str, Any]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if "--lifecycle-child" in raw_argv:
+        return _lifecycle_child_main(raw_argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
-    args = parser.parse_args(argv)
+    parser.add_argument("--formal-lifecycle", action="store_true")
+    parser.add_argument("--restart-ordinal", type=int)
+    args = parser.parse_args(raw_argv)
     try:
         result = run_smoke(
             _load_spec(args.spec),
             args.evidence_dir,
             enable_child_subreaper=True,
+            formal_lifecycle=args.formal_lifecycle,
+            restart_ordinal=args.restart_ordinal,
         )
     except Exception as exc:
         print(

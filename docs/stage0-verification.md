@@ -110,11 +110,19 @@ threshold.
 ## Scope
 
 This verifier does not launch processes, collect HCU samples, implement a
-profiler or overlay, reserve hardware, or change the Target Lock. Formal HCU
-execution and the seven-probe combined adapter profile remain integration work
-for the Stage 0 environment and control-plane owners. In particular, S0-C must
-publish its existing raw PyTorch trace and three isolated overlay executions in
-these typed envelopes; translating only S0-C's summary fields is not sufficient.
+profiler or overlay, or reserve hardware. The control plane now projects the
+immutable Target Snapshot and seven probe references into this verifier, ignores
+producer summaries, rechecks the input digest inside the PostgreSQL finalize
+transaction, and publishes hashed JSON and Markdown reports. The HCU 7 reservation
+risk is recorded as accepted rather than falsely described as proven exclusivity.
+S0-B now emits the exact fingerprint and timing V2 envelopes when a deployment injects
+the required real segmented workload, device timer, typed telemetry, lifecycle recorder,
+and cleanup controller. S0-C can now publish the raw Profiler output and three isolated
+overlay executions in the same typed envelopes when deployment injects the trusted
+evidence root, telemetry, Worker-owned output mounts and instrumented SGLang lifecycle
+runner. This completes the software path to the seven-probe Barrier; it does not claim
+that nmz36 has executed a real Formal seven-probe run. `stage0_not_measured` remains
+open until that hardware run and D-owned finalization both succeed.
 
 Every human-readable report must retain this statement:
 

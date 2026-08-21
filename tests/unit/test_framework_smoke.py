@@ -83,8 +83,9 @@ def test_real_profile_applies_blockers_to_the_declared_gate() -> None:
         match="open blockers for framework_smoke: locked_image_dependency_conflict",
     ):
         profile.validate_target(framework_blocked)
-    with pytest.raises(TargetNotReady, match="open blockers for stage0"):
-        profile.validate_target(target, scope="stage0")
+    # HCU 7 isolation is an explicitly accepted risk. Accepted does not mean
+    # physically proven, but it no longer blocks Stage 0 intake.
+    profile.validate_target(target, scope="stage0")
 
 
 def test_target_catalog_lists_valid_targets_and_rejects_duplicate_ids(

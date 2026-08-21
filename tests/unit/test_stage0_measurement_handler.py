@@ -117,7 +117,7 @@ def test_stage0_handler_rejects_an_adapter_bound_to_another_target() -> None:
         handlers.handle_stage0_probe(_timer_payload())
 
 
-def test_formal_noise_requires_a_verified_process_restart() -> None:
+def test_formal_measurement_fails_closed_on_an_incomplete_control_plane_binding() -> None:
     adapter = Stage0MeasurementProbeAdapter(
         BoundHarness(),  # type: ignore[arg-type]
         TARGET,
@@ -137,12 +137,12 @@ def test_formal_noise_requires_a_verified_process_restart() -> None:
         null_signal_detector=lambda _run, _payload: False,
     )
 
-    with pytest.raises(MeasurementSafetyError, match="verified process restart"):
+    with pytest.raises(MeasurementSafetyError, match="control-plane binding is incomplete"):
         adapter.run_probe(
             {
                 "stage0_run_id": str(uuid4()),
                 "probe_type": "noise",
-                "protocol_version": "s0-measurement-v1",
+                "protocol_version": "s0-g0-v1",
                 "mode": "formal",
             },
             Path("."),

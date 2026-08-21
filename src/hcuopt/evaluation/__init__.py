@@ -17,6 +17,12 @@ from hcuopt.evaluation.sglang_smoke import (
     write_evidence_artifacts,
     write_workload_spec,
 )
+from hcuopt.evaluation.stage0_finalizer import (
+    FORMAL_STAGE0_SCOPE_WARNING,
+    FileStage0Finalizer,
+    Stage0FinalizationService,
+    Stage0ReportArtifacts,
+)
 from hcuopt.evaluation.stage0_protocol import (
     STAGE0_PROTOCOL_VERSION,
     LoadedStage0Protocol,
@@ -38,6 +44,8 @@ from hcuopt.evaluation.stage0_verifier import (
 __all__ = [
     "EquivalenceResult",
     "FingerprintEvidenceV2",
+    "FileStage0Finalizer",
+    "FORMAL_STAGE0_SCOPE_WARNING",
     "FRAMEWORK_SMOKE_PROTOCOL_VERSION",
     "HotpatchEvidenceV2",
     "LoadedStage0Protocol",
@@ -47,7 +55,9 @@ __all__ = [
     "STAGE0_PROTOCOL_VERSION",
     "Stage0EvidenceError",
     "Stage0EvidenceReader",
+    "Stage0FinalizationService",
     "Stage0ProbeEvidenceReference",
+    "Stage0ReportArtifacts",
     "Stage0StatisticsProtocol",
     "Stage0VerificationContext",
     "Stage0VerificationResult",

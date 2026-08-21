@@ -47,6 +47,14 @@ def test_locked_target_loads_as_platform_v1() -> None:
     assert [mount.model_dump() for mount in target.execution_host.runtime_mounts] == [
         {"source": "/opt/hyhal", "target": "/opt/hyhal", "read_only": True}
     ]
+    isolation = next(
+        blocker
+        for blocker in target.blockers
+        if blocker.id == "device_isolation_not_reserved"
+    )
+    assert isolation.status == "accepted"
+    assert "not proof of physical exclusivity" in isolation.detail
+    assert target.automatic_release_allowed is False
 
 
 @pytest.mark.parametrize(

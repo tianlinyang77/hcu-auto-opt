@@ -60,9 +60,11 @@ Profiler 命令使用结构化 argv，不通过 shell 拼接。每个工具候�
 PyTorch trace 只接受真实 `kernel` 类别事件，并保留 trace 的微秒单位。使用
 `profile-llm-torch` 时仍遵守 stage-separated 的 prefill/decode 采集流程，保留原始 trace、
 命令日志和分析结果。host runner 模式会在执行前移除旧 trace，并只接受本次命令新建的普通
-文件，同时记录 URI、SHA256 和字节数。容器 executor 尚未具备 Worker-owned 可写输出挂载与
-container-to-host 导出契约，因此 `torch_trace` 在该模式下会失败关闭；JSON/JSONL/CSV 的
-stdout 路径仍可使用。
+文件，同时记录 URI、SHA256 和字节数。容器 executor 的 PyTorch trace 必须同时声明
+`output_host_uri`，并存在唯一的 Worker-owned 可写挂载，把容器内 `output_path` 的父目录
+映射到 Host 输出目录；缺少显式导出契约会在执行前失败关闭。Formal G0-P 只接受 D 已注册的
+`rocprof + rocprof-csv-v1` 或 `profile-llm-torch + torch-trace-v1`，不会把普通 JSON/JSONL
+归一化摘要升级成原始 Profiler 证据。
 
 ## G0-H：真实 SGLang Python/Triton Overlay
 
@@ -89,7 +91,10 @@ Baseline 固定正确性请求
 `sglang_overlay_runner.py` 复用固定的 `sglang_smoke_runner.py` 请求，并输出
 `hcuopt-overlay-result-v2` 机器证据。Candidate 模块必须在导入时写出
 `hcuopt-sglang-overlay-import-v1` 标记，至少包含 `process_id`、`process_group_id`、
-`module_file` 和 `module_sha256`。
+`module_file` 和 `module_sha256`。Formal 模式通过生命周期 wrapper 启动服务进程，原样保存
+`/proc/<pid>/stat` 和 `waitpid` 状态；三阶段还分别输出规范化正确性结果和缓存 Namespace
+文件。每个 Phase Profile 必须声明独立的 Worker-owned 证据目录、实际实现文件，以及唯一
+可写证据挂载。Baseline/Recovery 的实现和缓存必须一致，Candidate 二者都必须不同。
 
 只有上述 SGLang 路径全部通过时才返回 `OVERLAY_ONLY`。仓库中的通用文件挂载 runner 仅能
 验证“只读挂载、Hash 和三阶段恢复机制”，其结果会标记
@@ -110,10 +115,13 @@ Dry Run 默认使用 Worker 本地内容寻址存储：
 Adapter 来源、实际执行结果和清理证据都会保留。但本地文件所有者仍可能修改文件权限，
 因此这种存储只用于 Dry Run，不被描述为正式不可变证据。
 
-当前版本的 Formal S0-C 在执行前统一失败关闭，即使部署方注入了声称具有正式发布权限的
-`EvidencePublisher` 也不能绕过。原因是 D 侧还没有把 raw evidence、正式 provenance 和
-最终 Stage 0 判决器接成同一条可复算链。完成该接线并补齐兼容证据契约后，才允许启用
-verifier-owned 对象存储和 Formal Runtime Probe；在此之前，本地文件不能被包装成正式证据。
+Formal S0-C 必须显式注入 `DeploymentContentAddressedEvidencePublisher`、Typed Telemetry 和
+单调时钟。Publisher 绑定一个固定、由 D Reader 允许读取的可信根目录；普通 Worker 输出目录
+和 chmod 只读文件不构成 Formal 权限。Profiler 会发布原始版本输出及原始 rocprof CSV/torch
+trace；Hotpatch 会先发布 Candidate Artifact，再从这个精确 URI 只读挂载执行，并发布 Source、
+Artifact Manifest、三份 `HotpatchPhaseManifestV2`、stdout、标准化输出、缓存、实现文件和进程
+生命周期。任何引用缺失、Hash 不一致、Profile 未配置写出目录、工具/parser 不在注册组合中，
+都会失败关闭。Producer 摘要仍不进入 D 的判决输入。
 
 ## 旧 Dry Run 记录
 

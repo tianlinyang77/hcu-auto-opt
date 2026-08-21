@@ -60,6 +60,7 @@ from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.models import (
     DynamicObservationV2,
     MeasurementEvidenceV2,
+    ProcessLifecycleRecordV2,
     RawEvidenceFileV2,
     Stage0AdapterProvenance,
     Stage0EvidenceBinding,
@@ -322,31 +323,6 @@ class HotpatchPhaseManifestV2(StrictMeasurementModel):
         paths = [entry.path for entry in self.entries]
         if len(paths) != len(set(paths)):
             raise ValueError("hotpatch phase state paths must be unique")
-        return self
-
-
-class ProcessLifecycleRecordV2(StrictMeasurementModel):
-    """Raw executor observation used to derive process identity and reaping."""
-
-    schema_version: Literal["process-lifecycle-v1"] = "process-lifecycle-v1"
-    event: Literal["started", "reaped"]
-    restart_ordinal: int = Field(ge=0)
-    observer_process_id: int = Field(ge=1)
-    process_id: int = Field(ge=1)
-    proc_stat_line: str = Field(min_length=1, max_length=16_384)
-    captured_monotonic_ns: int = Field(ge=0)
-    waitpid_result_pid: int | None = Field(default=None, ge=1)
-    wait_status: int | None = Field(default=None, ge=0, le=0xFFFF)
-
-    @model_validator(mode="after")
-    def bind_wait_result(self) -> ProcessLifecycleRecordV2:
-        wait_fields = (self.waitpid_result_pid, self.wait_status)
-        if self.event == "started" and any(value is not None for value in wait_fields):
-            raise ValueError("process start record cannot contain a wait result")
-        if self.event == "reaped" and any(value is None for value in wait_fields):
-            raise ValueError("process exit record requires raw waitpid result and status")
-        if self.event == "reaped" and self.waitpid_result_pid != self.process_id:
-            raise ValueError("waitpid result does not identify the measured process")
         return self
 
 

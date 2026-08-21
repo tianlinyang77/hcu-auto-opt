@@ -68,8 +68,8 @@ blockers:
     detail: Resolved on nmz36 on 2026-08-19. The digest-locked minimal wheel image pins kernels 0.12.3 and apache-tvm-ffi 0.1.9, includes only the get_rope_config repair, and passed the real cookbook-aligned Baseline/No-op Framework Smoke with equivalent output and healthy cleanup.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: device_isolation_not_reserved
-    status: open
-    detail: HCU 7 is currently healthy and idle, but three running containers map all accelerator devices and no F1 or Stage 0 reservation window has been recorded.
+    status: accepted
+    detail: Risk accepted by the project owner on 2026-08-21 for Stage 0 intake. This is not proof of physical exclusivity; the active Mooncake container still maps all accelerator devices. Formal telemetry must record any HCU 7 activity and the independent verifier must fail G0-M if an unmanaged accelerator process is observed. This acceptance never authorizes automatic release.
     blocks: [stage0, optimization, release]
   - id: stage0_not_measured
     status: open

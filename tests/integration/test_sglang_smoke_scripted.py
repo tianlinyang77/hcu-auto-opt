@@ -145,6 +145,33 @@ def test_runner_retries_ready_generates_once_and_stops_cleanly(
             os.kill(pid, 0)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Formal lifecycle uses Linux procfs/waitpid")
+def test_formal_lifecycle_records_procfs_identity_and_raw_wait_status(
+    tmp_path: Path,
+) -> None:
+    port = _free_port()
+    evidence = tmp_path / "formal-lifecycle"
+    result = runner.run_smoke(
+        _spec(port),
+        evidence,
+        server_argv_override=_stub_argv(port),
+        formal_lifecycle=True,
+        restart_ordinal=2,
+    )
+
+    assert result["status"] == "succeeded"
+    started = _read_json(evidence / "process-start.json")
+    reaped = _read_json(evidence / "process-exit.json")
+    assert started["event"] == "started"
+    assert reaped["event"] == "reaped"
+    assert started["restart_ordinal"] == reaped["restart_ordinal"] == 2
+    assert started["process_id"] == reaped["process_id"]
+    assert _read_json(evidence / "start.json")["pid"] == started["process_id"]
+    assert started["proc_stat_line"] == reaped["proc_stat_line"]
+    assert reaped["waitpid_result_pid"] == started["process_id"]
+    assert reaped["wait_status"] is not None
+
+
 def test_server_early_exit_preserves_failure_and_cleanup_evidence(tmp_path: Path) -> None:
     port = _free_port()
     evidence = tmp_path / "early-exit"

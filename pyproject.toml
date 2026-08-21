@@ -33,6 +33,7 @@ packages = ["src/hcuopt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
   "postgres: requires a real PostgreSQL database",
   "target_lock: requires the locked nmz36 hardware, image, and source checkout",
