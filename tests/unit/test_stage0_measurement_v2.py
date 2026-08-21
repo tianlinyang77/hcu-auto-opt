@@ -11,6 +11,7 @@ from hcuopt.evaluation.stage0_verifier import FingerprintEvidenceV2
 from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.harness import EvidenceMeasurementHarness
 from hcuopt.measurement.models import (
+    FormalWorkloadTimingV2,
     MeasurementEvidenceV2,
     ProcessIdentity,
     ProcessLifecycleRecordV2,
@@ -82,14 +83,16 @@ class Cleaner:
 
 
 class SegmentedWorkload:
-    def __init__(self, restart_ordinal: int) -> None:
+    def __init__(self, restart_ordinal: int, clock: TickingClock) -> None:
         self.restart_ordinal = restart_ordinal
+        self.clock = clock
         self.identity = ProcessIdentity(
             pid=20_000 + restart_ordinal,
             start_token=f"linux-proc-startticks:{60_000 + restart_ordinal}",
         )
         self.alive = True
         self.segments: list[str] = []
+        self.device_ticks = restart_ordinal * 100_000 + 1_000
 
     def process_identity(self) -> ProcessIdentity:
         return self.identity
@@ -100,9 +103,27 @@ class SegmentedWorkload:
     def warmup_segment(self, segment: str) -> None:
         self.segments.append(f"warmup:{segment}")
 
-    def run_segment_batch(self, segment: str, iterations: int) -> None:
+    def measure_segment_batch(
+        self,
+        segment: str,
+        iterations: int,
+    ) -> FormalWorkloadTimingV2:
         assert iterations == 100
         self.segments.append(segment)
+        started_host = self.clock.now_ns()
+        started_device = self.device_ticks
+        self.device_ticks += 50
+        finished_host = self.clock.now_ns()
+        return FormalWorkloadTimingV2(
+            process_id=self.identity.pid,
+            process_start_token=self.identity.start_token,
+            segment=segment,
+            batch_iterations=iterations,
+            started_monotonic_ns=started_host,
+            finished_monotonic_ns=finished_host,
+            started_device_ticks=started_device,
+            finished_device_ticks=self.device_ticks,
+        )
 
     def close(self) -> None:
         self.alive = False
@@ -175,15 +196,16 @@ def _adapter() -> Stage0MeasurementProbeAdapter:
         adapter_version="2",
         implementation_kind="real",
     )
+    clock = TickingClock()
     harness = EvidenceMeasurementHarness(
         provenance=provenance,
         stable_identity=TARGET.model_dump(mode="json"),
-        workload_factory=lambda restart: SegmentedWorkload(restart),
+        workload_factory=lambda restart: SegmentedWorkload(restart, clock),
         telemetry=TypedTelemetry(),
         device_timer=RawTickTimer(),
-        clock=TickingClock(),
+        clock=clock,
         cleaner=Cleaner(),
-        formal_workload_factory=lambda _probe, restart: SegmentedWorkload(restart),
+        formal_workload_factory=lambda _probe, restart: SegmentedWorkload(restart, clock),
         lifecycle_recorder=LifecycleRecorder(),
     )
     return Stage0MeasurementProbeAdapter(

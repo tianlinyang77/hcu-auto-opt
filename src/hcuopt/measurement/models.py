@@ -406,6 +406,32 @@ class RawSampleV2(StrictMeasurementModel):
         return self
 
 
+class FormalWorkloadTimingV2(StrictMeasurementModel):
+    """Timing captured inside the external process that launched the HCU work.
+
+    Parent-process events do not order work submitted by another HIP context.  The
+    workload process therefore owns both device Events and host timestamps and binds
+    them back to its verified procfs identity.
+    """
+
+    process_id: int = Field(ge=1, le=INT64_MAX)
+    process_start_token: str = Field(min_length=1, max_length=200)
+    segment: Stage0Segment
+    batch_iterations: int = Field(ge=1, le=MAX_PLAN_COUNT)
+    started_monotonic_ns: int = Field(ge=0, le=INT64_MAX)
+    finished_monotonic_ns: int = Field(ge=0, le=INT64_MAX)
+    started_device_ticks: int = Field(ge=0, le=UINT64_MAX)
+    finished_device_ticks: int = Field(ge=0, le=UINT64_MAX)
+
+    @model_validator(mode="after")
+    def validate_timing(self) -> FormalWorkloadTimingV2:
+        if self.finished_monotonic_ns <= self.started_monotonic_ns:
+            raise ValueError("external workload host timing must be positive")
+        if self.finished_device_ticks <= self.started_device_ticks:
+            raise ValueError("external workload device timing must be positive")
+        return self
+
+
 class MeasurementEvidenceV2(StrictMeasurementModel):
     """Canonical raw timing evidence consumed by the Stage 0 D verifier."""
 

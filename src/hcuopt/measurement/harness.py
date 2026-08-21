@@ -13,6 +13,7 @@ from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.models import (
     DynamicObservation,
     DynamicObservationV2,
+    FormalWorkloadTimingV2,
     MeasurementEvidence,
     MeasurementEvidenceV2,
     MeasurementPlan,
@@ -59,7 +60,11 @@ class FormalStage0Workload(Protocol):
 
     def warmup_segment(self, segment: Stage0Segment) -> None: ...
 
-    def run_segment_batch(self, segment: Stage0Segment, iterations: int) -> None: ...
+    def measure_segment_batch(
+        self,
+        segment: Stage0Segment,
+        iterations: int,
+    ) -> Mapping[str, Any] | FormalWorkloadTimingV2: ...
 
     def close(self) -> None: ...
 
@@ -344,13 +349,26 @@ class EvidenceMeasurementHarness:
                             workload.warmup_segment(segment)
                         for segment_sample_ordinal in range(plan.samples_per_segment):
                             self._require_live_lease(job_context)
-                            workload.synchronize()
-                            started_monotonic_ns = self.clock.now_ns()
-                            started_device_ticks = self.device_timer.read_ticks()
-                            workload.run_segment_batch(segment, plan.batch_iterations)
-                            workload.synchronize()
-                            finished_device_ticks = self.device_timer.read_ticks()
-                            finished_monotonic_ns = self.clock.now_ns()
+                            timing = FormalWorkloadTimingV2.model_validate(
+                                workload.measure_segment_batch(
+                                    segment,
+                                    plan.batch_iterations,
+                                )
+                            )
+                            if (
+                                timing.process_id,
+                                timing.process_start_token,
+                            ) != identity_key:
+                                raise MeasurementSafetyError(
+                                    "Formal workload timing does not match its procfs identity"
+                                )
+                            if (
+                                timing.segment != segment
+                                or timing.batch_iterations != plan.batch_iterations
+                            ):
+                                raise MeasurementSafetyError(
+                                    "Formal workload timing does not match its requested segment"
+                                )
                             samples.append(
                                 RawSampleV2(
                                     process_id=identity.pid,
@@ -360,10 +378,10 @@ class EvidenceMeasurementHarness:
                                     segment=segment,
                                     acquisition_ordinal=len(samples),
                                     segment_sample_ordinal=segment_sample_ordinal,
-                                    started_monotonic_ns=started_monotonic_ns,
-                                    finished_monotonic_ns=finished_monotonic_ns,
-                                    started_device_ticks=started_device_ticks,
-                                    finished_device_ticks=finished_device_ticks,
+                                    started_monotonic_ns=timing.started_monotonic_ns,
+                                    finished_monotonic_ns=timing.finished_monotonic_ns,
+                                    started_device_ticks=timing.started_device_ticks,
+                                    finished_device_ticks=timing.finished_device_ticks,
                                     batch_iterations=plan.batch_iterations,
                                 )
                             )
