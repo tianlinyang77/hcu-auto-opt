@@ -23,15 +23,19 @@ from hcuopt.adapters.execution import (
     MANAGED_LABEL,
     RESOURCE_LABEL,
 )
-from hcuopt.contracts.platform_v1 import TargetSpec
+from hcuopt.adapters.profiles import REAL_STAGE0_PROFILE
+from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
+from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
-from hcuopt.measurement.harness import FormalStage0Workload
+from hcuopt.measurement.harness import EvidenceMeasurementHarness, FormalStage0Workload
 from hcuopt.measurement.models import (
     FormalWorkloadTimingV2,
     ProcessIdentity,
     ProcessLifecycleRecordV2,
     Stage0Segment,
 )
+from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter, Stage0ProbeOutput
+from hcuopt.targets import target_fingerprint
 
 WORKER_PROTOCOL = "hcuopt-stage0-torch-worker-v1"
 SHA256_PREFIX = "sha256:"
@@ -60,6 +64,130 @@ class ManagedProcessRegistry:
     def contains(self, process_id: int) -> bool:
         with self._lock:
             return process_id in self._process_ids
+
+
+class Nmz36Stage0MeasurementProbeAdapter:
+    """Create the HCU timer/workload from each control-plane lease.
+
+    Formal jobs receive a new fencing token whenever the control plane grants a
+    lease.  A long-running Worker must therefore not capture one deployment-time
+    token in its Adapter Registry.  This adapter constructs the concrete timer,
+    lifecycle recorder, telemetry collector, and workload factory only after the
+    claimed Job supplies its authoritative lease context.
+    """
+
+    _PROBE_TYPES = frozenset(
+        {
+            Stage0ProbeType.FINGERPRINT,
+            Stage0ProbeType.TIMER,
+            Stage0ProbeType.NOISE,
+            Stage0ProbeType.KNOWN_SIGNAL,
+            Stage0ProbeType.NULL_SIGNAL,
+        }
+    )
+
+    def __init__(
+        self,
+        target: TargetSpec,
+        source_root: Path,
+        registry: ManagedProcessRegistry | None = None,
+    ) -> None:
+        self.target = target
+        self.source_root = source_root.resolve(strict=True)
+        self.registry = registry or ManagedProcessRegistry()
+        self.target_fingerprint = target_fingerprint(target)
+        self.provenance = AdapterProvenance(
+            profile=REAL_STAGE0_PROFILE,
+            capability="stage0_probe",
+            adapter_name=type(self).__name__,
+            adapter_version="1.0.0",
+            implementation_kind="real",
+        )
+
+    def run_probe(
+        self,
+        payload: Mapping[str, Any],
+        output_dir: Path,
+    ) -> Stage0ProbeOutput:
+        probe_type = Stage0ProbeType(str(payload.get("probe_type")))
+        if probe_type not in self._PROBE_TYPES:
+            raise ValueError(f"nmz36 measurement adapter does not own {probe_type.value}")
+        if payload.get("mode") != "formal":
+            raise ValueError("nmz36 deployment measurement adapter only accepts Formal jobs")
+        context = payload.get("_job_context")
+        if not isinstance(context, Mapping):
+            raise ValueError("Formal nmz36 measurement requires a Job lease context")
+        resource_id = context.get("resource_id")
+        expected_resource = f"hcu-{self.target.execution_host.accelerator.device_index}"
+        if resource_id != expected_resource:
+            raise ValueError(
+                f"Formal nmz36 measurement requires resource {expected_resource}"
+            )
+        fencing_token = context.get("fencing_token")
+        if (
+            isinstance(fencing_token, bool)
+            or not isinstance(fencing_token, int)
+            or fencing_token < 1
+        ):
+            raise ValueError("Formal nmz36 measurement requires a positive fencing token")
+
+        output_root = output_dir.resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        factory = Nmz36WorkloadFactory(
+            target=self.target,
+            source_root=self.source_root,
+            output_dir=output_root,
+            resource_id=resource_id,
+            fencing_token=fencing_token,
+            registry=self.registry,
+        )
+        timer = factory.timer()
+        cleaner = ContainerResourceCleaner(self.target, profile=REAL_STAGE0_PROFILE)
+        harness = EvidenceMeasurementHarness(
+            provenance=AdapterProvenance(
+                profile=REAL_STAGE0_PROFILE,
+                capability="measurement_harness",
+                adapter_name="Nmz36DockerEvidenceMeasurementHarness",
+                adapter_version="2",
+                implementation_kind="real",
+            ),
+            stable_identity=self.target.model_dump(mode="json"),
+            workload_factory=lambda _restart: (_ for _ in ()).throw(
+                RuntimeError("legacy measurement path is disabled for Formal nmz36")
+            ),
+            telemetry=HySmiTelemetryCollector(self.target, self.registry),
+            device_timer=timer,
+            synchronize=timer.synchronize,
+            cleaner=cleaner,
+            formal_workload_factory=factory.workload,
+            lifecycle_recorder=DockerProcessLifecycleRecorder(),
+        )
+        delegate = Stage0MeasurementProbeAdapter(
+            harness,
+            self.target,
+            measurement_plan_factory=lambda _probe, _payload: {},
+            known_signal_detector=lambda _run, _payload: (_ for _ in ()).throw(
+                RuntimeError("Formal verdicts belong to the independent verifier")
+            ),
+            null_signal_detector=lambda _run, _payload: (_ for _ in ()).throw(
+                RuntimeError("Formal verdicts belong to the independent verifier")
+            ),
+        )
+        try:
+            output = delegate.run_probe(payload, output_root)
+        finally:
+            timer.close()
+        return Stage0ProbeOutput(
+            summary=output.summary,
+            raw_evidence_uri=output.raw_evidence_uri,
+            raw_evidence_hash=output.raw_evidence_hash,
+            cleanup_evidence=output.cleanup_evidence,
+            synthetic=output.synthetic,
+            # The wrapper chooses deployment-time resources; the inner adapter is
+            # the producer attested inside the raw evidence.  Persist exactly that
+            # producer list so D can compare raw and recorded provenance byte-for-byte.
+            adapter_provenance=output.adapter_provenance,
+        )
 
 
 class _JsonContainerProcess:

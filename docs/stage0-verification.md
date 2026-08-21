@@ -6,8 +6,8 @@ D-owned verifier reads those bytes again, verifies their SHA-256 digest and all
 run bindings, and derives the measurement, profiler, and hot-patch gates without
 using producer summaries.
 
-The reviewable protocol is kept in `config/stage0/s0-g0-v1.yaml`, and an
-identical copy is shipped as package data under `hcuopt.evaluation.protocols`.
+Reviewable protocols are kept in `config/stage0/`, and identical copies are shipped as
+package data under `hcuopt.evaluation.protocols`.
 Formal verification compares the supplied canonical content to that installed
 copy; using the same version name with different thresholds is rejected. The
 hash of the canonical protocol document is part of every raw evidence binding
@@ -42,6 +42,12 @@ tick-delta observations, and the verifier uses
 `min(resolution_tick_deltas) * fitted_ns_per_tick`. Producer-supplied
 `ns_per_tick`, residual, and resolution summaries must match these recomputed
 values and never override them.
+
+Timer-gate comparison basis is part of the registered protocol. `s0-g0-v1` preserves
+the original normalized-iteration comparison. `s0-g0-v2` compares the absolute Event
+resolution and clock-fit uncertainty with the raw device interval that was actually
+timed, before division by the protocol-bound batch size. This prevents mixing a batch
+timer error with a per-iteration denominator while keeping every v1 report reproducible.
 
 Formal timing samples are derived only from device ticks:
 

@@ -1,6 +1,6 @@
 schema_version: 1
 target_id: nmz36-sglang-0.5.12
-stage0_status: pending
+stage0_status: degraded
 automatic_release_allowed: false
 
 inference_image:
@@ -69,9 +69,9 @@ blockers:
     blocks: [framework_smoke, stage0, optimization, release]
   - id: device_isolation_not_reserved
     status: accepted
-    detail: Risk accepted by the project owner on 2026-08-21 for Stage 0 intake. This is not proof of physical exclusivity; the active Mooncake container still maps all accelerator devices. Formal telemetry must record any HCU 7 activity and the independent verifier must fail G0-M if an unmanaged accelerator process is observed. This acceptance never authorizes automatic release.
+    detail: Risk accepted by the project owner on 2026-08-21 for Stage 0 intake. The previously active mooncake_test_rpc container was explicitly stopped before the Formal run, but this is not proof of physical exclusivity or an independently reserved window. Formal telemetry must record any HCU 7 activity and the independent verifier must fail G0-M if an unmanaged accelerator process is observed. This acceptance never authorizes automatic release.
     blocks: [stage0, optimization, release]
   - id: stage0_not_measured
-    status: open
-    detail: Timer resolution, noise sigma/CV/MDE, profiler capability, and hot-patch recovery remain unmeasured.
+    status: resolved
+    detail: Formal Stage 0 run dd50c381-75dd-5a64-9211-640c602dc817 finalized on 2026-08-21 under registered protocol s0-g0-v2. G0-M passed, G0-P is degraded, and G0-H is overlay_only, selecting DEGRADED_MANUAL_INTAKE. The machine report Hash is sha256:6f8292a5bd32f5a0eda2ff2d5462224edea48dfc04d44a03b2a54180a90c89f2. This resolves measurement intake only and does not authorize automatic release.
     blocks: [optimization, release]

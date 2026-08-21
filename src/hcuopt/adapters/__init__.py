@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         build_nmz36_framework_smoke_registry,
         build_nmz36_runtime_probe_registry,
         build_nmz36_stage0_measurement_registry,
+        build_nmz36_stage0_registry,
         compose_nmz36_stage0_registry,
     )
     from hcuopt.adapters.registry import AdapterRegistry
@@ -23,6 +24,7 @@ __all__ = [
     "SSHExecutionAdapter",
     "build_nmz36_framework_smoke_registry",
     "build_nmz36_runtime_probe_registry",
+    "build_nmz36_stage0_registry",
     "build_nmz36_stage0_measurement_registry",
     "compose_nmz36_stage0_registry",
 ]
@@ -34,6 +36,7 @@ _EXPORT_MODULES = {
     "SSHExecutionAdapter": "hcuopt.adapters.execution",
     "build_nmz36_framework_smoke_registry": "hcuopt.adapters.real_profile",
     "build_nmz36_runtime_probe_registry": "hcuopt.adapters.real_profile",
+    "build_nmz36_stage0_registry": "hcuopt.adapters.real_profile",
     "build_nmz36_stage0_measurement_registry": "hcuopt.adapters.real_profile",
     "compose_nmz36_stage0_registry": "hcuopt.adapters.real_profile",
 }

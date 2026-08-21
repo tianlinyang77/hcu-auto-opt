@@ -16,7 +16,10 @@ STAGE0_PROTOCOL_VERSION = "s0-g0-v1"
 MEASUREMENT_EVIDENCE_SCHEMA_VERSION = "measurement-evidence-v2"
 MAX_PROTOCOL_BYTES = 1024 * 1024
 
-_REGISTERED_PROTOCOL_FILES = {STAGE0_PROTOCOL_VERSION: "s0-g0-v1.yaml"}
+_REGISTERED_PROTOCOL_FILES = {
+    "s0-g0-v1": "s0-g0-v1.yaml",
+    "s0-g0-v2": "s0-g0-v2.yaml",
+}
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -90,6 +93,9 @@ class Stage0EnvironmentGates(_ProtocolModel):
 
 
 class Stage0TimerGates(_ProtocolModel):
+    comparison_basis: Literal["normalized_iteration", "raw_batch_interval"] = (
+        "normalized_iteration"
+    )
     max_resolution_to_mean_ratio: float = Field(gt=0, lt=1)
     max_residual_to_mean_ratio: float = Field(gt=0, lt=1)
 

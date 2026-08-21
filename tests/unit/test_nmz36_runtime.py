@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.measurement.nmz36_runtime import (
     HySmiTelemetryCollector,
     ManagedProcessRegistry,
+    Nmz36Stage0MeasurementProbeAdapter,
     _proc_start_token,
 )
+from hcuopt.measurement.stage0 import Stage0ProbeOutput
 from hcuopt.targets import load_target
 
 ROOT = Path(__file__).parents[2]
@@ -60,3 +63,77 @@ PID: 42
     monkeypatch.setattr("hcuopt.measurement.nmz36_runtime._read_text", lambda _path: "worker")
 
     assert collector._processes(output, 7)[0]["managed_by_stage0"] is True
+
+
+def test_nmz36_deployment_adapter_uses_job_fence_and_preserves_raw_producer(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class Timer:
+        def synchronize(self) -> None:
+            return None
+
+        def close(self) -> None:
+            observed["timer_closed"] = True
+
+    class Factory:
+        def __init__(self, **kwargs) -> None:
+            observed.update(kwargs)
+
+        def timer(self) -> Timer:
+            return Timer()
+
+        def workload(self, probe_type, restart_ordinal):  # pragma: no cover
+            raise AssertionError((probe_type, restart_ordinal))
+
+    class Harness:
+        def __init__(self, **kwargs) -> None:
+            observed["harness"] = kwargs
+
+    producer = AdapterProvenance(
+        profile="nmz36-stage0-v2",
+        capability="stage0_probe",
+        adapter_name="RawEvidenceProducer",
+        adapter_version="1",
+        implementation_kind="real",
+    )
+
+    class Delegate:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        def run_probe(self, payload, output_dir) -> Stage0ProbeOutput:
+            return Stage0ProbeOutput(
+                summary={"sample_count": 10},
+                raw_evidence_uri=(output_dir / "raw.json").as_uri(),
+                raw_evidence_hash="sha256:" + "1" * 64,
+                cleanup_evidence={
+                    "fence": {"fenced": True},
+                    "health": {"healthy": True},
+                },
+                adapter_provenance=(producer,),
+            )
+
+    monkeypatch.setattr("hcuopt.measurement.nmz36_runtime.Nmz36WorkloadFactory", Factory)
+    monkeypatch.setattr("hcuopt.measurement.nmz36_runtime.EvidenceMeasurementHarness", Harness)
+    monkeypatch.setattr(
+        "hcuopt.measurement.nmz36_runtime.Stage0MeasurementProbeAdapter",
+        Delegate,
+    )
+    adapter = Nmz36Stage0MeasurementProbeAdapter(TARGET, tmp_path)
+
+    output = adapter.run_probe(
+        {
+            "mode": "formal",
+            "probe_type": "timer",
+            "_job_context": {"resource_id": "hcu-7", "fencing_token": 23},
+        },
+        tmp_path,
+    )
+
+    assert observed["resource_id"] == "hcu-7"
+    assert observed["fencing_token"] == 23
+    assert observed["timer_closed"] is True
+    assert output.adapter_provenance == (producer,)

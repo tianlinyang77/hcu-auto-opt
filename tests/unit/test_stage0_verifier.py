@@ -234,9 +234,11 @@ def _samples(
     restart_values: tuple[float, ...] | None = None,
     comparison_effect: float = 0.0,
     outlier_count: int = 0,
+    batch_iterations: int = 100,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     acquisition = 0
+    acquisition_stride = max(200_000, batch_iterations * 10_000)
     for restart in range(10):
         baseline_ns = 1_000.0 if restart_values is None else restart_values[restart]
         for segment in segment_order:
@@ -249,9 +251,9 @@ def _samples(
                 nominal_sample_ns = baseline_ns * (1.0 + comparison_effect)
             for segment_ordinal in range(samples_per_segment):
                 sample_ns = baseline_ns * 2.0 if acquisition < outlier_count else nominal_sample_ns
-                started_device_ticks = 1_000_000 + acquisition * 200_000
-                elapsed_ticks = int(round(sample_ns * 100))
-                started_host_ns = 2_000_000 + acquisition * 200_000
+                started_device_ticks = 1_000_000 + acquisition * acquisition_stride
+                elapsed_ticks = int(round(sample_ns * batch_iterations))
+                started_host_ns = 2_000_000 + acquisition * acquisition_stride
                 result.append(
                     {
                         "process_id": 10_000 + restart,
@@ -265,7 +267,7 @@ def _samples(
                         "finished_monotonic_ns": started_host_ns + elapsed_ticks,
                         "started_device_ticks": started_device_ticks,
                         "finished_device_ticks": started_device_ticks + elapsed_ticks,
-                        "batch_iterations": 100,
+                        "batch_iterations": batch_iterations,
                     }
                 )
                 acquisition += 1
@@ -300,6 +302,7 @@ def _measurement_evidence(
         restart_values=restart_values,
         comparison_effect=comparison_effect,
         outlier_count=outlier_count,
+        batch_iterations=protocol.protocol.sampling.batch_iterations,
     )
     observations: list[dict[str, Any]] = [
         {
@@ -344,7 +347,10 @@ def _measurement_evidence(
     observations.append(
         {
             "phase": "after_run",
-            "captured_monotonic_ns": 1_000_000_000,
+            "captured_monotonic_ns": max(
+                item["finished_monotonic_ns"] for item in samples
+            )
+            + 1_000,
             "restart_ordinal": None,
             "acquisition_ordinal": None,
             "process_id": None,
@@ -360,7 +366,7 @@ def _measurement_evidence(
         "plan": {
             "restart_count": 10,
             "warmup_count": 10,
-            "batch_iterations": 100,
+            "batch_iterations": protocol.protocol.sampling.batch_iterations,
             "segment_order": list(segment_order),
             "samples_per_segment": samples_per_segment,
         },
@@ -890,9 +896,10 @@ def _build_suite(
     tmp_path: Path,
     *,
     target: TargetSpec | None = None,
+    protocol_version: str = "s0-g0-v1",
     **raw_options: Any,
 ) -> _Suite:
-    protocol = load_registered_stage0_protocol("s0-g0-v1", config_root=PROTOCOL_ROOT)
+    protocol = load_registered_stage0_protocol(protocol_version, config_root=PROTOCOL_ROOT)
     target = target or _load_target()
     context = Stage0VerificationContext(
         task_id=TASK_ID,
@@ -1501,6 +1508,24 @@ def test_four_measurement_gate_classes_fail_from_recomputed_raw_values(
 
     assert result.measurement is GateResult.FAIL
     assert expected_codes.issubset(result.failure_codes)
+
+
+def test_v2_timer_gates_compare_over_the_protocol_bound_raw_batch(
+    tmp_path: Path,
+) -> None:
+    suite = _build_suite(
+        tmp_path,
+        protocol_version="s0-g0-v2",
+        timer_resolution_ns=20.0,
+        max_residual_ns=20.0,
+    )
+
+    result = suite.verify()
+
+    assert result.measurement is GateResult.PASS
+    calibration = result.statistics["clock_calibration"]["timer"]
+    assert calibration["gate_comparison_basis"] == "raw_batch_interval"
+    assert calibration["gate_reference_mean_ns"] == pytest.approx(5_000_000.0)
 
 
 def test_hampel_outliers_are_retained_but_excess_ratio_fails_gate(tmp_path: Path) -> None:

@@ -26,7 +26,8 @@ results. Landing this producer does not mean nmz36 has been measured.
    commit, HCU 7, NUMA affinity, and every accepted risk.
 2. `device_isolation_not_reserved` was explicitly accepted on 2026-08-21 so Stage 0 may
    start without a separately recorded reservation window. This is not evidence of physical
-   exclusivity: Mooncake was still mapped to all devices at acceptance time. Pre/post
+   exclusivity: `mooncake_test_rpc` was explicitly stopped before Formal collection, but no
+   independent reservation record exists. Pre/post
    telemetry must therefore record unmanaged HCU activity, and D must fail G0-M when an
    unmanaged accelerator process is observed. The acceptance cannot authorize performance
    publication or automatic release.
@@ -54,6 +55,13 @@ results. Landing this producer does not mean nmz36 has been measured.
    server-side finalization may open the Stage 0 Barrier or select a project mode. The API
    must set `HCUOPT_STAGE0_EVIDENCE_ROOT` to the deployment-owned tree shared with the
    workers; without it, Formal finalization fails closed.
+
+`s0-g0-v1` compared Event resolution and clock-fit residual against the normalized
+single-iteration mean. The first clean nmz36 run proved that this made a short batched
+interval fail even when CV, MDE, known-signal, and null-signal checks were healthy.
+That result remains immutable. Registered `s0-g0-v2` explicitly uses
+`timer_gates.comparison_basis=raw_batch_interval` and fixes
+`sampling.batch_iterations=5000`; it does not reinterpret v1 evidence under a new rule.
 
 ## Expected evidence
 

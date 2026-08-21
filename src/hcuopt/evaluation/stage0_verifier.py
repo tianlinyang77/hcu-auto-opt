@@ -766,13 +766,22 @@ class Stage0Verifier:
                 )
 
         timer_gate = self.protocol.timer_gates
-        for label, normalized_samples in (
-            ("timer", timer_samples),
-            ("noise", noise_samples),
-            ("known_signal", known_samples),
-            ("null_signal", null_samples),
+        timer_gate_means: dict[str, float] = {}
+        for label, normalized_samples, evidence in (
+            ("timer", timer_samples, timer),
+            ("noise", noise_samples, noise),
+            ("known_signal", known_samples, known),
+            ("null_signal", null_samples, null),
         ):
-            mean_ns = fmean(item.sample_ns for item in normalized_samples)
+            if timer_gate.comparison_basis == "raw_batch_interval":
+                mean_ns = fmean(
+                    (item.finished_device_ticks - item.started_device_ticks)
+                    * calibrations[label].ns_per_tick
+                    for item in evidence.samples
+                )
+            else:
+                mean_ns = fmean(item.sample_ns for item in normalized_samples)
+            timer_gate_means[label] = mean_ns
             if (
                 calibrations[label].timer_resolution_ns / mean_ns
                 > timer_gate.max_resolution_to_mean_ratio
@@ -931,6 +940,8 @@ class Stage0Verifier:
                         "ns_per_tick": value.ns_per_tick,
                         "max_residual_ns": value.max_residual_ns,
                         "point_count": value.point_count,
+                        "gate_comparison_basis": self.protocol.timer_gates.comparison_basis,
+                        "gate_reference_mean_ns": timer_gate_means[label],
                     }
                     for label, value in calibrations.items()
                 },
