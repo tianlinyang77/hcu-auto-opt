@@ -25,10 +25,16 @@ from hcuopt.measurement.harness import (
     ProcessLifecycleRecorder,
     TelemetryCollector,
 )
+from hcuopt.measurement.nmz36_runtime import (
+    HySmiTelemetryCollector,
+    ManagedProcessRegistry,
+    Nmz36Stage0MeasurementProbeAdapter,
+)
 from hcuopt.measurement.sampling import SampledWorkload
 from hcuopt.measurement.stage0 import Stage0MeasurementProbeAdapter
 from hcuopt.measurement.timers import DeviceTimer, HostClock
 from hcuopt.runtime_probes import (
+    DeploymentContentAddressedEvidencePublisher,
     EvidencePublisher,
     OverlayCapabilityProbe,
     ProfilerCapabilityProbe,
@@ -185,3 +191,48 @@ def compose_nmz36_stage0_registry(
         executor=runtime_registry.executor,
         resource_cleaner=resource_cleaner,
     )
+
+
+def build_nmz36_stage0_registry(
+    target: TargetSpec,
+    output_dir: Path,
+    *,
+    source_root: Path,
+    runtime_configuration: RuntimeProbeProfile,
+    evidence_root: Path,
+    runner: CommandRunner | None = None,
+) -> AdapterRegistry:
+    """Build the deployment-ready seven-probe Worker registry.
+
+    The measurement side derives its concrete fencing identity from every
+    claimed Job.  Both producers publish below the same deployment-owned root,
+    which is also the only root the independent finalizer is allowed to read.
+    """
+
+    output_root = output_dir.resolve()
+    trusted_root = evidence_root.resolve()
+    if output_root != trusted_root and trusted_root not in output_root.parents:
+        raise ValueError("Stage 0 Worker output must be inside the trusted evidence root")
+    registry = ManagedProcessRegistry()
+    measurement = AdapterRegistry(
+        profile=REAL_STAGE0_PROFILE,
+        stage0_probe=Nmz36Stage0MeasurementProbeAdapter(
+            target,
+            source_root,
+            registry,
+        ),
+        resource_cleaner=ContainerResourceCleaner(
+            target,
+            runner,
+            profile=REAL_STAGE0_PROFILE,
+        ),
+    )
+    runtime = build_nmz36_runtime_probe_registry(
+        target,
+        output_root,
+        configuration=runtime_configuration,
+        evidence_publisher=DeploymentContentAddressedEvidencePublisher(trusted_root),
+        telemetry=HySmiTelemetryCollector(target, registry),
+        runner=runner,
+    )
+    return compose_nmz36_stage0_registry(measurement, runtime)

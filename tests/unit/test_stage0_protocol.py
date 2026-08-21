@@ -223,6 +223,16 @@ def test_registered_protocol_has_locked_stage0_defaults() -> None:
     assert loaded.canonical_bytes.endswith(b"\n")
 
 
+def test_registered_v2_amortizes_timer_error_over_a_protocol_bound_batch() -> None:
+    loaded = load_registered_stage0_protocol("s0-g0-v2", config_root=PROTOCOL_ROOT)
+    packaged = load_registered_stage0_protocol("s0-g0-v2")
+
+    assert loaded.protocol.sampling.batch_iterations == 5000
+    assert loaded.protocol.timer_gates.comparison_basis == "raw_batch_interval"
+    assert packaged.protocol_hash == loaded.protocol_hash
+    assert packaged.canonical_bytes == loaded.canonical_bytes
+
+
 def test_protocol_hash_is_canonical_and_unknown_fields_fail(tmp_path: Path) -> None:
     original = yaml.safe_load((PROTOCOL_ROOT / "s0-g0-v1.yaml").read_text(encoding="utf-8"))
     reordered = dict(reversed(list(original.items())))
