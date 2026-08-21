@@ -118,6 +118,7 @@ class _JsonContainerProcess:
             "docker",
             "run",
             "--rm",
+            "--interactive",
             "--pull=never",
             "--name",
             self.container_name,
