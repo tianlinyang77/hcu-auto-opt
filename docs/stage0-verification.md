@@ -110,9 +110,13 @@ threshold.
 ## Scope
 
 This verifier does not launch processes, collect HCU samples, implement a
-profiler or overlay, reserve hardware, or change the Target Lock. Formal HCU
-execution and the seven-probe combined adapter profile remain integration work
-for the Stage 0 environment and control-plane owners. In particular, S0-C must
+profiler or overlay, or reserve hardware. The control plane now projects the
+immutable Target Snapshot and seven probe references into this verifier, ignores
+producer summaries, rechecks the input digest inside the PostgreSQL finalize
+transaction, and publishes hashed JSON and Markdown reports. The HCU 7 reservation
+risk is recorded as accepted rather than falsely described as proven exclusivity.
+Formal probe production remains disabled until B/C emit this exact v2 evidence.
+In particular, S0-C must
 publish its existing raw PyTorch trace and three isolated overlay executions in
 these typed envelopes; translating only S0-C's summary fields is not sufficient.
 

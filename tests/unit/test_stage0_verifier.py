@@ -23,8 +23,13 @@ from hcuopt.domain.enums import (
     HotPatchCapability,
     LeaseScope,
     ProfilerCapability,
+    ProjectMode,
     Stage0ProbeType,
     Stage0RunMode,
+)
+from hcuopt.evaluation.stage0_finalizer import (
+    FORMAL_STAGE0_SCOPE_WARNING,
+    FileStage0Finalizer,
 )
 from hcuopt.evaluation.stage0_protocol import (
     LoadedStage0Protocol,
@@ -46,6 +51,7 @@ from hcuopt.evaluation.stage0_verifier import (
 )
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence
 from hcuopt.measurement.fingerprint import stable_fingerprint
+from hcuopt.stage0 import evaluate_stage0
 
 requires_posix_reader = pytest.mark.skipif(
     os.name != "posix",
@@ -1792,3 +1798,38 @@ def test_fingerprint_schema_is_strict_and_bound(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="producer_summary"):
         FingerprintEvidenceV2.model_validate_json(canonical_json_bytes(raw))
+
+
+@requires_posix_reader
+def test_file_finalizer_verifies_and_publishes_both_report_formats(
+    tmp_path: Path,
+) -> None:
+    suite = _build_suite(tmp_path)
+    finalizer = FileStage0Finalizer(suite.root)
+
+    verification = finalizer.verify(
+        suite.context,
+        tuple(suite.references.values()),
+        protocol_version="s0-g0-v1",
+    )
+    decision = evaluate_stage0(
+        verification.to_stage0_evidence(evidence_uri="stage0://verified-fixture")
+    )
+    artifacts = finalizer.publish_report(
+        suite.context,
+        verification,
+        mode=decision.mode,
+        reasons=tuple(decision.reasons),
+        accepted_target_risks=("device_isolation_not_reserved",),
+    )
+
+    assert decision.mode is ProjectMode.FULL_MVP
+    machine_path = Path(unquote(urlparse(artifacts.machine_report_uri).path))
+    markdown_path = Path(unquote(urlparse(artifacts.markdown_report_uri).path))
+    machine = json.loads(machine_path.read_text(encoding="utf-8"))
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert machine["verification"]["input_digest"] == verification.input_digest
+    assert machine["automatic_release_allowed"] is False
+    assert machine["accepted_target_risks"] == ["device_isolation_not_reserved"]
+    assert FORMAL_STAGE0_SCOPE_WARNING in markdown
+    assert "device_isolation_not_reserved" in markdown

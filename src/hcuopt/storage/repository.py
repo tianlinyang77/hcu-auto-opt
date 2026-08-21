@@ -12,6 +12,7 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
@@ -49,7 +50,18 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from hcuopt.domain.transitions import transition_candidate, transition_task
-from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0, evidence_from_probe_summaries
+from hcuopt.evaluation.stage0_finalizer import Stage0FinalizationService
+from hcuopt.evaluation.stage0_protocol import (
+    Stage0ProtocolError,
+    load_registered_stage0_protocol,
+)
+from hcuopt.evaluation.stage0_verifier import (
+    Stage0EvidenceError,
+    Stage0ProbeEvidenceReference,
+    Stage0VerificationContext,
+    verification_input_digest,
+)
+from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
 
@@ -61,8 +73,14 @@ class PostgresRepository:
     workers and never holds a database transaction open.
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        stage0_finalizer: Stage0FinalizationService | None = None,
+    ) -> None:
         self.database_url = database_url
+        self.stage0_finalizer = stage0_finalizer
 
     @contextmanager
     def connection(self) -> Iterator[Connection[dict[str, Any]]]:
@@ -185,6 +203,14 @@ class PostgresRepository:
         target: TargetSpec,
         source_path: str,
     ) -> dict[str, Any]:
+        if request.mode is Stage0RunMode.FORMAL:
+            try:
+                load_registered_stage0_protocol(request.protocol_version)
+            except Stage0ProtocolError as exc:
+                raise Conflict(
+                    "formal Stage 0 requires a repository-registered protocol: "
+                    f"{request.protocol_version}"
+                ) from exc
         task_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-task:{request.idempotency_key}")
         run_id = uuid5(NAMESPACE_URL, f"hcuopt:stage0-run:{request.idempotency_key}")
         budget = request.budget.model_dump(mode="json", exclude_none=True)
@@ -752,6 +778,48 @@ class PostgresRepository:
         return row
 
     def finalize_stage0_run(self, stage0_run_id: UUID) -> dict[str, Any]:
+        initial = self._load_stage0_verification_input(stage0_run_id)
+        run = initial["run"]
+        if run["state"] == Stage0RunState.FINALIZED.value:
+            assert run["report"] is not None
+            return run["report"]
+        self._require_stage0_ready_for_verification(initial)
+        if self.stage0_finalizer is None:
+            raise Conflict(
+                "formal Stage 0 verifier is not configured; set the deployment evidence root"
+            )
+        context = initial["context"]
+        references = initial["references"]
+        try:
+            verification = self.stage0_finalizer.verify(
+                context,
+                references,
+                protocol_version=run["protocol_version"],
+            )
+        except (Stage0EvidenceError, Stage0ProtocolError, ValidationError, ValueError) as exc:
+            code = getattr(exc, "code", "formal_evidence_invalid")
+            raise Conflict(f"formal Stage 0 evidence verification failed [{code}]: {exc}") from exc
+
+        evidence = verification.to_stage0_evidence(
+            evidence_uri=(
+                f"stage0://runs/{stage0_run_id}/verification/"
+                f"{verification.input_digest.removeprefix('sha256:')}"
+            )
+        )
+        decision = evaluate_stage0(evidence)
+        accepted_target_risks = tuple(
+            blocker.id
+            for blocker in context.target.blockers
+            if blocker.status == "accepted"
+        )
+        artifacts = self.stage0_finalizer.publish_report(
+            context,
+            verification,
+            mode=decision.mode,
+            reasons=tuple(decision.reasons),
+            accepted_target_risks=accepted_target_risks,
+        )
+
         with self.connection() as connection:
             run = connection.execute(
                 "SELECT * FROM stage0_runs WHERE stage0_run_id = %s FOR UPDATE",
@@ -762,17 +830,19 @@ class PostgresRepository:
             if run["state"] == Stage0RunState.FINALIZED.value:
                 assert run["report"] is not None
                 return run["report"]
-            if run["mode"] != Stage0RunMode.FORMAL.value:
-                raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
-            if run["state"] != Stage0RunState.READY.value:
-                raise Conflict("Stage 0 probe barrier is not ready")
             task = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
                 (run["task_id"],),
             ).fetchone()
             assert task is not None
-            if task["state"] != TaskState.STAGE0_PENDING.value:
-                raise Conflict("formal Stage 0 requires a stage0_pending task")
+            target_snapshot = connection.execute(
+                """
+                SELECT * FROM target_snapshots
+                WHERE target_snapshot_id = %s
+                """,
+                (run["target_snapshot_id"],),
+            ).fetchone()
+            assert target_snapshot is not None
             records = connection.execute(
                 """
                 SELECT * FROM stage0_probe_records
@@ -780,14 +850,31 @@ class PostgresRepository:
                 """,
                 (stage0_run_id,),
             ).fetchall()
-            probes = {
-                Stage0ProbeType(row["probe_type"]): row["summary"] for row in records
-            }
-            evidence = evidence_from_probe_summaries(
-                probes,
-                evidence_uri=f"stage0://runs/{stage0_run_id}",
+            current = self._project_stage0_verification_input(
+                run,
+                task,
+                target_snapshot,
+                records,
             )
-            decision = evaluate_stage0(evidence)
+            self._require_stage0_ready_for_verification(current)
+            protocol = load_registered_stage0_protocol(run["protocol_version"])
+            current_references = {
+                reference.probe_type: reference
+                for reference in current["references"]
+            }
+            current_digest = verification_input_digest(
+                current["context"], current_references, protocol
+            )
+            if current_digest != verification.input_digest:
+                raise Conflict("Stage 0 evidence changed during independent verification")
+            if (
+                verification.protocol_version != run["protocol_version"]
+                or verification.protocol_hash != protocol.protocol_hash
+            ):
+                raise Conflict("Stage 0 verifier used a different registered protocol")
+            if current["context"] != context:
+                raise Conflict("Stage 0 verification context changed before commit")
+
             target_state = (
                 TaskState.STOPPED_MEASUREMENT
                 if decision.mode is ProjectMode.STOPPED_MEASUREMENT
@@ -803,22 +890,50 @@ class PostgresRepository:
                 "reasons": list(decision.reasons),
                 "automatic_release_allowed": False,
                 "evidence_authority": "formal",
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "machine_report_uri": artifacts.machine_report_uri,
+                "machine_report_hash": artifacts.machine_report_hash,
+                "markdown_report_uri": artifacts.markdown_report_uri,
+                "markdown_report_hash": artifacts.markdown_report_hash,
+                "accepted_target_risks": list(accepted_target_risks),
             }
             aggregate = {
-                "source": "target-bound-stage0-run",
+                "source": "independently-verified-raw-evidence",
                 "stage0_run_id": str(stage0_run_id),
                 "target_snapshot_id": str(run["target_snapshot_id"]),
-                "protocol_version": run["protocol_version"],
-                "measurement": evidence.measurement.value,
-                "profiler": evidence.profiler.value,
-                "hot_patch": evidence.hot_patch.value,
-                "hardware_fingerprint": evidence.hardware_fingerprint,
-                "software_fingerprint": evidence.software_fingerprint,
-                "timer_resolution_ns": evidence.timer_resolution_ns,
-                "noise_sigma_ns": evidence.noise_sigma_ns,
-                "noise_cv": evidence.noise_cv,
-                "mde_ratio": evidence.mde_ratio,
+                "protocol_version": verification.protocol_version,
+                "protocol_hash": verification.protocol_hash,
+                "input_digest": verification.input_digest,
+                "measurement": verification.measurement.value,
+                "profiler": verification.profiler.value,
+                "hot_patch": verification.hot_patch.value,
+                "hardware_fingerprint": verification.hardware_fingerprint,
+                "software_fingerprint": verification.software_fingerprint,
+                "timer_resolution_ns": verification.timer_resolution_ns,
+                "noise_sigma_ns": verification.noise_sigma_ns,
+                "noise_cv": verification.noise_cv,
+                "mde_ratio": verification.mde_ratio,
+                "failure_codes": list(verification.failure_codes),
+                "verification_reasons": list(verification.reasons),
+                "statistics": verification.statistics,
+                "input_evidence": list(verification.input_evidence),
+                "verifier_provenance": verification.verifier_provenance.model_dump(
+                    mode="json"
+                ),
                 "probe_record_ids": [str(row["probe_record_id"]) for row in records],
+                "accepted_target_risks": list(accepted_target_risks),
+                "reports": {
+                    "machine": {
+                        "uri": artifacts.machine_report_uri,
+                        "sha256": artifacts.machine_report_hash,
+                    },
+                    "markdown": {
+                        "uri": artifacts.markdown_report_uri,
+                        "sha256": artifacts.markdown_report_hash,
+                    },
+                },
                 "synthetic": False,
             }
             connection.execute(
@@ -856,12 +971,112 @@ class PostgresRepository:
                         {
                             "stage0_run_id": str(stage0_run_id),
                             "mode": decision.mode.value,
+                            "input_digest": verification.input_digest,
+                            "accepted_target_risks": list(accepted_target_risks),
                             "automatic_release_allowed": False,
                         }
                     ),
                 ),
             )
         return report
+
+    def _load_stage0_verification_input(
+        self, stage0_run_id: UUID
+    ) -> dict[str, Any]:
+        with self.connection() as connection:
+            run = connection.execute(
+                "SELECT * FROM stage0_runs WHERE stage0_run_id = %s",
+                (stage0_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(f"Stage 0 run not found: {stage0_run_id}")
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s",
+                (run["task_id"],),
+            ).fetchone()
+            assert task is not None
+            target_snapshot = connection.execute(
+                """
+                SELECT * FROM target_snapshots
+                WHERE target_snapshot_id = %s
+                """,
+                (run["target_snapshot_id"],),
+            ).fetchone()
+            assert target_snapshot is not None
+            records = connection.execute(
+                """
+                SELECT * FROM stage0_probe_records
+                WHERE stage0_run_id = %s ORDER BY probe_type
+                """,
+                (stage0_run_id,),
+            ).fetchall()
+        return self._project_stage0_verification_input(
+            run,
+            task,
+            target_snapshot,
+            records,
+        )
+
+    @staticmethod
+    def _project_stage0_verification_input(
+        run: Mapping[str, Any],
+        task: Mapping[str, Any],
+        target_snapshot: Mapping[str, Any],
+        records: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        try:
+            target = TargetSpec.model_validate(target_snapshot["specification"])
+            context = Stage0VerificationContext(
+                task_id=task["task_id"],
+                stage0_run_id=run["stage0_run_id"],
+                target_snapshot_id=run["target_snapshot_id"],
+                target=target,
+                target_fingerprint=target_snapshot["target_fingerprint"],
+                workload_id=task["workload_id"],
+                adapter_profile=run["adapter_profile"],
+                expected_resource_id=(
+                    f"hcu-{target.execution_host.accelerator.device_index}"
+                ),
+            )
+            references = tuple(
+                Stage0ProbeEvidenceReference(
+                    probe_record_id=row["probe_record_id"],
+                    probe_type=Stage0ProbeType(row["probe_type"]),
+                    raw_evidence_uri=row["raw_evidence_uri"],
+                    raw_evidence_hash=row["raw_evidence_hash"],
+                    adapter_provenance=tuple(row["adapter_provenance"]),
+                    synthetic=row["synthetic"],
+                    lease_id=row["lease_id"],
+                    resource_id=row["resource_id"],
+                    fencing_token=row["fencing_token"],
+                    cleanup_evidence=row["cleanup_evidence"],
+                )
+                for row in records
+            )
+        except (KeyError, TypeError, ValidationError, ValueError) as exc:
+            raise Conflict(f"Stage 0 persisted evidence references are invalid: {exc}") from exc
+        return {
+            "run": run,
+            "task": task,
+            "target_snapshot": target_snapshot,
+            "records": records,
+            "context": context,
+            "references": references,
+        }
+
+    @staticmethod
+    def _require_stage0_ready_for_verification(value: Mapping[str, Any]) -> None:
+        run = value["run"]
+        task = value["task"]
+        references = value["references"]
+        if run["mode"] != Stage0RunMode.FORMAL.value:
+            raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
+        if run["state"] != Stage0RunState.READY.value:
+            raise Conflict("Stage 0 probe barrier is not ready")
+        if task["state"] != TaskState.STAGE0_PENDING.value:
+            raise Conflict("formal Stage 0 requires a stage0_pending task")
+        if len(references) != len(REQUIRED_STAGE0_PROBES):
+            raise Conflict("Stage 0 seven-probe barrier is incomplete")
 
     def freeze_baseline(self, task_id: UUID, request: BaselineCreate) -> dict[str, Any]:
         epoch_id = uuid4()

@@ -211,6 +211,14 @@ class Stage0ReportView(ReadModel):
     reasons: list[str]
     automatic_release_allowed: bool = False
     evidence_authority: Literal["synthetic_control_flow_only", "formal"]
+    protocol_version: str | None = None
+    protocol_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    input_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    machine_report_uri: str | None = None
+    machine_report_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    markdown_report_uri: str | None = None
+    markdown_report_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    accepted_target_risks: list[str] = Field(default_factory=list)
 
 
 class BaselineCreate(ContractModel):

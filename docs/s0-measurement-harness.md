@@ -12,12 +12,22 @@ The Stage 0 adapter owns `fingerprint`, `timer`, `noise`, `known_signal`, and
 and sample count; D supplies the independent recomputation and `gate_result`. Until then,
 the server-side Barrier remains fail-closed.
 
-## nmz36 formal-run procedure
+The current S0-B adapter still publishes the earlier evidence shape. It therefore rejects
+every Formal probe before touching the device; a Dry Run remains available for control-flow
+and collector development. Formal execution may be enabled only after S0-B emits the strict
+`measurement-evidence-v2` binding, raw lifecycle records, typed telemetry, and protocol Hash
+consumed by `Stage0Verifier`.
+
+## nmz36 formal-run procedure (after the v2 producer lands)
 
 1. Confirm the Target Lock is still `nmz36-sglang-0.5.12`, including image digest, source
-   commit, HCU 7, NUMA affinity, and the recorded exclusive reservation window.
-2. Do not start a Formal run while `device_isolation_not_reserved` is open. A dry run may
-   validate shape only and cannot be finalized as performance authority.
+   commit, HCU 7, NUMA affinity, and every accepted risk.
+2. `device_isolation_not_reserved` was explicitly accepted on 2026-08-21 so Stage 0 may
+   start without a separately recorded reservation window. This is not evidence of physical
+   exclusivity: Mooncake was still mapped to all devices at acceptance time. Pre/post
+   telemetry must therefore record unmanaged HCU activity, and D must fail G0-M when an
+   unmanaged accelerator process is observed. The acceptance cannot authorize performance
+   publication or automatic release.
 3. Start the unified `nmz36-stage0-v2` worker, supplying the locked-image workload
    callable, HCU device-timer implementation, telemetry collector, and explicit
    MeasurementPlan. The worker routes the five measurement probe types to S0-B and the
@@ -37,7 +47,9 @@ the server-side Barrier remains fail-closed.
    adapter-owned containers and require a healthy HCU/cleanup report before returning a
    `Stage0ProbeResult`.
 6. Give the raw evidence to D for independent re-hashing and noise statistics. Only A's
-   server-side finalization may open the Stage 0 Barrier or select a project mode.
+   server-side finalization may open the Stage 0 Barrier or select a project mode. The API
+   must set `HCUOPT_STAGE0_EVIDENCE_ROOT` to the deployment-owned tree shared with the
+   workers; without it, Formal finalization fails closed.
 
 ## Expected evidence
 

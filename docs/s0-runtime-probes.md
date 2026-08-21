@@ -111,9 +111,10 @@ Adapter 来源、实际执行结果和清理证据都会保留。但本地文件
 因此这种存储只用于 Dry Run，不被描述为正式不可变证据。
 
 当前版本的 Formal S0-C 在执行前统一失败关闭，即使部署方注入了声称具有正式发布权限的
-`EvidencePublisher` 也不能绕过。原因是 D 侧还没有把 raw evidence、正式 provenance 和
-最终 Stage 0 判决器接成同一条可复算链。完成该接线并补齐兼容证据契约后，才允许启用
-verifier-owned 对象存储和 Formal Runtime Probe；在此之前，本地文件不能被包装成正式证据。
+`EvidencePublisher` 也不能绕过。D 校验器、控制面 Barrier 和双格式报告已经接通，但 S0-C
+生产者仍未输出 `ProfilerEvidenceV2` / `HotpatchEvidenceV2` 以及它们引用的原始进程、Source、
+Artifact、stdout、标准化输出和缓存证据。只有这些严格 envelope 能通过生产 finalizer 后，
+才允许启用 Formal Runtime Probe；摘要包装和 Worker 本地文件都不能升级为正式证据。
 
 ## 旧 Dry Run 记录
 

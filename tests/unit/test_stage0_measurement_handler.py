@@ -117,7 +117,7 @@ def test_stage0_handler_rejects_an_adapter_bound_to_another_target() -> None:
         handlers.handle_stage0_probe(_timer_payload())
 
 
-def test_formal_noise_requires_a_verified_process_restart() -> None:
+def test_formal_measurement_fails_closed_until_v2_producer_is_wired() -> None:
     adapter = Stage0MeasurementProbeAdapter(
         BoundHarness(),  # type: ignore[arg-type]
         TARGET,
@@ -137,7 +137,7 @@ def test_formal_noise_requires_a_verified_process_restart() -> None:
         null_signal_detector=lambda _run, _payload: False,
     )
 
-    with pytest.raises(MeasurementSafetyError, match="verified process restart"):
+    with pytest.raises(MeasurementSafetyError, match="measurement-evidence-v2"):
         adapter.run_probe(
             {
                 "stage0_run_id": str(uuid4()),

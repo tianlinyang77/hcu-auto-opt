@@ -52,6 +52,7 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.stage0_finalizer import FileStage0Finalizer
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
@@ -77,9 +78,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        repo = repository or PostgresRepository(
-            os.getenv("HCUOPT_DATABASE_URL", DEFAULT_DATABASE_URL)
-        )
+        if repository is None:
+            evidence_root = os.getenv("HCUOPT_STAGE0_EVIDENCE_ROOT")
+            finalizer = (
+                FileStage0Finalizer(Path(evidence_root))
+                if evidence_root is not None
+                else None
+            )
+            repo = PostgresRepository(
+                os.getenv("HCUOPT_DATABASE_URL", DEFAULT_DATABASE_URL),
+                stage0_finalizer=finalizer,
+            )
+        else:
+            repo = repository
         application.state.repository = repo
         if os.getenv("HCUOPT_AUTO_MIGRATE", "true").lower() == "true":
             repo.migrate()

@@ -32,9 +32,14 @@ def canonical_json_bytes(value: Any) -> bytes:
 def write_evidence(path: Path, value: Any) -> EvidenceArtifact:
     """Publish canonical bytes once and reject attempts to replace different evidence."""
 
+    return write_evidence_bytes(path, canonical_json_bytes(value))
+
+
+def write_evidence_bytes(path: Path, encoded: bytes) -> EvidenceArtifact:
+    """Publish immutable evidence bytes and return their content identity."""
+
     final_path = path.parent.resolve() / path.name
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = canonical_json_bytes(value)
     digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
     artifact = EvidenceArtifact(
         uri=final_path.as_uri(),

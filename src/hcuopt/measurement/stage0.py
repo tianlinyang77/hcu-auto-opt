@@ -15,7 +15,6 @@ from hcuopt.measurement.harness import (
     HarnessRun,
     MeasurementSafetyError,
 )
-from hcuopt.measurement.models import MeasurementPlan
 from hcuopt.targets import target_fingerprint
 
 
@@ -60,20 +59,16 @@ class Stage0MeasurementProbeAdapter:
 
     def run_probe(self, payload: Mapping[str, Any], output_dir: Path) -> Stage0ProbeOutput:
         probe_type = Stage0ProbeType(payload["probe_type"])
+        if payload.get("mode") == "formal":
+            raise MeasurementSafetyError(
+                "formal measurement probes are disabled until the "
+                "measurement-evidence-v2 producer is wired"
+            )
         if probe_type is Stage0ProbeType.FINGERPRINT:
             return self._fingerprint_probe(payload, output_dir)
         run_plan = dict(self.measurement_plan_factory(probe_type, payload))
         run_plan["mode"] = payload.get("mode")
         run_plan["_job_context"] = payload.get("_job_context", {})
-        measurement_plan = MeasurementPlan.model_validate(run_plan.get("measurement_plan"))
-        if (
-            payload.get("mode") == "formal"
-            and probe_type is Stage0ProbeType.NOISE
-            and measurement_plan.process_restart_count < 1
-        ):
-            raise MeasurementSafetyError(
-                "formal noise measurement requires at least one verified process restart"
-            )
         run = self.harness.run_with_evidence(run_plan, output_dir)
         if probe_type is Stage0ProbeType.TIMER:
             assert run.evidence.calibration is not None
