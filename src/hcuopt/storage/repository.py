@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from hcuopt.contracts.platform_v1 import (
+    SHA256_PATTERN,
     ArtifactManifest,
     EvaluationRun,
     EvidenceBundle,
@@ -28,6 +29,9 @@ from hcuopt.contracts.v1 import (
     FrameworkSmokeCreate,
     FrameworkSmokeSignoffRequest,
     JobCreate,
+    ManualCandidateCreate,
+    ManualCandidateSignoffRequest,
+    ManualCandidateTaskCreate,
     Stage0EvidenceRequest,
     Stage0ProbeResult,
     Stage0RunCreate,
@@ -40,6 +44,8 @@ from hcuopt.domain.enums import (
     JobState,
     JobType,
     LeaseScope,
+    ManualCandidateDecision,
+    ManualCandidateVerdict,
     ProjectMode,
     Stage0ProbeType,
     Stage0RunMode,
@@ -139,6 +145,11 @@ class PostgresRepository:
     @staticmethod
     def _target_fingerprint(target: TargetSpec) -> str:
         return target_fingerprint(target)
+
+    @staticmethod
+    def _digest_json(value: Mapping[str, Any]) -> str:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
     def _upsert_target_snapshot(
         self,
@@ -356,6 +367,260 @@ class PostgresRepository:
                 ),
             )
         return run
+
+    def create_manual_candidate_task(
+        self,
+        request: ManualCandidateTaskCreate,
+    ) -> dict[str, Any]:
+        """Create the M1 task and its immutable Baseline Epoch atomically."""
+
+        task_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:m1-task:{request.idempotency_key}"
+        )
+        baseline_epoch_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:{task_id}:m1-baseline:v1"
+        )
+        budget = request.budget.model_dump(mode="json", exclude_none=True)
+        with self.connection() as connection:
+            stage0 = connection.execute(
+                """
+                SELECT
+                    run.stage0_run_id,
+                    run.mode AS run_mode,
+                    run.state AS run_state,
+                    run.protocol_version,
+                    run.target_snapshot_id,
+                    task.workload_id,
+                    task.stage0_authority,
+                    task.project_mode,
+                    task.automatic_release_allowed,
+                    stage0_evidence.evidence AS formal_evidence,
+                    stage0_evidence.report AS formal_report,
+                    snapshot.target_id,
+                    snapshot.target_fingerprint,
+                    snapshot.specification
+                FROM stage0_runs AS run
+                JOIN tasks AS task ON task.task_id = run.task_id
+                JOIN stage0_evidence
+                  ON stage0_evidence.stage0_run_id = run.stage0_run_id
+                JOIN target_snapshots AS snapshot
+                  ON snapshot.target_snapshot_id = run.target_snapshot_id
+                WHERE run.stage0_run_id = %s
+                FOR SHARE OF run, task, snapshot
+                """,
+                (request.stage0_run_id,),
+            ).fetchone()
+            if stage0 is None:
+                raise NotFound(f"Stage 0 run not found: {request.stage0_run_id}")
+            if (
+                stage0["run_mode"] != Stage0RunMode.FORMAL.value
+                or stage0["run_state"] != Stage0RunState.FINALIZED.value
+                or stage0["stage0_authority"] != "formal"
+            ):
+                raise Conflict("M1 requires a finalized Formal Stage 0 run")
+            if stage0["project_mode"] != ProjectMode.DEGRADED_MANUAL_INTAKE.value:
+                raise Conflict(
+                    "M1 currently requires degraded_manual_intake from Formal Stage 0"
+                )
+            if stage0["automatic_release_allowed"]:
+                raise Conflict("M1 cannot inherit automatic release authority")
+            stage0_protocol_hash = stage0["formal_evidence"].get("protocol_hash")
+            if (
+                stage0["formal_report"].get("evidence_authority") != "formal"
+                or stage0["formal_report"].get("automatic_release_allowed") is not False
+                or stage0["formal_evidence"].get("synthetic") is not False
+                or stage0["formal_evidence"].get("stage0_run_id")
+                != str(request.stage0_run_id)
+                or stage0["formal_evidence"].get("protocol_version")
+                != stage0["protocol_version"]
+                or not isinstance(stage0_protocol_hash, str)
+                or re.fullmatch(SHA256_PATTERN, stage0_protocol_hash) is None
+            ):
+                raise Conflict("M1 requires the independently verified Stage 0 report")
+
+            target = TargetSpec.model_validate(stage0["specification"])
+            source = connection.execute(
+                """
+                SELECT * FROM source_snapshots
+                WHERE snapshot_id = %s
+                FOR SHARE
+                """,
+                (request.baseline_source_snapshot_id,),
+            ).fetchone()
+            if source is None:
+                raise NotFound(
+                    "baseline SourceSnapshot not found: "
+                    f"{request.baseline_source_snapshot_id}"
+                )
+            provenance = source["adapter_provenance"]
+            if (
+                source["kind"] != "baseline"
+                or not source["clean"]
+                or source["synthetic"]
+                or not isinstance(provenance, list)
+                or not provenance
+                or any(
+                    not isinstance(item, dict)
+                    or item.get("implementation_kind") == "fake"
+                    for item in provenance
+                )
+            ):
+                raise Conflict("M1 requires a clean, real Baseline SourceSnapshot")
+            if (
+                source["repository"] != target.source_baseline.repository
+                or source["commit"] != target.source_baseline.commit
+            ):
+                raise Conflict("Baseline SourceSnapshot does not match the Target Lock")
+
+            hardware_fingerprint = self._digest_json(
+                {
+                    "host": target.execution_host.name,
+                    "accelerator": target.execution_host.accelerator.model,
+                    "architecture": target.execution_host.accelerator.architecture,
+                    "device": target.execution_host.accelerator.device_index,
+                    "target_fingerprint": stage0["target_fingerprint"],
+                }
+            )
+            software_fingerprint = self._digest_json(
+                {
+                    "image_digest": target.inference_image.registry_digest,
+                    "source_hash": source["source_hash"],
+                    "source_commit": source["commit"],
+                    "dtk": target.inference_image.dtk_version,
+                    "sglang": target.inference_image.sglang_package_version,
+                }
+            )
+            task = connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, name, workload_id, idempotency_key, state, budget,
+                    automatic_release_allowed, workflow_type, target_id,
+                    target_snapshot_id, adapter_profile, stage0_run_id,
+                    stage0_authority, project_mode
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, FALSE, %s, %s, %s, %s, %s,
+                    'formal', %s
+                )
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    task_id,
+                    request.name,
+                    stage0["workload_id"],
+                    request.idempotency_key,
+                    TaskState.MANUAL_CANDIDATE_PENDING.value,
+                    Jsonb(budget),
+                    WorkflowType.MANUAL_CANDIDATE.value,
+                    stage0["target_id"],
+                    stage0["target_snapshot_id"],
+                    request.adapter_profile,
+                    request.stage0_run_id,
+                    stage0["project_mode"],
+                ),
+            ).fetchone()
+            if task is None:
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE idempotency_key = %s FOR UPDATE",
+                    (request.idempotency_key,),
+                ).fetchone()
+                assert task is not None
+            expected_task = {
+                "name": request.name,
+                "workload_id": stage0["workload_id"],
+                "budget": budget,
+                "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
+                "target_id": stage0["target_id"],
+                "target_snapshot_id": stage0["target_snapshot_id"],
+                "adapter_profile": request.adapter_profile,
+                "stage0_run_id": request.stage0_run_id,
+                "automatic_release_allowed": False,
+            }
+            if any(task[name] != value for name, value in expected_task.items()):
+                raise Conflict("M1 idempotency_key was reused with different task inputs")
+
+            baseline = connection.execute(
+                """
+                INSERT INTO baseline_epochs (
+                    baseline_epoch_id, task_id, hardware_fingerprint,
+                    software_fingerprint, workload_id, configuration_hash,
+                    baseline_kind, target_snapshot_id, stage0_run_id,
+                    stage0_protocol_hash, source_snapshot_id, workload_hash, image_digest,
+                    adapter_profile
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (task_id) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    baseline_epoch_id,
+                    task["task_id"],
+                    hardware_fingerprint,
+                    software_fingerprint,
+                    stage0["workload_id"],
+                    request.configuration_hash,
+                    WorkflowType.MANUAL_CANDIDATE.value,
+                    stage0["target_snapshot_id"],
+                    request.stage0_run_id,
+                    stage0_protocol_hash,
+                    request.baseline_source_snapshot_id,
+                    request.workload_hash,
+                    target.inference_image.registry_digest,
+                    request.adapter_profile,
+                ),
+            ).fetchone()
+            if baseline is None:
+                baseline = connection.execute(
+                    "SELECT * FROM baseline_epochs WHERE task_id = %s",
+                    (task["task_id"],),
+                ).fetchone()
+                assert baseline is not None
+            expected_baseline = {
+                "baseline_epoch_id": baseline_epoch_id,
+                "target_snapshot_id": stage0["target_snapshot_id"],
+                "stage0_run_id": request.stage0_run_id,
+                "stage0_protocol_hash": stage0_protocol_hash,
+                "source_snapshot_id": request.baseline_source_snapshot_id,
+                "workload_hash": request.workload_hash,
+                "configuration_hash": request.configuration_hash,
+                "image_digest": target.inference_image.registry_digest,
+                "adapter_profile": request.adapter_profile,
+                "baseline_kind": WorkflowType.MANUAL_CANDIDATE.value,
+            }
+            if any(
+                baseline[name] != value for name, value in expected_baseline.items()
+            ):
+                raise Conflict("M1 task already has a different immutable Baseline Epoch")
+
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                SELECT %s, 'manual_candidate_task_created', %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM task_events
+                    WHERE task_id = %s
+                      AND event_type = 'manual_candidate_task_created'
+                )
+                """,
+                (
+                    task["task_id"],
+                    Jsonb(
+                        {
+                            "stage0_run_id": str(request.stage0_run_id),
+                            "baseline_epoch_id": str(baseline_epoch_id),
+                            "baseline_source_snapshot_id": str(
+                                request.baseline_source_snapshot_id
+                            ),
+                            "target_snapshot_id": str(stage0["target_snapshot_id"]),
+                            "project_mode": stage0["project_mode"],
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                    task["task_id"],
+                ),
+            )
+        return task
 
     def create_framework_smoke_task(
         self,
@@ -1686,6 +1951,9 @@ class PostgresRepository:
                     error,
                 )
                 self._fail_stage0_run_after_job_failure(connection, job, error)
+                self._reject_manual_candidate_task_after_job_failure(
+                    connection, job, error
+                )
         assert row is not None
         return row
 
@@ -1810,18 +2078,120 @@ class PostgresRepository:
             ),
         )
 
+    def _reject_manual_candidate_task_after_job_failure(
+        self,
+        connection: Connection[dict[str, Any]],
+        job: dict[str, Any],
+        error: dict[str, Any],
+    ) -> None:
+        manual_job_types = {
+            JobType.MANUAL_BUILD.value,
+            JobType.MANUAL_CORRECTNESS.value,
+            JobType.MANUAL_PERFORMANCE.value,
+            JobType.MANUAL_ADJUDICATE.value,
+        }
+        if job["job_type"] not in manual_job_types:
+            return
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+            (job["task_id"],),
+        ).fetchone()
+        if task is None:
+            raise NotFound(f"task not found: {job['task_id']}")
+        if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+            return
+        current_task = TaskState(task["state"])
+        if current_task not in {
+            TaskState.REJECTED,
+            TaskState.CANCELLED,
+            TaskState.COMPLETED,
+        }:
+            transition_task(current_task, TaskState.REJECTED)
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.REJECTED.value, job["task_id"]),
+            )
+        raw_candidate_id = job["payload"].get("candidate_id")
+        if raw_candidate_id is None:
+            raise Conflict(f"{job['job_type']} job is missing its candidate_id binding")
+        candidate_id = UUID(str(raw_candidate_id))
+        candidate = connection.execute(
+            "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE",
+            (candidate_id,),
+        ).fetchone()
+        if candidate is None:
+            raise NotFound(f"candidate not found: {candidate_id}")
+        target = (
+            CandidateState.BUILD_FAILED
+            if job["job_type"] == JobType.MANUAL_BUILD.value
+            else CandidateState.REJECTED
+        )
+        current_candidate = CandidateState(candidate["state"])
+        if current_candidate not in {
+            target,
+            CandidateState.BUILD_FAILED,
+            CandidateState.REJECTED,
+            CandidateState.ACCEPTED,
+        }:
+            transition_candidate(current_candidate, target)
+            connection.execute(
+                """
+                UPDATE candidates SET state = %s, updated_at = now()
+                WHERE candidate_id = %s
+                """,
+                (target.value, candidate_id),
+            )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, event_type, details)
+            VALUES (%s, 'manual_candidate_job_failed', %s)
+            """,
+            (
+                job["task_id"],
+                Jsonb(
+                    {
+                        "job_id": str(job["job_id"]),
+                        "job_type": job["job_type"],
+                        "candidate_id": str(candidate_id),
+                        "attempts": job["attempts"],
+                        "max_attempts": job["max_attempts"],
+                        "error": error,
+                    }
+                ),
+            ),
+        )
+
     def recover_stale_jobs(self, stale_after_seconds: int = 120) -> list[UUID]:
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)
         recovered: list[UUID] = []
         with self.connection() as connection:
+            # Keep the same task -> job lock order as fail_job(). This prevents a
+            # worker-loss recovery from deadlocking with a late worker failure.
+            connection.execute(
+                """
+                SELECT task_id FROM tasks
+                WHERE task_id IN (
+                    SELECT task_id FROM jobs
+                    WHERE state = 'running'
+                      AND heartbeat_at <= now() - make_interval(secs => %s)
+                )
+                ORDER BY task_id
+                FOR UPDATE
+                """,
+                (stale_after_seconds,),
+            ).fetchall()
             rows = connection.execute(
                 """
                 SELECT * FROM jobs
-                WHERE state = 'running' AND heartbeat_at < %s
+                WHERE state = 'running'
+                  AND heartbeat_at <= now() - make_interval(secs => %s)
                 ORDER BY heartbeat_at
                 FOR UPDATE SKIP LOCKED
                 """,
-                (cutoff,),
+                (stale_after_seconds,),
             ).fetchall()
             for job in rows:
                 self._release_resource(connection, job, "worker_heartbeat_expired")
@@ -1850,6 +2220,13 @@ class PostgresRepository:
                     """,
                     (job["job_id"], Jsonb({"old_fencing_token": job["fencing_token"]})),
                 )
+                if not retry:
+                    error = {"code": "worker_lost", "message": "heartbeat expired"}
+                    self._reject_framework_task_after_job_failure(connection, job, error)
+                    self._fail_stage0_run_after_job_failure(connection, job, error)
+                    self._reject_manual_candidate_task_after_job_failure(
+                        connection, job, error
+                    )
                 recovered.append(job["job_id"])
         return recovered
 
@@ -1881,6 +2258,236 @@ class PostgresRepository:
             ).fetchone()
         assert row is not None
         return row
+
+    def create_manual_candidate(
+        self,
+        task_id: UUID,
+        request: ManualCandidateCreate,
+    ) -> dict[str, Any]:
+        """Register the single M1 Candidate and enqueue its durable build Job."""
+
+        candidate_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:m1-candidate:{request.idempotency_key}"
+        )
+        round_id = uuid5(NAMESPACE_URL, f"hcuopt:{task_id}:m1-single-round:v1")
+        job_id = uuid5(NAMESPACE_URL, f"hcuopt:{candidate_id}:m1-build:v1")
+        with self.connection() as connection:
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise NotFound(f"task not found: {task_id}")
+            if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+                raise Conflict("task is not an M1 Manual Candidate workflow")
+            existing = connection.execute(
+                "SELECT * FROM candidates WHERE task_id = %s FOR UPDATE",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                expected = {
+                    "candidate_id": candidate_id,
+                    "baseline_epoch_id": request.baseline_epoch_id,
+                    "source_hash": request.source_hash,
+                    "optimization_intent": request.optimization_intent,
+                    "replacement_point": request.replacement_point,
+                    "track": request.track.value,
+                    "release_mode": request.release_mode.value,
+                    "candidate_kind": request.candidate_kind.value,
+                    "parent_candidate_id": request.parent_candidate_id,
+                    "idempotency_key": request.idempotency_key,
+                }
+                if any(existing[name] != value for name, value in expected.items()):
+                    raise Conflict("M1 task already owns a different single Candidate")
+                return existing
+            if task["state"] != TaskState.MANUAL_CANDIDATE_PENDING.value:
+                raise Conflict("M1 Candidate intake requires manual_candidate_pending")
+            if request.parent_candidate_id is not None:
+                raise Conflict("M1 single-Candidate intake does not support Candidate branching")
+
+            baseline = connection.execute(
+                "SELECT * FROM baseline_epochs WHERE task_id = %s FOR SHARE",
+                (task_id,),
+            ).fetchone()
+            if baseline is None or baseline["baseline_kind"] != WorkflowType.MANUAL_CANDIDATE.value:
+                raise Conflict("M1 Candidate requires an immutable Manual Candidate baseline")
+            if request.baseline_epoch_id != baseline["baseline_epoch_id"]:
+                raise Conflict("M1 Candidate intake must bind the task's Baseline Epoch")
+            source = connection.execute(
+                "SELECT * FROM source_snapshots WHERE snapshot_id = %s FOR SHARE",
+                (baseline["source_snapshot_id"],),
+            ).fetchone()
+            if source is None:
+                raise NotFound("M1 Baseline SourceSnapshot no longer exists")
+            target = connection.execute(
+                "SELECT * FROM target_snapshots WHERE target_snapshot_id = %s FOR SHARE",
+                (baseline["target_snapshot_id"],),
+            ).fetchone()
+            if target is None:
+                raise NotFound("M1 Target Snapshot no longer exists")
+
+            metadata = {
+                "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
+                "stage0_run_id": str(task["stage0_run_id"]),
+                "stage0_protocol_hash": baseline["stage0_protocol_hash"],
+                "target_snapshot_id": str(task["target_snapshot_id"]),
+                "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
+                "baseline_source_snapshot_id": str(source["snapshot_id"]),
+                "workload_hash": baseline["workload_hash"],
+                "candidate_kind": request.candidate_kind.value,
+            }
+            candidate = connection.execute(
+                """
+                INSERT INTO candidates (
+                    candidate_id, task_id, round_id, baseline_epoch_id,
+                    source_hash, variant, state, ordinal, metadata,
+                    parent_candidate_id, track, release_mode, candidate_kind,
+                    optimization_intent, replacement_point, idempotency_key
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, 0, %s,
+                    %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    candidate_id,
+                    task_id,
+                    round_id,
+                    baseline["baseline_epoch_id"],
+                    request.source_hash,
+                    f"manual-{request.candidate_kind.value}",
+                    CandidateState.PROPOSED.value,
+                    Jsonb(metadata),
+                    request.parent_candidate_id,
+                    request.track.value,
+                    request.release_mode.value,
+                    request.candidate_kind.value,
+                    request.optimization_intent,
+                    request.replacement_point,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            if candidate is None:
+                candidate = connection.execute(
+                    """
+                    SELECT * FROM candidates
+                    WHERE candidate_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (candidate_id, request.idempotency_key),
+                ).fetchone()
+                if candidate is None:
+                    raise Conflict("M1 Candidate identity conflict could not be resolved")
+                expected = {
+                    "candidate_id": candidate_id,
+                    "task_id": task_id,
+                    "baseline_epoch_id": request.baseline_epoch_id,
+                    "source_hash": request.source_hash,
+                    "optimization_intent": request.optimization_intent,
+                    "replacement_point": request.replacement_point,
+                    "track": request.track.value,
+                    "release_mode": request.release_mode.value,
+                    "candidate_kind": request.candidate_kind.value,
+                    "parent_candidate_id": request.parent_candidate_id,
+                    "idempotency_key": request.idempotency_key,
+                }
+                if any(candidate[name] != value for name, value in expected.items()):
+                    raise Conflict(
+                        "M1 Candidate idempotency_key belongs to a different task or input"
+                    )
+                return candidate
+
+            baseline_source = SourceSnapshot(
+                snapshot_id=source["snapshot_id"],
+                kind=source["kind"],
+                repository=source["repository"],
+                commit=source["commit"],
+                tree_hash=source["tree_hash"],
+                source_hash=source["source_hash"],
+                worktree_uri=source["worktree_uri"],
+                clean=source["clean"],
+                parent_snapshot_id=source["parent_snapshot_id"],
+                created_at=source["created_at"],
+            )
+
+            payload = {
+                "task_id": str(task_id),
+                "candidate_id": str(candidate_id),
+                "round_id": str(round_id),
+                "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
+                "baseline_source": baseline_source.model_dump(mode="json"),
+                "target_snapshot_id": str(target["target_snapshot_id"]),
+                "target_fingerprint": target["target_fingerprint"],
+                "target": target["specification"],
+                "stage0_run_id": str(task["stage0_run_id"]),
+                "stage0_protocol_hash": baseline["stage0_protocol_hash"],
+                "workload_id": task["workload_id"],
+                "workload_hash": baseline["workload_hash"],
+                "configuration_hash": baseline["configuration_hash"],
+                "candidate_source_hash": request.source_hash,
+                "optimization_intent": request.optimization_intent,
+                "replacement_point": request.replacement_point,
+                "track": request.track.value,
+                "release_mode": request.release_mode.value,
+                "candidate_kind": request.candidate_kind.value,
+                "budget": task["budget"],
+            }
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, task_id, job_type, accepted_worker_type,
+                    adapter_profile, lease_scope, payload, idempotency_key,
+                    priority, max_attempts
+                ) VALUES (%s, %s, %s, %s, %s, 'none', %s, %s, 0, 3)
+                """,
+                (
+                    job_id,
+                    task_id,
+                    JobType.MANUAL_BUILD.value,
+                    WorkerType.BUILD.value,
+                    task["adapter_profile"],
+                    Jsonb(payload),
+                    f"{candidate_id}:m1-build:v1",
+                ),
+            )
+            transition_candidate(CandidateState.PROPOSED, CandidateState.BUILDING)
+            transition_task(
+                TaskState.MANUAL_CANDIDATE_PENDING, TaskState.MANUAL_BUILDING
+            )
+            candidate = connection.execute(
+                """
+                UPDATE candidates SET state = %s, updated_at = now()
+                WHERE candidate_id = %s RETURNING *
+                """,
+                (CandidateState.BUILDING.value, candidate_id),
+            ).fetchone()
+            connection.execute(
+                """
+                UPDATE tasks SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.MANUAL_BUILDING.value, task_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'manual_candidate_registered', %s)
+                """,
+                (
+                    task_id,
+                    Jsonb(
+                        {
+                            "candidate_id": str(candidate_id),
+                            "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
+                            "job_id": str(job_id),
+                            "candidate_kind": request.candidate_kind.value,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        assert candidate is not None
+        return candidate
 
     def create_candidates(
         self,
@@ -2424,6 +3031,88 @@ class PostgresRepository:
                 "SELECT * FROM candidates WHERE task_id = %s ORDER BY ordinal", (task_id,)
             ).fetchall()
 
+    def set_manual_candidate_verdict(
+        self,
+        candidate_id: UUID,
+        verdict: ManualCandidateVerdict,
+        evidence_bundle_id: UUID,
+    ) -> dict[str, Any]:
+        with self.connection() as connection:
+            candidate = connection.execute(
+                "SELECT * FROM candidates WHERE candidate_id = %s FOR UPDATE",
+                (candidate_id,),
+            ).fetchone()
+            if candidate is None:
+                raise NotFound(f"candidate not found: {candidate_id}")
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR SHARE",
+                (candidate["task_id"],),
+            ).fetchone()
+            if task is None or task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+                raise Conflict("candidate does not belong to an M1 workflow")
+            evidence = connection.execute(
+                """
+                SELECT bundle.*,
+                       evaluation.task_id AS evaluation_task_id,
+                       evaluation.candidate_id AS evaluation_candidate_id,
+                       evaluation.baseline_epoch_id AS evaluation_baseline_epoch_id,
+                       evaluation.phase AS evaluation_phase,
+                       evaluation.protocol_version AS evaluation_protocol_version,
+                       evaluation.metrics AS evaluation_metrics,
+                       evaluation.measurement AS evaluation_measurement,
+                       evaluation.synthetic AS evaluation_synthetic
+                FROM evidence_bundles AS bundle
+                JOIN evaluation_runs AS evaluation
+                  ON evaluation.evaluation_run_id = bundle.evaluation_run_id
+                WHERE bundle.evidence_id = %s
+                FOR SHARE OF bundle, evaluation
+                """,
+                (evidence_bundle_id,),
+            ).fetchone()
+            if evidence is None:
+                raise NotFound(f"evidence bundle not found: {evidence_bundle_id}")
+            if (
+                evidence["task_id"] != candidate["task_id"]
+                or evidence["candidate_id"] != candidate_id
+                or evidence["baseline_epoch_id"] != candidate["baseline_epoch_id"]
+                or evidence["synthetic"]
+                or evidence["evaluation_synthetic"]
+                or evidence["evaluation_task_id"] != candidate["task_id"]
+                or evidence["evaluation_candidate_id"] != candidate_id
+                or evidence["evaluation_baseline_epoch_id"]
+                != candidate["baseline_epoch_id"]
+                or evidence["evaluation_phase"] != "performance"
+                or evidence["protocol_version"]
+                != evidence["evaluation_protocol_version"]
+            ):
+                raise Conflict("M1 verdict evidence has mismatched immutable bindings")
+            measurement = evidence["evaluation_measurement"]
+            if (
+                not isinstance(measurement, dict)
+                or measurement.get("status") != "measured"
+                or evidence["measurement_ids"] != [measurement.get("measurement_id")]
+                or evidence["evaluation_metrics"].get("verdict") != verdict.value
+                or evidence["summary"].get("verdict") != verdict.value
+                or evidence["summary"].get("automatic_release_allowed") is not False
+            ):
+                raise Conflict("M1 verdict requires one measured, independently adjudicated series")
+            if candidate["verdict"] is not None and (
+                candidate["verdict"] != verdict.value
+                or candidate["evidence_bundle_id"] != evidence_bundle_id
+            ):
+                raise Conflict("M1 Candidate already has a different durable verdict")
+            row = connection.execute(
+                """
+                UPDATE candidates
+                SET verdict = %s, evidence_bundle_id = %s, updated_at = now()
+                WHERE candidate_id = %s
+                RETURNING *
+                """,
+                (verdict.value, evidence_bundle_id, candidate_id),
+            ).fetchone()
+        assert row is not None
+        return row
+
     def list_artifacts(self, task_id: UUID) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return connection.execute(
@@ -2503,6 +3192,242 @@ class PostgresRepository:
                 VALUES (%s, %s, %s) RETURNING *
                 """,
                 (task_id, event_type, Jsonb(details)),
+            ).fetchone()
+        assert row is not None
+        return row
+
+    def manual_candidate_summary(self, task_id: UUID) -> dict[str, Any]:
+        task = self.get_task(task_id)
+        if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+            raise Conflict("task is not an M1 Manual Candidate workflow")
+        with self.connection() as connection:
+            baseline = connection.execute(
+                "SELECT * FROM baseline_epochs WHERE task_id = %s",
+                (task_id,),
+            ).fetchone()
+            candidate = connection.execute(
+                "SELECT * FROM candidates WHERE task_id = %s",
+                (task_id,),
+            ).fetchone()
+            jobs = connection.execute(
+                "SELECT * FROM jobs WHERE task_id = %s ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+            artifacts = connection.execute(
+                "SELECT * FROM artifacts WHERE task_id = %s ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+            events = connection.execute(
+                """
+                SELECT * FROM task_events
+                WHERE task_id = %s ORDER BY created_at, event_id
+                """,
+                (task_id,),
+            ).fetchall()
+            signoff = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state,
+                       candidate.state AS candidate_state
+                FROM manual_candidate_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                JOIN candidates AS candidate
+                  ON candidate.candidate_id = signoff.candidate_id
+                WHERE signoff.task_id = %s
+                """,
+                (task_id,),
+            ).fetchone()
+        if baseline is None:
+            raise Conflict("M1 task is missing its immutable Baseline Epoch")
+        return {
+            "task": task,
+            "baseline": baseline,
+            "candidate": candidate,
+            "jobs": jobs,
+            "artifacts": artifacts,
+            "events": events,
+            "signoff": signoff,
+        }
+
+    def signoff_manual_candidate_task(
+        self,
+        task_id: UUID,
+        request: ManualCandidateSignoffRequest,
+    ) -> dict[str, Any]:
+        with self.connection() as connection:
+            replay = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state,
+                       candidate.state AS candidate_state
+                FROM manual_candidate_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                JOIN candidates AS candidate
+                  ON candidate.candidate_id = signoff.candidate_id
+                WHERE signoff.idempotency_key = %s
+                FOR UPDATE OF signoff, task, candidate
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise NotFound(f"task not found: {task_id}")
+            if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+                raise Conflict("task is not an M1 Manual Candidate workflow")
+            candidate = connection.execute(
+                "SELECT * FROM candidates WHERE task_id = %s FOR UPDATE",
+                (task_id,),
+            ).fetchone()
+            if candidate is None:
+                raise Conflict("M1 signoff requires a registered Candidate")
+            expected = {
+                "task_id": task_id,
+                "candidate_id": candidate["candidate_id"],
+                "decision": request.decision.value,
+                "actor": request.actor,
+                "reason": request.reason,
+                "evidence_bundle_id": request.evidence_bundle_id,
+            }
+            if replay is not None:
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict("signoff idempotency_key was reused with different inputs")
+                return replay
+            # A concurrent identical request may have committed while this request
+            # waited for the task row lock. Re-read before checking terminal state.
+            replay = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state,
+                       candidate.state AS candidate_state
+                FROM manual_candidate_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                JOIN candidates AS candidate
+                  ON candidate.candidate_id = signoff.candidate_id
+                WHERE signoff.idempotency_key = %s
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            if replay is not None:
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict("signoff idempotency_key was reused with different inputs")
+                return replay
+            previous = connection.execute(
+                "SELECT * FROM manual_candidate_signoffs WHERE task_id = %s",
+                (task_id,),
+            ).fetchone()
+            if previous is not None:
+                raise Conflict("M1 task already has a different durable signoff")
+            if task["state"] != TaskState.AWAITING_SIGNOFF.value:
+                raise Conflict("M1 signoff requires awaiting_signoff")
+            if candidate["state"] != CandidateState.AWAITING_SIGNOFF.value:
+                raise Conflict("M1 Candidate is not awaiting signoff")
+            if candidate["evidence_bundle_id"] != request.evidence_bundle_id:
+                raise Conflict("signoff must bind the adjudicated EvidenceBundle")
+            evidence = connection.execute(
+                "SELECT * FROM evidence_bundles WHERE evidence_id = %s FOR SHARE",
+                (request.evidence_bundle_id,),
+            ).fetchone()
+            if evidence is None or (
+                evidence["task_id"] != task_id
+                or evidence["candidate_id"] != candidate["candidate_id"]
+                or evidence["baseline_epoch_id"] != candidate["baseline_epoch_id"]
+                or evidence["synthetic"]
+            ):
+                raise Conflict("signoff evidence has mismatched immutable bindings")
+
+            signoff_id = uuid5(
+                NAMESPACE_URL, f"hcuopt:m1-signoff:{request.idempotency_key}"
+            )
+            inserted = connection.execute(
+                """
+                INSERT INTO manual_candidate_signoffs (
+                    signoff_id, task_id, candidate_id, decision, actor, reason,
+                    evidence_bundle_id, idempotency_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING signoff_id
+                """,
+                (
+                    signoff_id,
+                    task_id,
+                    candidate["candidate_id"],
+                    request.decision.value,
+                    request.actor,
+                    request.reason,
+                    request.evidence_bundle_id,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            if inserted is None:
+                replay = connection.execute(
+                    """
+                    SELECT signoff.*, task.state AS task_state,
+                           candidate.state AS candidate_state
+                    FROM manual_candidate_signoffs AS signoff
+                    JOIN tasks AS task ON task.task_id = signoff.task_id
+                    JOIN candidates AS candidate
+                      ON candidate.candidate_id = signoff.candidate_id
+                    WHERE signoff.idempotency_key = %s
+                    """,
+                    (request.idempotency_key,),
+                ).fetchone()
+                if replay is None:
+                    raise Conflict("M1 signoff identity conflict could not be resolved")
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict(
+                        "signoff idempotency_key was reused with different inputs"
+                    )
+                return replay
+            if request.decision is ManualCandidateDecision.APPROVED:
+                task_target = TaskState.COMPLETED
+                candidate_target = CandidateState.ACCEPTED
+            else:
+                task_target = TaskState.REJECTED
+                candidate_target = CandidateState.REJECTED
+            transition_task(TaskState(task["state"]), task_target)
+            transition_candidate(CandidateState(candidate["state"]), candidate_target)
+            connection.execute(
+                """
+                UPDATE tasks SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (task_target.value, task_id),
+            )
+            connection.execute(
+                """
+                UPDATE candidates SET state = %s, updated_at = now()
+                WHERE candidate_id = %s
+                """,
+                (candidate_target.value, candidate["candidate_id"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'manual_candidate_signoff_recorded', %s)
+                """,
+                (
+                    task_id,
+                    Jsonb(
+                        {
+                            "candidate_id": str(candidate["candidate_id"]),
+                            "decision": request.decision.value,
+                            "actor": request.actor,
+                            "evidence_bundle_id": str(request.evidence_bundle_id),
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT signoff.*, task.state AS task_state,
+                       candidate.state AS candidate_state
+                FROM manual_candidate_signoffs AS signoff
+                JOIN tasks AS task ON task.task_id = signoff.task_id
+                JOIN candidates AS candidate
+                  ON candidate.candidate_id = signoff.candidate_id
+                WHERE signoff.signoff_id = %s
+                """,
+                (signoff_id,),
             ).fetchone()
         assert row is not None
         return row

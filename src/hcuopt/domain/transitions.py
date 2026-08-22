@@ -20,7 +20,9 @@ TASK_TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = {
         }
     ),
     TaskState.DEGRADED: frozenset({TaskState.BASELINE_PENDING}),
-    TaskState.BASELINE_PENDING: frozenset({TaskState.PROFILING}),
+    TaskState.BASELINE_PENDING: frozenset(
+        {TaskState.PROFILING, TaskState.MANUAL_CANDIDATE_PENDING}
+    ),
     TaskState.PROFILING: frozenset({TaskState.SEARCHING}),
     TaskState.SEARCHING: frozenset({TaskState.EVALUATING}),
     TaskState.EVALUATING: frozenset({TaskState.MODEL_VALIDATING}),
@@ -52,6 +54,21 @@ TASK_TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = {
     TaskState.FRAMEWORK_RETESTING: frozenset(
         {TaskState.AWAITING_SIGNOFF, TaskState.REJECTED, TaskState.CANCELLED}
     ),
+    TaskState.MANUAL_CANDIDATE_PENDING: frozenset(
+        {TaskState.MANUAL_BUILDING, TaskState.CANCELLED}
+    ),
+    TaskState.MANUAL_BUILDING: frozenset(
+        {TaskState.MANUAL_CORRECTNESS, TaskState.REJECTED, TaskState.CANCELLED}
+    ),
+    TaskState.MANUAL_CORRECTNESS: frozenset(
+        {TaskState.MANUAL_PERFORMANCE, TaskState.REJECTED, TaskState.CANCELLED}
+    ),
+    TaskState.MANUAL_PERFORMANCE: frozenset(
+        {TaskState.MANUAL_ADJUDICATING, TaskState.REJECTED, TaskState.CANCELLED}
+    ),
+    TaskState.MANUAL_ADJUDICATING: frozenset(
+        {TaskState.AWAITING_SIGNOFF, TaskState.REJECTED, TaskState.CANCELLED}
+    ),
 }
 
 CANDIDATE_TRANSITIONS: Mapping[CandidateState, frozenset[CandidateState]] = {
@@ -64,7 +81,11 @@ CANDIDATE_TRANSITIONS: Mapping[CandidateState, frozenset[CandidateState]] = {
         {CandidateState.PERFORMANCE_RUNNING, CandidateState.REJECTED}
     ),
     CandidateState.PERFORMANCE_RUNNING: frozenset(
-        {CandidateState.ROUND_WAITING, CandidateState.REJECTED}
+        {
+            CandidateState.ROUND_WAITING,
+            CandidateState.ADJUDICATING,
+            CandidateState.REJECTED,
+        }
     ),
     CandidateState.ROUND_WAITING: frozenset(
         {CandidateState.MODEL_VALIDATING, CandidateState.REJECTED}
@@ -79,6 +100,12 @@ CANDIDATE_TRANSITIONS: Mapping[CandidateState, frozenset[CandidateState]] = {
     ),
     CandidateState.FRAMEWORK_SMOKE_PASSED: frozenset(
         {CandidateState.FRAMEWORK_SMOKE_RUNNING, CandidateState.REJECTED}
+    ),
+    CandidateState.ADJUDICATING: frozenset(
+        {CandidateState.AWAITING_SIGNOFF, CandidateState.REJECTED}
+    ),
+    CandidateState.AWAITING_SIGNOFF: frozenset(
+        {CandidateState.ACCEPTED, CandidateState.REJECTED}
     ),
 }
 

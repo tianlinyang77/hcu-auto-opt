@@ -27,6 +27,13 @@ from hcuopt.contracts.v1 import (
     JobCreate,
     JobFail,
     JobHeartbeat,
+    ManualCandidateCreate,
+    ManualCandidateSignoffRequest,
+    ManualCandidateSignoffView,
+    ManualCandidateSummary,
+    ManualCandidateTaskCreate,
+    ManualCandidateTaskView,
+    ManualCandidateView,
     ReapResult,
     ResourceCleanupReport,
     Stage0EvidenceRequest,
@@ -98,7 +105,7 @@ def create_app(
 
     application = FastAPI(
         title="HCU Auto Opt Control Plane",
-        version="0.4.0-stage0-control-plane",
+        version="0.5.0-m1-control-plane",
         lifespan=lifespan,
     )
 
@@ -278,6 +285,68 @@ def create_app(
     @application.get("/v1/tasks/{task_id}", response_model=TaskView)
     def get_task(task_id: UUID, request: Request) -> dict[str, Any]:
         return repo(request).get_task(task_id)
+
+    @application.post(
+        "/v1/manual-candidate/tasks",
+        response_model=ManualCandidateTaskView,
+        status_code=201,
+    )
+    def create_manual_candidate_task(
+        payload: ManualCandidateTaskCreate, request: Request
+    ) -> dict[str, Any]:
+        repository = repo(request)
+        stage0 = repository.stage0_run_summary(payload.stage0_run_id)
+        target = TargetSpec.model_validate(stage0["target"])
+        profile = profiles.require(payload.adapter_profile)
+        if profile.implementation_kind != "real":
+            raise Conflict("M1 Manual Candidate requires a real Adapter Profile")
+        profile.require_manual_candidate()
+        profile.validate_target(target, scope="optimization")
+        return repository.create_manual_candidate_task(payload)
+
+    @application.get(
+        "/v1/manual-candidate/tasks/{task_id}",
+        response_model=ManualCandidateTaskView,
+    )
+    def get_manual_candidate_task(
+        task_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        task = repo(request).get_task(task_id)
+        if task.get("workflow_type") != "manual_candidate":
+            raise Conflict("task is not an M1 Manual Candidate workflow")
+        return task
+
+    @application.get(
+        "/v1/manual-candidate/tasks/{task_id}/summary",
+        response_model=ManualCandidateSummary,
+    )
+    def get_manual_candidate_summary(
+        task_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).manual_candidate_summary(task_id)
+
+    @application.post(
+        "/v1/manual-candidate/tasks/{task_id}/candidates",
+        response_model=ManualCandidateView,
+        status_code=201,
+    )
+    def create_manual_candidate(
+        task_id: UUID,
+        payload: ManualCandidateCreate,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).create_manual_candidate(task_id, payload)
+
+    @application.post(
+        "/v1/manual-candidate/tasks/{task_id}/signoff",
+        response_model=ManualCandidateSignoffView,
+    )
+    def signoff_manual_candidate(
+        task_id: UUID,
+        payload: ManualCandidateSignoffRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).signoff_manual_candidate_task(task_id, payload)
 
     @application.post("/v1/tasks/{task_id}/stage0", response_model=Stage0ReportView)
     def submit_stage0(
