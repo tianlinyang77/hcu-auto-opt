@@ -18,6 +18,15 @@ FRAMEWORK_SMOKE_CAPABILITIES = frozenset(
     }
 )
 STAGE0_CAPABILITIES = frozenset({"stage0_probe"})
+MANUAL_CANDIDATE_CAPABILITIES = frozenset(
+    {
+        "candidate_builder",
+        "kernel_correctness",
+        "measurement_harness",
+        "candidate_adjudicator",
+        "resource_cleaner",
+    }
+)
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 REAL_STAGE0_PROFILE = "nmz36-stage0-v2"
 # Compatibility name for S0-B callers. Measurement is an internal delegate of the
@@ -47,6 +56,14 @@ class AdapterProfile:
                 f"{', '.join(missing)}"
             )
 
+    def require_manual_candidate(self) -> None:
+        missing = sorted(MANUAL_CANDIDATE_CAPABILITIES - self.capabilities)
+        if missing:
+            raise AdapterUnavailable(
+                f"adapter profile {self.name} lacks M1 Manual Candidate capabilities: "
+                f"{', '.join(missing)}"
+            )
+
     def validate_target(
         self,
         target: TargetSpec,
@@ -55,6 +72,8 @@ class AdapterProfile:
     ) -> None:
         if scope == "stage0":
             self.require_stage0()
+        elif scope == "optimization":
+            self.require_manual_candidate()
         else:
             self.require_framework_smoke()
         if self.implementation_kind == "real":

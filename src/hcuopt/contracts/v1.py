@@ -16,6 +16,7 @@ from hcuopt.contracts.platform_v1 import (
     ExecutionAttempt,
     ExecutionRequest,
     ExecutionResult,
+    MeasurementSeries,
     SourceSnapshot,
     TargetSpec,
 )
@@ -27,8 +28,13 @@ from hcuopt.domain.enums import (
     JobState,
     JobType,
     LeaseScope,
+    ManualCandidateDecision,
+    ManualCandidateKind,
+    ManualCandidateVerdict,
+    OptimizationTrack,
     ProfilerCapability,
     ProjectMode,
+    ReleaseMode,
     Stage0ProbeType,
     Stage0RunMode,
     Stage0RunState,
@@ -237,6 +243,219 @@ class BaselineView(ReadModel):
     configuration_hash: str
     frozen: bool
     created_at: datetime
+
+
+class ManualCandidateBudget(ContractModel):
+    """Caller-controlled limits; commands, mounts and executable config stay private."""
+
+    max_wall_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    max_samples: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
+class ManualCandidateTaskCreate(ContractModel):
+    name: str = Field(min_length=1, max_length=200)
+    stage0_run_id: UUID
+    adapter_profile: str = Field(min_length=1, max_length=200)
+    baseline_source_snapshot_id: UUID
+    workload_hash: str = Field(pattern=SHA256_PATTERN)
+    configuration_hash: str = Field(pattern=SHA256_PATTERN)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    budget: ManualCandidateBudget = Field(default_factory=ManualCandidateBudget)
+
+
+class ManualCandidateTaskView(TaskView):
+    workflow_type: WorkflowType
+    target_id: str
+    target_snapshot_id: UUID
+    adapter_profile: str
+    stage0_run_id: UUID
+
+
+class ManualBaselineView(BaselineView):
+    baseline_kind: str
+    target_snapshot_id: UUID
+    stage0_run_id: UUID
+    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    source_snapshot_id: UUID
+    workload_hash: str
+    image_digest: str = Field(pattern=SHA256_PATTERN)
+    adapter_profile: str
+
+
+class ManualCandidateCreate(ContractModel):
+    baseline_epoch_id: UUID
+    source_hash: str = Field(pattern=SHA256_PATTERN)
+    optimization_intent: str = Field(min_length=1, max_length=2000)
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    track: OptimizationTrack = OptimizationTrack.TRITON
+    release_mode: ReleaseMode = ReleaseMode.OVERLAY
+    candidate_kind: ManualCandidateKind
+    parent_candidate_id: UUID | None = None
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+    @model_validator(mode="after")
+    def enforce_m1_overlay_scope(self) -> ManualCandidateCreate:
+        if self.track is not OptimizationTrack.TRITON:
+            raise ValueError("M1 supports only the startup-overlay Triton track")
+        if self.release_mode is not ReleaseMode.OVERLAY:
+            raise ValueError("M1 supports only startup Overlay candidates")
+        return self
+
+
+class ManualCandidateView(ReadModel):
+    candidate_id: UUID
+    task_id: UUID
+    round_id: UUID
+    baseline_epoch_id: UUID
+    source_hash: str
+    variant: str
+    state: CandidateState
+    ordinal: int
+    parent_candidate_id: UUID | None = None
+    track: OptimizationTrack
+    release_mode: ReleaseMode
+    candidate_kind: ManualCandidateKind
+    optimization_intent: str
+    replacement_point: str
+    verdict: ManualCandidateVerdict | None = None
+    evidence_bundle_id: UUID | None = None
+    idempotency_key: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ManualCandidateBuildResult(ContractModel):
+    candidate_id: UUID
+    source: SourceSnapshot
+    artifact: ArtifactManifest
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: Literal[False] = False
+
+    @model_validator(mode="after")
+    def bind_candidate_artifact(self) -> ManualCandidateBuildResult:
+        if any(
+            item.implementation_kind == "fake" for item in self.adapter_provenance
+        ):
+            raise ValueError("M1 build cannot use fake Adapter provenance")
+        if self.source.kind != "candidate" or not self.source.clean:
+            raise ValueError("M1 build requires a clean Candidate SourceSnapshot")
+        if self.artifact.candidate_id != self.candidate_id:
+            raise ValueError("Artifact candidate_id does not match the M1 Candidate")
+        if self.artifact.source_snapshot_id != self.source.snapshot_id:
+            raise ValueError("Artifact must bind the exact Candidate SourceSnapshot")
+        if self.artifact.synthetic:
+            raise ValueError("M1 cannot persist a synthetic Candidate Artifact")
+        return self
+
+
+class ManualCorrectnessResult(ContractModel):
+    candidate_id: UUID
+    verdict: Literal["correct", "incorrect", "invalid"]
+    protocol_version: str = Field(min_length=1, max_length=200)
+    raw_evidence_uri: str = Field(min_length=1)
+    raw_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    cleanup_evidence: dict[str, Any]
+    synthetic: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_healthy_cleanup(self) -> ManualCorrectnessResult:
+        if any(
+            item.implementation_kind == "fake" for item in self.adapter_provenance
+        ):
+            raise ValueError("M1 correctness cannot use fake Adapter provenance")
+        fence = self.cleanup_evidence.get("fence")
+        health = self.cleanup_evidence.get("health")
+        if not isinstance(fence, dict) or fence.get("fenced") is not True:
+            raise ValueError("M1 correctness requires fenced cleanup evidence")
+        if not isinstance(health, dict) or health.get("healthy") is not True:
+            raise ValueError("M1 correctness requires healthy cleanup evidence")
+        return self
+
+
+class ManualPerformanceEvidenceResult(ContractModel):
+    candidate_id: UUID
+    measurement: MeasurementSeries
+    cleanup_evidence: dict[str, Any]
+    synthetic: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_measured_evidence(self) -> ManualPerformanceEvidenceResult:
+        if self.measurement.status != "measured" or self.measurement.synthetic:
+            raise ValueError("M1 performance requires real measured evidence")
+        fence = self.cleanup_evidence.get("fence")
+        health = self.cleanup_evidence.get("health")
+        if not isinstance(fence, dict) or fence.get("fenced") is not True:
+            raise ValueError("M1 performance requires fenced cleanup evidence")
+        if not isinstance(health, dict) or health.get("healthy") is not True:
+            raise ValueError("M1 performance requires healthy cleanup evidence")
+        return self
+
+
+class ManualCandidateAdjudicationResult(ContractModel):
+    candidate_id: UUID
+    verdict: ManualCandidateVerdict
+    evaluation: EvaluationRun
+    evidence: EvidenceBundle
+    synthetic: Literal[False] = False
+
+    @model_validator(mode="after")
+    def bind_adjudication(self) -> ManualCandidateAdjudicationResult:
+        if self.evaluation.phase != "performance":
+            raise ValueError("M1 adjudication requires a performance EvaluationRun")
+        if self.evaluation.candidate_id != self.candidate_id:
+            raise ValueError("EvaluationRun is bound to another Candidate")
+        if self.evidence.candidate_id != self.candidate_id:
+            raise ValueError("EvidenceBundle is bound to another Candidate")
+        if self.evidence.task_id != self.evaluation.task_id:
+            raise ValueError("EvidenceBundle and EvaluationRun task bindings differ")
+        if self.evidence.baseline_epoch_id != self.evaluation.baseline_epoch_id:
+            raise ValueError("EvidenceBundle and EvaluationRun baseline bindings differ")
+        if self.evaluation.measurement is None:
+            raise ValueError("M1 adjudication requires the exact measured series")
+        if self.evidence.measurement_ids != [self.evaluation.measurement.measurement_id]:
+            raise ValueError("EvidenceBundle must bind only the adjudicated measurement")
+        if self.evidence.protocol_version != self.evaluation.protocol_version:
+            raise ValueError("EvidenceBundle and EvaluationRun protocol versions differ")
+        if self.evidence.summary.get("verdict") != self.verdict.value:
+            raise ValueError("EvidenceBundle verdict differs from adjudication")
+        if self.evidence.summary.get("automatic_release_allowed") is not False:
+            raise ValueError("M1 EvidenceBundle must deny automatic release")
+        if self.evaluation.synthetic or self.evidence.synthetic:
+            raise ValueError("M1 adjudication cannot accept synthetic evidence")
+        return self
+
+
+class ManualCandidateSignoffRequest(ContractModel):
+    decision: ManualCandidateDecision
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence_bundle_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class ManualCandidateSignoffView(ReadModel):
+    signoff_id: UUID
+    task_id: UUID
+    candidate_id: UUID
+    decision: ManualCandidateDecision
+    actor: str
+    reason: str
+    evidence_bundle_id: UUID
+    idempotency_key: str
+    task_state: TaskState
+    candidate_state: CandidateState
+    created_at: datetime
+
+
+class ManualCandidateSummary(ContractModel):
+    task: ManualCandidateTaskView
+    baseline: ManualBaselineView
+    candidate: ManualCandidateView | None
+    jobs: list[dict[str, Any]]
+    artifacts: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    signoff: ManualCandidateSignoffView | None = None
 
 
 class WorkerRegister(ContractModel):

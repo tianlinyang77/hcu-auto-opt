@@ -6,6 +6,7 @@ from uuid import UUID
 
 from hcuopt.domain.enums import JobType
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
+from hcuopt.orchestrator.manual_candidate import ManualCandidateCoordinator
 from hcuopt.orchestrator.stage0 import Stage0Coordinator
 from hcuopt.orchestrator.walking import WalkingSkeletonCoordinator
 from hcuopt.storage.repository import PostgresRepository
@@ -14,6 +15,14 @@ FRAMEWORK_JOB_TYPES = frozenset(
     {JobType.SOURCE_PREPARE, JobType.NOOP_BUILD, JobType.FRAMEWORK_SMOKE}
 )
 STAGE0_JOB_TYPES = frozenset({JobType.STAGE0_PROBE})
+MANUAL_CANDIDATE_JOB_TYPES = frozenset(
+    {
+        JobType.MANUAL_BUILD,
+        JobType.MANUAL_CORRECTNESS,
+        JobType.MANUAL_PERFORMANCE,
+        JobType.MANUAL_ADJUDICATE,
+    }
+)
 
 
 class WorkflowRouter:
@@ -24,6 +33,7 @@ class WorkflowRouter:
         self.walking = WalkingSkeletonCoordinator(repository)
         self.framework_smoke = FrameworkSmokeCoordinator(repository)
         self.stage0 = Stage0Coordinator(repository)
+        self.manual_candidate = ManualCandidateCoordinator(repository)
 
     def start_after_baseline(
         self, task_id: UUID, baseline: Mapping[str, Any]
@@ -37,6 +47,8 @@ class WorkflowRouter:
             self.framework_smoke.advance(materialized)
         elif job_type in STAGE0_JOB_TYPES:
             self.stage0.advance(materialized)
+        elif job_type in MANUAL_CANDIDATE_JOB_TYPES:
+            self.manual_candidate.advance(materialized)
         else:
             self.walking.advance(materialized)
 

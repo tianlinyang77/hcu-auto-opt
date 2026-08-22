@@ -2,7 +2,7 @@
 
 面向 HCU 推理工作负载的自动性能优化平台。系统从真实 Workload 出发，发现瓶颈、生成候选、隔离构建、可信评测，并把可复现证据交给人工签核。
 
-当前仓库已经进入 **F1 Framework Smoke 控制面阶段**。第一优先级不是生成更多 Kernel，而是先固定四人协作所需的 Contract、数据库、Worker 和安全边界，并把 Target、源码、No-op 制品、执行、输出一致性和证据串成可恢复链路；之后才通过 Stage 0 证明真实测试环境能够测出可信数字。
+仓库已经完成 F1 Framework Smoke 和 Formal Stage 0，当前进入 **M1 手工 Candidate 闭环阶段**。Formal Stage 0 的模式是 `DEGRADED_MANUAL_INTAKE`：允许人工定位并提交候选，但不开放 Agent 搜索、自动发布或生产灰度。当前第一步是冻结 Baseline、Candidate、Build、正确性、测量、独立裁决和签核的公共接口，再由 B/C/D 接入真实 Adapter。
 
 首个实测目标已经冻结为 SGLang 0.5.12、`HYGON-AI/sglang-das` 固定 Commit 和指定 DTK 26.04 镜像；精确版本、运行拓扑及待解除阻塞见 [nmz36 Target Lock](config/targets/nmz36-sglang-0.5.12.yaml)。Target Lock 使用镜像 digest 与完整源码 Commit，禁止用同名 Tag、`latest` 或其他 0.5.12 镜像替换。
 
@@ -17,6 +17,8 @@ docker compose run --rm api \
 ```
 
 API 文档：`http://localhost:8000/docs`。详细说明见 [Framework Smoke 控制面](docs/framework-smoke-control-plane.md) 和 [Walking Skeleton](docs/walking-skeleton.md)。
+
+M1-A 已提供独立的单候选控制面和 PostgreSQL 契约，但默认 Adapter Catalog 暂不注册 M1 Real Profile；这会阻止任何 Fake 结果冒充真实优化证据。接口和接线边界见 [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)。
 
 ## MVP 范围
 
@@ -121,6 +123,7 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [F1-A Framework Smoke 控制面](docs/framework-smoke-control-plane.md)
 - [S0-A Stage 0 控制面](docs/s0-control-plane.md)
 - [S0-C Profiler 与可逆 Overlay 能力探针](docs/s0-runtime-probes.md)
+- [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
 - [Walking Skeleton](docs/walking-skeleton.md)

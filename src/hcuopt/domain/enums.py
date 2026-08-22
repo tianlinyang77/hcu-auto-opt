@@ -36,11 +36,29 @@ class WorkflowType(StrEnum):
     OPTIMIZATION = "optimization"
     FRAMEWORK_SMOKE = "framework_smoke"
     STAGE0 = "stage0"
+    MANUAL_CANDIDATE = "manual_candidate"
 
 
 class FrameworkSmokeDecision(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class ManualCandidateDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ManualCandidateKind(StrEnum):
+    FIXTURE = "fixture"
+    BUSINESS = "business"
+
+
+class ManualCandidateVerdict(StrEnum):
+    FASTER = "faster"
+    SLOWER = "slower"
+    INCONCLUSIVE = "inconclusive"
+    INVALID = "invalid"
 
 
 class Stage0RunMode(StrEnum):
@@ -85,6 +103,11 @@ class TaskState(StrEnum):
     FRAMEWORK_EXECUTING = "framework_executing"
     OUTPUT_VALIDATING = "output_validating"
     FRAMEWORK_RETESTING = "framework_retesting"
+    MANUAL_CANDIDATE_PENDING = "manual_candidate_pending"
+    MANUAL_BUILDING = "manual_building"
+    MANUAL_CORRECTNESS = "manual_correctness"
+    MANUAL_PERFORMANCE = "manual_performance"
+    MANUAL_ADJUDICATING = "manual_adjudicating"
     CANCELLED = "cancelled"
 
 
@@ -103,6 +126,9 @@ class CandidateState(StrEnum):
     REJECTED = "rejected"
     FRAMEWORK_SMOKE_RUNNING = "framework_smoke_running"
     FRAMEWORK_SMOKE_PASSED = "framework_smoke_passed"
+    ADJUDICATING = "adjudicating"
+    AWAITING_SIGNOFF = "awaiting_signoff"
+    ACCEPTED = "accepted"
 
 
 class LeaseState(StrEnum):
@@ -132,6 +158,7 @@ class WorkerType(StrEnum):
     AGENT = "agent"
     BUILD = "build"
     GPU = "gpu"
+    EVALUATION = "evaluation"
 
 
 class WorkerState(StrEnum):
@@ -158,6 +185,10 @@ class JobType(StrEnum):
     NOOP_BUILD = "noop_build"
     FRAMEWORK_SMOKE = "framework_smoke"
     STAGE0_PROBE = "stage0_probe"
+    MANUAL_BUILD = "manual_build"
+    MANUAL_CORRECTNESS = "manual_correctness"
+    MANUAL_PERFORMANCE = "manual_performance"
+    MANUAL_ADJUDICATE = "manual_adjudicate"
 
 
 class EvaluationPhase(StrEnum):
