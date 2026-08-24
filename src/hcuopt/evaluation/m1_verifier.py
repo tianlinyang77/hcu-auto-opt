@@ -28,7 +28,15 @@ from hcuopt.evaluation.m1_protocol import (
     load_registered_m1_protocol,
     m1_hotspot_spec_sha256,
 )
+from hcuopt.evaluation.stage0_verifier import Stage0EvidenceError
 from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.measurement.m1_models import (
+    M1CacheNamespaceRecord,
+    M1DeviceEventRecord,
+    M1MeasurementEvidence,
+    M1OverlayImportRecord,
+)
+from hcuopt.measurement.m1_stage0 import load_m1_stage0_authority
 from hcuopt.measurement.models import ProcessLifecycleRecordV2, RawEvidenceFileV2
 
 
@@ -65,6 +73,38 @@ class M1VerificationContext(_M1Model):
     artifact_hash: str = Field(pattern=SHA256_PATTERN)
     lease_id: UUID
     lease_scope: Literal[LeaseScope.SHARED] = LeaseScope.SHARED
+    resource_id: str = Field(min_length=1, max_length=200)
+    fencing_token: int = Field(ge=1)
+
+
+class M1PerformanceVerificationContext(_M1Model):
+    """Control-plane authority supplied independently from B's raw evidence."""
+
+    task_id: UUID
+    candidate_id: UUID
+    round_id: UUID
+    baseline_epoch_id: UUID
+    stage0_run_id: UUID
+    target_snapshot_id: UUID
+    target_id: str = Field(min_length=1, max_length=200)
+    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    workload_id: str = Field(min_length=1, max_length=200)
+    workload_hash: str = Field(pattern=SHA256_PATTERN)
+    configuration_hash: str = Field(pattern=SHA256_PATTERN)
+    image_digest: str = Field(pattern=SHA256_PATTERN)
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    candidate_source_hash: str = Field(pattern=SHA256_PATTERN)
+    artifact_id: UUID
+    artifact_hash: str = Field(pattern=SHA256_PATTERN)
+    adapter_profile: str = Field(min_length=1, max_length=200)
+    stage0_report_uri: str = Field(min_length=1, max_length=4000)
+    stage0_report_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_input_digest: str = Field(pattern=SHA256_PATTERN)
+    stage0_protocol_version: str = Field(min_length=1, max_length=200)
+    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    lease_id: UUID
+    lease_scope: Literal[LeaseScope.EXCLUSIVE] = LeaseScope.EXCLUSIVE
     resource_id: str = Field(min_length=1, max_length=200)
     fencing_token: int = Field(ge=1)
 
@@ -268,9 +308,21 @@ class M1RestartSamples(_M1Model):
 
 class _VerifiedPerformanceInput(_M1Model):
     measurement_id: UUID
+    evidence_uri: str = Field(min_length=1, max_length=4000)
     evidence_hash: str = Field(pattern=SHA256_PATTERN)
     stage0_mde_ratio: float = Field(gt=0, lt=1)
+    stage0_alpha: float = Field(gt=0, lt=1)
+    bootstrap_resamples: int = Field(ge=1000)
     restarts: tuple[M1RestartSamples, ...] = Field(min_length=2, max_length=1000)
+    metric_name: Literal["kernel_elapsed"]
+    unit: Literal["ns"]
+    protocol_version: Literal["m1-kernel-performance-v1"]
+    sample_count: int = Field(ge=1)
+    warmup_count: int = Field(ge=0)
+    process_restart_count: int = Field(ge=4)
+    plan_hash: str = Field(pattern=SHA256_PATTERN)
+    sample_budget_hash: str = Field(pattern=SHA256_PATTERN)
+    adapter_profile: str = Field(min_length=1, max_length=200)
     lease_id: UUID
     lease_scope: Literal[LeaseScope.EXCLUSIVE] = LeaseScope.EXCLUSIVE
     resource_id: str = Field(min_length=1, max_length=200)
@@ -293,10 +345,10 @@ class _VerifiedPerformanceInput(_M1Model):
         ordinals = [item.restart_ordinal for item in self.restarts]
         if ordinals != list(range(len(ordinals))):
             raise ValueError("performance restart ordinals must be consecutive and ordered")
-        if len(self.process_identities) != len(self.restarts):
-            raise ValueError("each performance restart requires one process identity")
-        if len(self.cache_namespaces) != len(self.restarts):
-            raise ValueError("each performance restart requires one cache namespace")
+        if len(self.process_identities) != self.process_restart_count:
+            raise ValueError("each performance acquisition requires one process identity")
+        if len(self.cache_namespaces) != self.process_restart_count:
+            raise ValueError("each performance acquisition requires one cache namespace")
         if len(set(self.process_identities)) != len(self.process_identities):
             raise ValueError("performance restarts require distinct processes")
         if len(set(self.cache_namespaces)) != len(self.cache_namespaces):
@@ -308,7 +360,17 @@ class M1PerformanceVerificationResult(_M1Model):
     verdict: ManualCandidateVerdict
     input_digest: str = Field(pattern=SHA256_PATTERN)
     measurement_id: UUID
+    raw_evidence_uri: str = Field(min_length=1, max_length=4000)
     raw_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    metric_name: Literal["kernel_elapsed"] | None = None
+    unit: Literal["ns"] | None = None
+    protocol_version: Literal["m1-kernel-performance-v1"] | None = None
+    sample_count: int | None = Field(default=None, ge=1)
+    warmup_count: int | None = Field(default=None, ge=0)
+    process_restart_count: int | None = Field(default=None, ge=4)
+    plan_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    sample_budget_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    adapter_profile: str | None = Field(default=None, min_length=1, max_length=200)
     lease_id: UUID | None = None
     lease_scope: Literal[LeaseScope.EXCLUSIVE] | None = None
     resource_id: str | None = Field(default=None, min_length=1, max_length=200)
@@ -348,6 +410,15 @@ class M1PerformanceVerificationResult(_M1Model):
             or len(self.cache_namespaces) < 2
             or self.environment_fingerprint is None
             or self.cleanup_hash is None
+            or self.metric_name is None
+            or self.unit is None
+            or self.protocol_version is None
+            or self.sample_count is None
+            or self.warmup_count is None
+            or self.process_restart_count is None
+            or self.plan_hash is None
+            or self.sample_budget_hash is None
+            or self.adapter_profile is None
         ):
             raise ValueError("performance conclusion requires complete raw-evidence audit fields")
         return self
@@ -357,89 +428,6 @@ class M1PerformanceEvidenceReference(_M1Model):
     measurement_id: UUID
     uri: str = Field(min_length=1, max_length=4000)
     sha256: str = Field(pattern=SHA256_PATTERN)
-
-
-class M1PerformanceBinding(_M1Model):
-    task_id: UUID
-    candidate_id: UUID
-    baseline_epoch_id: UUID
-    target_snapshot_id: UUID
-    target_id: str = Field(min_length=1, max_length=200)
-    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
-    workload_id: str = Field(min_length=1, max_length=200)
-    workload_hash: str = Field(pattern=SHA256_PATTERN)
-    stage0_run_id: UUID
-    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
-    measurement_id: UUID
-    metric_name: Literal["kernel_latency"]
-    unit: Literal["ns"]
-    protocol_version: Literal["m1-kernel-performance-evidence-v1"]
-    lease_id: UUID
-    lease_scope: Literal[LeaseScope.EXCLUSIVE]
-    resource_id: str = Field(min_length=1, max_length=200)
-    fencing_token: int = Field(ge=1)
-    environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
-
-
-class M1Stage0MDEEvidence(_M1Model):
-    schema_version: Literal["m1-stage0-mde-reference-v1"]
-    stage0_run_id: UUID
-    target_snapshot_id: UUID
-    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
-    workload_id: str = Field(min_length=1, max_length=200)
-    workload_hash: str = Field(pattern=SHA256_PATTERN)
-    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
-    metric_name: Literal["kernel_latency"]
-    unit: Literal["ns"]
-    sample_budget_hash: str = Field(pattern=SHA256_PATTERN)
-    mde_ratio: float = Field(gt=0, lt=1)
-    verification_input_digest: str = Field(pattern=SHA256_PATTERN)
-
-
-class M1PerformanceCacheEvidence(_M1Model):
-    schema_version: Literal["m1-performance-cache-v1"]
-    restart_ordinal: int = Field(ge=0)
-    namespace: str = Field(min_length=1, max_length=500)
-    empty_before_execution: Literal[True]
-
-
-class M1PerformanceRestartEvidence(_M1Model):
-    restart_ordinal: int = Field(ge=0)
-    process_id: int = Field(ge=1)
-    process_start_token: str = Field(min_length=1, max_length=200)
-    start_record: RawEvidenceFileV2
-    exit_record: RawEvidenceFileV2
-    cache_namespace: RawEvidenceFileV2
-    baseline_ns: tuple[float, ...] = Field(min_length=1, max_length=1_000_000)
-    candidate_ns: tuple[float, ...] = Field(min_length=1, max_length=1_000_000)
-
-    @field_validator("baseline_ns", "candidate_ns", mode="before")
-    @classmethod
-    def freeze_samples(cls, value: object) -> object:
-        return tuple(value) if isinstance(value, list) else value
-
-
-class M1PerformanceEvidenceV1(_M1Model):
-    schema_version: Literal["m1-kernel-performance-evidence-v1"]
-    binding: M1PerformanceBinding
-    stage0_mde_evidence: RawEvidenceFileV2
-    restarts: tuple[M1PerformanceRestartEvidence, ...] = Field(min_length=2, max_length=1000)
-    adapter_provenance: tuple[AdapterProvenance, ...] = Field(min_length=1)
-    cleanup_evidence: dict[str, Any]
-    producer_summary: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("restarts", "adapter_provenance", mode="before")
-    @classmethod
-    def freeze_sequences(cls, value: object) -> object:
-        return tuple(value) if isinstance(value, list) else value
-
-    @model_validator(mode="after")
-    def require_ordered_real_evidence(self) -> M1PerformanceEvidenceV1:
-        if [item.restart_ordinal for item in self.restarts] != list(range(len(self.restarts))):
-            raise ValueError("performance restart evidence must be consecutive and ordered")
-        if any(item.implementation_kind != "real" for item in self.adapter_provenance):
-            raise ValueError("performance evidence requires real Adapter provenance")
-        return self
 
 
 class M1CorrectnessVerifier:
@@ -782,7 +770,7 @@ class M1PerformanceVerifier:
     def verify(
         self,
         correctness: M1CorrectnessVerificationResult,
-        context: M1VerificationContext,
+        context: M1PerformanceVerificationContext,
         reference: M1PerformanceEvidenceReference,
     ) -> M1PerformanceVerificationResult:
         fallback_digest = _digest(
@@ -802,14 +790,16 @@ class M1PerformanceVerifier:
             )
         try:
             encoded = self.reader.read_bytes(reference.uri, reference.sha256)
-            evidence = M1PerformanceEvidenceV1.model_validate_json(encoded)
+            evidence = M1MeasurementEvidence.model_validate_json(encoded)
             verified = self._verify_evidence(context, reference, evidence)
-            return _adjudicate_verified_performance(
-                correctness,
-                verified,
-                self.loaded_protocol,
-            )
-        except (EvidenceReadError, M1EvidenceError, ValidationError, ValueError) as exc:
+            return _adjudicate_verified_performance(correctness, verified)
+        except (
+            EvidenceReadError,
+            M1EvidenceError,
+            Stage0EvidenceError,
+            ValidationError,
+            ValueError,
+        ) as exc:
             return _invalid_performance_reference(
                 reference,
                 fallback_digest,
@@ -819,116 +809,265 @@ class M1PerformanceVerifier:
 
     def _verify_evidence(
         self,
-        context: M1VerificationContext,
+        context: M1PerformanceVerificationContext,
         reference: M1PerformanceEvidenceReference,
-        evidence: M1PerformanceEvidenceV1,
+        evidence: M1MeasurementEvidence,
     ) -> _VerifiedPerformanceInput:
         binding = evidence.binding
         expected = {
             "task_id": context.task_id,
             "candidate_id": context.candidate_id,
+            "round_id": context.round_id,
             "baseline_epoch_id": context.baseline_epoch_id,
+            "stage0_run_id": context.stage0_run_id,
             "target_snapshot_id": context.target_snapshot_id,
             "target_id": context.target_id,
             "target_fingerprint": context.target_fingerprint,
+            "environment_fingerprint": context.environment_fingerprint,
             "workload_id": context.workload_id,
             "workload_hash": context.workload_hash,
-            "stage0_run_id": context.stage0_run_id,
-            "stage0_protocol_hash": context.stage0_protocol_hash,
+            "configuration_hash": context.configuration_hash,
+            "image_digest": context.image_digest,
+            "baseline_source_hash": context.baseline_source_hash,
+            "candidate_source_hash": context.candidate_source_hash,
+            "artifact_id": context.artifact_id,
+            "artifact_content_hash": context.artifact_hash,
             "measurement_id": reference.measurement_id,
-            "resource_id": context.resource_id,
-            "environment_fingerprint": context.target_fingerprint,
+            "adapter_profile": context.adapter_profile,
         }
-        actual = binding.model_dump()
+        actual = binding.model_dump(mode="python")
         if any(actual[name] != value for name, value in expected.items()):
             raise M1EvidenceError(
                 "performance_binding_mismatch",
                 "performance evidence belongs to another immutable input",
             )
+        expected_lease = {
+            "lease_id": context.lease_id,
+            "lease_scope": context.lease_scope,
+            "resource_id": context.resource_id,
+            "fencing_token": context.fencing_token,
+        }
+        if binding.lease.model_dump(mode="python") != expected_lease:
+            raise M1EvidenceError(
+                "performance_lease_binding_mismatch",
+                "performance evidence is not bound to the control-plane exclusive lease",
+            )
+        embedded_authority = evidence.plan.stage0_authority
+        report = embedded_authority.report
+        expected_report = {
+            "uri": context.stage0_report_uri,
+            "sha256": context.stage0_report_hash,
+            "input_digest": context.stage0_input_digest,
+            "protocol_version": context.stage0_protocol_version,
+            "protocol_hash": context.stage0_protocol_hash,
+        }
+        if report.model_dump(mode="python") != expected_report:
+            raise M1EvidenceError(
+                "stage0_authority_binding_mismatch",
+                "performance evidence is bound to another Formal Stage 0 report",
+            )
+        formal_report = self.reader.read(report.uri, report.sha256)
         if (
-            evidence.stage0_mde_evidence.uri != context.stage0_mde_evidence_uri
-            or evidence.stage0_mde_evidence.sha256 != context.stage0_mde_evidence_hash
+            formal_report.get("task_id") != str(context.task_id)
+            or formal_report.get("adapter_profile") != context.adapter_profile
+            or formal_report.get("automatic_release_allowed") is not False
         ):
             raise M1EvidenceError(
-                "stage0_mde_binding_mismatch",
-                "performance evidence is bound to another Stage 0 MDE report",
+                "stage0_authority_binding_mismatch",
+                "Formal Stage 0 report belongs to another Task/Profile or grants release",
             )
-        stage0_mde = M1Stage0MDEEvidence.model_validate_json(
-            self.reader.read_bytes(
-                evidence.stage0_mde_evidence.uri,
-                evidence.stage0_mde_evidence.sha256,
-            )
+        verified_authority = load_m1_stage0_authority(
+            self.reader,
+            report,
+            task_payload={
+                "stage0_run_id": str(context.stage0_run_id),
+                "target_snapshot_id": str(context.target_snapshot_id),
+                "target": {"target_id": context.target_id},
+                "workload_id": context.workload_id,
+            },
         )
-        if any(
-            (
-                stage0_mde.stage0_run_id != context.stage0_run_id,
-                stage0_mde.target_snapshot_id != context.target_snapshot_id,
-                stage0_mde.target_fingerprint != context.target_fingerprint,
-                stage0_mde.workload_id != context.workload_id,
-                stage0_mde.workload_hash != context.workload_hash,
-                stage0_mde.stage0_protocol_hash != context.stage0_protocol_hash,
-                stage0_mde.metric_name != binding.metric_name,
-                stage0_mde.unit != binding.unit,
-            )
-        ):
+        if verified_authority != embedded_authority:
             raise M1EvidenceError(
-                "stage0_mde_binding_mismatch",
-                "Stage 0 MDE report belongs to another Target/Workload/metric",
+                "stage0_authority_mismatch",
+                "embedded Stage 0 authority differs from the independently reloaded report",
             )
-        self._verify_cleanup(binding, evidence.cleanup_evidence)
-        restarts: list[M1RestartSamples] = []
+        ns_per_tick = self._verify_calibration(evidence)
+        self._verify_cleanup(context, evidence.cleanup_evidence.model_dump(mode="python"))
+
+        acquisition_samples: list[tuple[str, tuple[float, ...]]] = []
         process_identities: list[str] = []
         cache_namespaces: list[str] = []
-        for item in evidence.restarts:
+        producer_identities = {
+            (
+                item.profile,
+                item.capability,
+                item.adapter_name,
+                item.adapter_version,
+                item.source_commit,
+            )
+            for item in evidence.adapter_provenance
+        }
+        for item in evidence.acquisitions:
             start = ProcessLifecycleRecordV2.model_validate_json(
-                self.reader.read_bytes(item.start_record.uri, item.start_record.sha256)
+                self.reader.read_bytes(
+                    item.started_lifecycle.uri,
+                    item.started_lifecycle.sha256,
+                )
             )
             exit_record = ProcessLifecycleRecordV2.model_validate_json(
-                self.reader.read_bytes(item.exit_record.uri, item.exit_record.sha256)
+                self.reader.read_bytes(
+                    item.reaped_lifecycle.uri,
+                    item.reaped_lifecycle.sha256,
+                )
             )
+            expected_token = item.process_start_token.rsplit(":", 1)[-1]
             if (
                 start.event != "started"
                 or exit_record.event != "reaped"
-                or start.restart_ordinal != item.restart_ordinal
-                or exit_record.restart_ordinal != item.restart_ordinal
+                or start.restart_ordinal != item.acquisition_ordinal
+                or exit_record.restart_ordinal != item.acquisition_ordinal
                 or start.process_id != item.process_id
                 or exit_record.process_id != item.process_id
-                or _procfs_start_token(start.proc_stat_line) != item.process_start_token
-                or _procfs_start_token(exit_record.proc_stat_line) != item.process_start_token
+                or _procfs_start_token(start.proc_stat_line) != expected_token
+                or _procfs_start_token(exit_record.proc_stat_line) != expected_token
                 or start.captured_monotonic_ns >= exit_record.captured_monotonic_ns
                 or exit_record.waitpid_result_pid != item.process_id
                 or exit_record.wait_status != 0
             ):
                 raise M1EvidenceError(
                     "performance_process_invalid",
-                    f"restart {item.restart_ordinal} process lifecycle is invalid",
+                    f"acquisition {item.acquisition_ordinal} process lifecycle is invalid",
                 )
-            cache = M1PerformanceCacheEvidence.model_validate_json(
-                self.reader.read_bytes(item.cache_namespace.uri, item.cache_namespace.sha256)
+            cache = M1CacheNamespaceRecord.model_validate_json(
+                self.reader.read_bytes(
+                    item.activation.cache_namespace_evidence.uri,
+                    item.activation.cache_namespace_evidence.sha256,
+                )
             )
-            if cache.restart_ordinal != item.restart_ordinal:
+            if (
+                cache.acquisition_ordinal != item.acquisition_ordinal
+                or cache.arm != item.arm
+                or cache.process_id != item.process_id
+                or cache.process_start_token != item.process_start_token
+                or cache.namespace_hash != item.activation.cache_namespace_hash
+                or not cache.empty_before_execution
+            ):
                 raise M1EvidenceError(
                     "performance_cache_binding_mismatch",
-                    "performance cache evidence belongs to another restart",
+                    "performance cache evidence belongs to another acquisition",
+                )
+            if item.arm == "candidate":
+                assert item.activation.import_attestation is not None
+                imported = M1OverlayImportRecord.model_validate_json(
+                    self.reader.read_bytes(
+                        item.activation.import_attestation.uri,
+                        item.activation.import_attestation.sha256,
+                    )
+                )
+                if (
+                    imported.acquisition_ordinal != item.acquisition_ordinal
+                    or imported.process_id != item.process_id
+                    or imported.process_start_token != item.process_start_token
+                    or imported.image_digest != context.image_digest
+                    or imported.artifact_content_hash != context.artifact_hash
+                ):
+                    raise M1EvidenceError(
+                        "performance_overlay_binding_mismatch",
+                        "Candidate import attestation belongs to another process or Artifact",
+                    )
+            if (
+                item.before.device.device_index != evidence.calibration.device_index
+                or item.after.device.device_index != evidence.calibration.device_index
+            ):
+                raise M1EvidenceError(
+                    "performance_device_binding_mismatch",
+                    "performance telemetry belongs to another device",
+                )
+            samples_ns: list[float] = []
+            for sample in item.samples:
+                raw_event = M1DeviceEventRecord.model_validate_json(
+                    self.reader.read_bytes(
+                        sample.device_event_record.uri,
+                        sample.device_event_record.sha256,
+                    )
+                )
+                expected_event = sample.model_dump(
+                    mode="python",
+                    exclude={"device_event_record"},
+                )
+                if raw_event.model_dump(mode="python") != expected_event:
+                    raise M1EvidenceError(
+                        "performance_event_binding_mismatch",
+                        "raw device Event differs from the main evidence reference",
+                    )
+                timer_identity = (
+                    raw_event.timer_provenance.profile,
+                    raw_event.timer_provenance.capability,
+                    raw_event.timer_provenance.adapter_name,
+                    raw_event.timer_provenance.adapter_version,
+                    raw_event.timer_provenance.source_commit,
+                )
+                if timer_identity not in producer_identities:
+                    raise M1EvidenceError(
+                        "performance_event_provenance_mismatch",
+                        "raw device Event was produced by another Adapter",
+                    )
+                elapsed_ns = (
+                    (raw_event.finished_device_ticks - raw_event.started_device_ticks)
+                    * ns_per_tick
+                    / raw_event.batch_iterations
+                )
+                if not math.isfinite(elapsed_ns) or elapsed_ns <= 0:
+                    raise M1EvidenceError(
+                        "performance_event_invalid",
+                        "raw device Event produced a non-positive elapsed interval",
+                    )
+                samples_ns.append(elapsed_ns)
+            acquisition_samples.append((item.arm, tuple(samples_ns)))
+            process_identities.append(f"{item.process_id}:{item.process_start_token}")
+            cache_namespaces.append(cache.namespace_hash)
+
+        restarts: list[M1RestartSamples] = []
+        for offset in range(0, len(acquisition_samples), 4):
+            group = acquisition_samples[offset : offset + 4]
+            if [item[0] for item in group] != [
+                "baseline",
+                "candidate",
+                "candidate",
+                "baseline",
+            ]:
+                raise M1EvidenceError(
+                    "performance_abba_order_mismatch",
+                    "performance acquisitions do not form complete ABBA groups",
                 )
             restarts.append(
                 M1RestartSamples(
-                    restart_ordinal=item.restart_ordinal,
-                    baseline_ns=item.baseline_ns,
-                    candidate_ns=item.candidate_ns,
+                    restart_ordinal=offset // 4,
+                    baseline_ns=(*group[0][1], *group[3][1]),
+                    candidate_ns=(*group[1][1], *group[2][1]),
                 )
             )
-            process_identities.append(f"{item.process_id}:{item.process_start_token}")
-            cache_namespaces.append(cache.namespace)
         return _VerifiedPerformanceInput(
             measurement_id=binding.measurement_id,
+            evidence_uri=reference.uri,
             evidence_hash=reference.sha256,
-            stage0_mde_ratio=stage0_mde.mde_ratio,
+            stage0_mde_ratio=verified_authority.mde_ratio,
+            stage0_alpha=verified_authority.alpha,
+            bootstrap_resamples=verified_authority.bootstrap_resamples,
             restarts=tuple(restarts),
-            lease_id=binding.lease_id,
-            lease_scope=binding.lease_scope,
-            resource_id=binding.resource_id,
-            fencing_token=binding.fencing_token,
+            metric_name=evidence.plan.metric_name,
+            unit=evidence.plan.unit,
+            protocol_version=evidence.plan.protocol_version,
+            sample_count=evidence.plan.expected_sample_count,
+            warmup_count=evidence.plan.warmup_count,
+            process_restart_count=evidence.plan.process_restart_count,
+            plan_hash=evidence.plan_hash,
+            sample_budget_hash=verified_authority.sample_budget_hash,
+            adapter_profile=binding.adapter_profile,
+            lease_id=binding.lease.lease_id,
+            lease_scope=binding.lease.lease_scope,
+            resource_id=binding.lease.resource_id,
+            fencing_token=binding.lease.fencing_token,
             process_identities=tuple(process_identities),
             cache_namespaces=tuple(cache_namespaces),
             environment_fingerprint=binding.environment_fingerprint,
@@ -938,15 +1077,75 @@ class M1PerformanceVerifier:
         )
 
     @staticmethod
-    def _verify_cleanup(binding: M1PerformanceBinding, cleanup: dict[str, Any]) -> None:
+    def _verify_calibration(evidence: M1MeasurementEvidence) -> float:
+        calibration = evidence.calibration
+        resource_device = evidence.binding.lease.resource_id.removeprefix("hcu-")
+        if (
+            resource_device.isdigit()
+            and int(resource_device) != calibration.device_index
+        ):
+            raise M1EvidenceError(
+                "performance_device_binding_mismatch",
+                "timer calibration belongs to another leased HCU",
+            )
+        device_ticks = [float(point.device_ticks) for point in calibration.points]
+        host_midpoints = [
+            point.host_started_monotonic_ns
+            + (point.host_finished_monotonic_ns - point.host_started_monotonic_ns) / 2.0
+            for point in calibration.points
+        ]
+        mean_ticks = fmean(device_ticks)
+        mean_host = fmean(host_midpoints)
+        sum_squares = sum((value - mean_ticks) ** 2 for value in device_ticks)
+        if sum_squares <= 0:
+            raise M1EvidenceError(
+                "performance_calibration_invalid",
+                "device timer calibration has no tick variance",
+            )
+        slope = sum(
+            (device - mean_ticks) * (host - mean_host)
+            for device, host in zip(device_ticks, host_midpoints, strict=True)
+        ) / sum_squares
+        intercept = mean_host - slope * mean_ticks
+        residual = max(
+            abs(host - (intercept + slope * device))
+            + (point.host_finished_monotonic_ns - point.host_started_monotonic_ns) / 2.0
+            for point, device, host in zip(
+                calibration.points,
+                device_ticks,
+                host_midpoints,
+                strict=True,
+            )
+        )
+        resolution = min(calibration.resolution_tick_deltas) * slope
+        claims = (
+            (calibration.ns_per_tick, slope),
+            (calibration.max_residual_ns, residual),
+            (calibration.timer_resolution_ns, resolution),
+        )
+        if not math.isfinite(slope) or slope <= 0 or any(
+            not math.isclose(claimed, recomputed, rel_tol=1e-12, abs_tol=1e-9)
+            for claimed, recomputed in claims
+        ):
+            raise M1EvidenceError(
+                "performance_calibration_mismatch",
+                "device timer calibration claims cannot be independently reproduced",
+            )
+        return slope
+
+    @staticmethod
+    def _verify_cleanup(
+        context: M1PerformanceVerificationContext,
+        cleanup: dict[str, Any],
+    ) -> None:
         if not cleanup_is_healthy(cleanup):
             raise M1EvidenceError("performance_cleanup_unhealthy", "cleanup is not healthy")
         fence = cleanup.get("fence", {})
         health = cleanup.get("health", {})
         if (
-            fence.get("resource_id") != binding.resource_id
-            or fence.get("fencing_token") != binding.fencing_token
-            or health.get("resource_id") != binding.resource_id
+            fence.get("resource_id") != context.resource_id
+            or fence.get("fencing_token") != context.fencing_token
+            or health.get("resource_id") != context.resource_id
         ):
             raise M1EvidenceError(
                 "performance_cleanup_binding_mismatch",
@@ -957,15 +1156,20 @@ class M1PerformanceVerifier:
 def _adjudicate_verified_performance(
     correctness: M1CorrectnessVerificationResult,
     evidence: _VerifiedPerformanceInput,
-    protocol: LoadedM1Protocol,
 ) -> M1PerformanceVerificationResult:
     input_digest = _digest(
         {
             "correctness_input_digest": correctness.input_digest,
             "measurement_id": evidence.measurement_id,
+            "evidence_uri": evidence.evidence_uri,
             "evidence_hash": evidence.evidence_hash,
             "stage0_mde_ratio": evidence.stage0_mde_ratio,
+            "stage0_alpha": evidence.stage0_alpha,
+            "bootstrap_resamples": evidence.bootstrap_resamples,
             "restarts": evidence.restarts,
+            "plan_hash": evidence.plan_hash,
+            "sample_budget_hash": evidence.sample_budget_hash,
+            "adapter_profile": evidence.adapter_profile,
             "lease_id": evidence.lease_id,
             "lease_scope": evidence.lease_scope,
             "resource_id": evidence.resource_id,
@@ -974,7 +1178,6 @@ def _adjudicate_verified_performance(
             "cache_namespaces": evidence.cache_namespaces,
             "environment_fingerprint": evidence.environment_fingerprint,
             "cleanup_hash": evidence.cleanup_hash,
-            "protocol_hash": protocol.protocol_hash,
         }
     )
     if correctness.verdict != "correct":
@@ -996,11 +1199,11 @@ def _adjudicate_verified_performance(
         for item in evidence.restarts
     )
     effect = fmean(effects)
-    confidence = protocol.protocol.confidence_level
+    confidence = 1.0 - evidence.stage0_alpha
     lower, upper = _bootstrap_mean_ci(
         effects,
         evidence.evidence_hash,
-        protocol.protocol.bootstrap_resamples,
+        evidence.bootstrap_resamples,
         confidence,
     )
     threshold = evidence.stage0_mde_ratio
@@ -1014,7 +1217,17 @@ def _adjudicate_verified_performance(
         verdict=verdict,
         input_digest=input_digest,
         measurement_id=evidence.measurement_id,
+        raw_evidence_uri=evidence.evidence_uri,
         raw_evidence_hash=evidence.evidence_hash,
+        metric_name=evidence.metric_name,
+        unit=evidence.unit,
+        protocol_version=evidence.protocol_version,
+        sample_count=evidence.sample_count,
+        warmup_count=evidence.warmup_count,
+        process_restart_count=evidence.process_restart_count,
+        plan_hash=evidence.plan_hash,
+        sample_budget_hash=evidence.sample_budget_hash,
+        adapter_profile=evidence.adapter_profile,
         lease_id=evidence.lease_id,
         lease_scope=evidence.lease_scope,
         resource_id=evidence.resource_id,
@@ -1045,7 +1258,17 @@ def _invalid_performance(
         verdict=ManualCandidateVerdict.INVALID,
         input_digest=input_digest,
         measurement_id=evidence.measurement_id,
+        raw_evidence_uri=evidence.evidence_uri,
         raw_evidence_hash=evidence.evidence_hash,
+        metric_name=evidence.metric_name,
+        unit=evidence.unit,
+        protocol_version=evidence.protocol_version,
+        sample_count=evidence.sample_count,
+        warmup_count=evidence.warmup_count,
+        process_restart_count=evidence.process_restart_count,
+        plan_hash=evidence.plan_hash,
+        sample_budget_hash=evidence.sample_budget_hash,
+        adapter_profile=evidence.adapter_profile,
         lease_id=evidence.lease_id,
         lease_scope=evidence.lease_scope,
         resource_id=evidence.resource_id,
@@ -1070,6 +1293,7 @@ def _invalid_performance_reference(
         verdict=ManualCandidateVerdict.INVALID,
         input_digest=input_digest,
         measurement_id=reference.measurement_id,
+        raw_evidence_uri=reference.uri,
         raw_evidence_hash=reference.sha256,
         credible_threshold=0.0,
         failure_codes=(code,),

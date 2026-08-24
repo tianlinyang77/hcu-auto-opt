@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from hcuopt.contracts.platform_v1 import MeasurementSeries
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.evaluation.m1_reporting import (
     M1AdjudicationContext,
@@ -32,30 +30,16 @@ def test_scripted_raw_evidence_to_signoff_bundle(tmp_path: Path) -> None:
         effects,
         summary={"producer_verdict": "slower"},
     )
-    measurement_provenance = _provenance("measurement_harness")
-    measurement = MeasurementSeries(
-        measurement_id=performance_reference.measurement_id,
-        status="measured",
-        metric_name="kernel_latency",
-        unit="ns",
-        protocol_version="m1-performance-v1",
-        sample_count=8,
-        warmup_count=2,
-        process_restart_count=4,
-        raw_samples_uri=performance_reference.uri,
-        raw_samples_hash=performance_reference.sha256,
-        environment_fingerprint=suite.context.target_fingerprint,
-        summary={"producer_verdict": "slower"},
-        adapter_provenance=measurement_provenance,
-        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
-    )
+    measurement = suite.measurement
+    measurement_provenance = measurement.adapter_provenance
     result = build_m1_adjudication_result(
         M1AdjudicationContext(
             verification=suite.context,
+            performance_verification=suite.performance_context,
             job_id=uuid4(),
-            round_id=uuid4(),
+            round_id=suite.performance_context.round_id,
             measurement=measurement,
-            created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+            created_at=measurement.created_at,
             adapter_provenance=(
                 measurement_provenance,
                 _provenance("candidate_adjudicator"),

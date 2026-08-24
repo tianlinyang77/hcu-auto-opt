@@ -21,6 +21,7 @@ from hcuopt.contracts.v1 import ManualCandidateAdjudicationResult
 from hcuopt.domain.enums import LeaseScope, ManualCandidateVerdict
 from hcuopt.evaluation.m1_verifier import (
     M1CorrectnessVerificationResult,
+    M1PerformanceVerificationContext,
     M1PerformanceVerificationResult,
     M1VerificationContext,
 )
@@ -40,6 +41,7 @@ class _ReportModel(ContractModel):
 
 class M1AdjudicationContext(_ReportModel):
     verification: M1VerificationContext
+    performance_verification: M1PerformanceVerificationContext
     job_id: UUID
     round_id: UUID
     measurement: MeasurementSeries
@@ -68,6 +70,33 @@ class M1AdjudicationContext(_ReportModel):
             producer.adapter_version,
         ) not in known:
             raise ValueError("measurement producer must be included in adjudication provenance")
+        performance = self.performance_verification
+        correctness = self.verification
+        shared_bindings = (
+            (correctness.task_id, performance.task_id),
+            (correctness.candidate_id, performance.candidate_id),
+            (correctness.baseline_epoch_id, performance.baseline_epoch_id),
+            (correctness.target_snapshot_id, performance.target_snapshot_id),
+            (correctness.target_id, performance.target_id),
+            (correctness.target_fingerprint, performance.target_fingerprint),
+            (correctness.workload_id, performance.workload_id),
+            (correctness.workload_hash, performance.workload_hash),
+            (correctness.stage0_run_id, performance.stage0_run_id),
+            (correctness.stage0_protocol_hash, performance.stage0_protocol_hash),
+            (correctness.stage0_mde_evidence_uri, performance.stage0_report_uri),
+            (correctness.stage0_mde_evidence_hash, performance.stage0_report_hash),
+            (correctness.baseline_source_hash, performance.baseline_source_hash),
+            (correctness.candidate_source_hash, performance.candidate_source_hash),
+            (correctness.artifact_id, performance.artifact_id),
+            (correctness.artifact_hash, performance.artifact_hash),
+            (correctness.resource_id, performance.resource_id),
+        )
+        if any(left != right for left, right in shared_bindings):
+            raise ValueError("correctness and performance contexts bind different immutable inputs")
+        if self.round_id != performance.round_id:
+            raise ValueError("adjudication belongs to another performance Round")
+        if producer.profile != performance.adapter_profile:
+            raise ValueError("measurement producer uses another control-plane Adapter Profile")
         return self
 
 
@@ -116,6 +145,8 @@ class M1EvidenceSummaryV1(_ReportModel):
     performance_process_identities: tuple[str, ...]
     performance_cache_namespaces: tuple[str, ...]
     performance_cleanup_hash: str = Field(pattern=SHA256_PATTERN)
+    performance_plan_hash: str = Field(pattern=SHA256_PATTERN)
+    performance_sample_budget_hash: str = Field(pattern=SHA256_PATTERN)
     performance_input_digest: str = Field(pattern=SHA256_PATTERN)
     adjudication_input_digest: str = Field(pattern=SHA256_PATTERN)
     verifier_version: Literal["m1-d-verifier-v1"] = "m1-d-verifier-v1"
@@ -212,8 +243,7 @@ def build_m1_adjudication_result(
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
 ) -> ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult:
-    if context.measurement.measurement_id != performance.measurement_id:
-        raise ValueError("performance verdict is bound to another MeasurementSeries")
+    _verify_measurement_series(context, performance)
     if correctness.verdict != "correct" or performance.verdict is ManualCandidateVerdict.INVALID:
         return _build_failure_adjudication_result(context, correctness, performance)
     if (
@@ -241,6 +271,7 @@ def build_m1_adjudication_result(
             "job_id": context.job_id,
             "round_id": context.round_id,
             "verification": binding,
+            "performance_verification": context.performance_verification,
             "correctness": correctness,
             "performance": performance,
             "measurement_id": context.measurement.measurement_id,
@@ -346,6 +377,8 @@ def build_m1_adjudication_result(
         performance_process_identities=performance.process_identities,
         performance_cache_namespaces=performance.cache_namespaces,
         performance_cleanup_hash=performance.cleanup_hash,
+        performance_plan_hash=performance.plan_hash,
+        performance_sample_budget_hash=performance.sample_budget_hash,
         performance_input_digest=performance.input_digest,
         adjudication_input_digest=input_digest,
     )
@@ -374,6 +407,54 @@ def build_m1_adjudication_result(
     )
 
 
+def _verify_measurement_series(
+    context: M1AdjudicationContext,
+    performance: M1PerformanceVerificationResult,
+) -> None:
+    measurement = context.measurement
+    if measurement.measurement_id != performance.measurement_id:
+        raise ValueError("performance verdict is bound to another MeasurementSeries")
+    if (
+        measurement.raw_samples_uri != performance.raw_evidence_uri
+        or measurement.raw_samples_hash != performance.raw_evidence_hash
+    ):
+        raise ValueError("MeasurementSeries is bound to another Performance Reference")
+    if performance.verdict is ManualCandidateVerdict.INVALID:
+        return
+    authority = context.performance_verification
+    verified_authority = {
+        "lease_id": performance.lease_id,
+        "lease_scope": performance.lease_scope,
+        "resource_id": performance.resource_id,
+        "fencing_token": performance.fencing_token,
+        "environment_fingerprint": performance.environment_fingerprint,
+        "adapter_profile": performance.adapter_profile,
+    }
+    expected_authority = {
+        "lease_id": authority.lease_id,
+        "lease_scope": authority.lease_scope,
+        "resource_id": authority.resource_id,
+        "fencing_token": authority.fencing_token,
+        "environment_fingerprint": authority.environment_fingerprint,
+        "adapter_profile": authority.adapter_profile,
+    }
+    if verified_authority != expected_authority:
+        raise ValueError("performance verdict uses another control-plane authority")
+    expected = {
+        "metric_name": performance.metric_name,
+        "unit": performance.unit,
+        "protocol_version": performance.protocol_version,
+        "sample_count": performance.sample_count,
+        "warmup_count": performance.warmup_count,
+        "process_restart_count": performance.process_restart_count,
+        "environment_fingerprint": performance.environment_fingerprint,
+    }
+    if any(getattr(measurement, name) != value for name, value in expected.items()):
+        raise ValueError("MeasurementSeries metadata differs from verified raw evidence")
+    if measurement.adapter_provenance.profile != performance.adapter_profile:
+        raise ValueError("MeasurementSeries Adapter Profile differs from control-plane authority")
+
+
 def _build_failure_adjudication_result(
     context: M1AdjudicationContext,
     correctness: M1CorrectnessVerificationResult,
@@ -388,6 +469,7 @@ def _build_failure_adjudication_result(
             "job_id": context.job_id,
             "round_id": context.round_id,
             "verification": binding,
+            "performance_verification": context.performance_verification,
             "correctness": correctness,
             "performance": performance,
             "measurement_id": measurement.measurement_id,

@@ -6,6 +6,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import fmean
 from uuid import uuid4
 
 import pytest
@@ -14,7 +15,6 @@ from pydantic import ValidationError
 from hcuopt.contracts.platform_v1 import (
     AdapterProvenance,
     ArtifactManifest,
-    MeasurementSeries,
     SourceSnapshot,
 )
 from hcuopt.domain.enums import ManualCandidateVerdict
@@ -41,10 +41,24 @@ from hcuopt.evaluation.m1_verifier import (
     M1CorrectnessEvidenceReference,
     M1CorrectnessVerifier,
     M1PerformanceEvidenceReference,
+    M1PerformanceVerificationContext,
     M1PerformanceVerifier,
     M1VerificationContext,
 )
+from hcuopt.evaluation.stage0_protocol import load_registered_stage0_protocol
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence, write_evidence_bytes
+from hcuopt.measurement.m1_harness import M1TrustedMeasurementHarness
+from hcuopt.measurement.m1_models import M1MeasurementEvidence
+from hcuopt.targets import load_target, target_fingerprint
+from tests.unit.test_m1_measurement import (
+    TARGET_PATH,
+    FixtureCleaner,
+    FixtureClock,
+    FixtureLifecycle,
+    FixtureTelemetry,
+    FixtureTimer,
+    FixtureWorkload,
+)
 
 SHA_A = "sha256:" + "a" * 64
 PROFILE = "m1-scripted-real"
@@ -137,21 +151,31 @@ class _Suite:
         self.baseline_epoch_id = uuid4()
         self.target_snapshot_id = uuid4()
         self.stage0_run_id = uuid4()
+        self.target = load_target(TARGET_PATH)
+        self.stage0_protocol = load_registered_stage0_protocol("s0-g0-v2")
+        self.stage0_input_digest = "sha256:" + "e" * 64
         self.stage0_mde = write_evidence(
             root / "stage0-mde.json",
             {
-                "schema_version": "m1-stage0-mde-reference-v1",
+                "schema_version": "stage0-formal-report-v1",
+                "task_id": str(self.task_id),
                 "stage0_run_id": str(self.stage0_run_id),
                 "target_snapshot_id": str(self.target_snapshot_id),
-                "target_fingerprint": "sha256:" + "7" * 64,
+                "target_id": self.target.target_id,
                 "workload_id": "m1-fixture-v1",
-                "workload_hash": "sha256:" + "8" * 64,
-                "stage0_protocol_hash": "sha256:" + "9" * 64,
-                "metric_name": "kernel_latency",
-                "unit": "ns",
-                "sample_budget_hash": "sha256:" + "d" * 64,
-                "mde_ratio": 0.03,
-                "verification_input_digest": "sha256:" + "e" * 64,
+                "adapter_profile": PROFILE,
+                "mode": "degraded_manual_intake",
+                "automatic_release_allowed": False,
+                "verification": {
+                    "measurement": "pass",
+                    "protocol_version": self.stage0_protocol.protocol.protocol_version,
+                    "protocol_hash": self.stage0_protocol.protocol_hash,
+                    "input_digest": self.stage0_input_digest,
+                    "timer_resolution_ns": 1.0,
+                    "noise_sigma_ns": 2.0,
+                    "noise_cv": 0.01,
+                    "mde_ratio": 0.03,
+                },
             },
         )
         self.baseline_snapshot = SourceSnapshot(
@@ -188,12 +212,12 @@ class _Suite:
             candidate_id=self.candidate_id,
             baseline_epoch_id=self.baseline_epoch_id,
             target_snapshot_id=self.target_snapshot_id,
-            target_id="nmz36-sglang-0.5.12",
-            target_fingerprint="sha256:" + "7" * 64,
+            target_id=self.target.target_id,
+            target_fingerprint=target_fingerprint(self.target),
             workload_id="m1-fixture-v1",
             workload_hash="sha256:" + "8" * 64,
             stage0_run_id=self.stage0_run_id,
-            stage0_protocol_hash="sha256:" + "9" * 64,
+            stage0_protocol_hash=self.stage0_protocol.protocol_hash,
             stage0_mde_evidence_uri=self.stage0_mde.uri,
             stage0_mde_evidence_hash=self.stage0_mde.sha256,
             baseline_source_snapshot_id=self.baseline_snapshot.snapshot_id,
@@ -388,116 +412,146 @@ def _performance(
     cleanup=True,
     bindings=True,
 ):
-    measurement_id = uuid4()
-    restarts = []
-    for ordinal, effect in enumerate(effects):
-        pid = 2000 + ordinal
-        token = 7000 + ordinal
-        baseline = 100.0
-        candidate = baseline * (1.0 - effect)
-        start = write_evidence(
-            suite.root / f"performance-{measurement_id}-{ordinal}-start.json",
-            {
-                "schema_version": "process-lifecycle-v1",
-                "event": "started",
-                "restart_ordinal": ordinal,
-                "observer_process_id": 999,
-                "process_id": pid,
-                "proc_stat_line": _proc_stat(pid, token),
-                "captured_monotonic_ns": 1000 + ordinal * 100,
-                "waitpid_result_pid": None,
-                "wait_status": None,
-            },
-        )
-        exit_record = write_evidence(
-            suite.root / f"performance-{measurement_id}-{ordinal}-exit.json",
-            {
-                "schema_version": "process-lifecycle-v1",
-                "event": "reaped",
-                "restart_ordinal": ordinal,
-                "observer_process_id": 999,
-                "process_id": pid,
-                "proc_stat_line": _proc_stat(pid, token),
-                "captured_monotonic_ns": 1050 + ordinal * 100,
-                "waitpid_result_pid": pid,
-                "wait_status": 0,
-            },
-        )
-        cache = write_evidence(
-            suite.root / f"performance-{measurement_id}-{ordinal}-cache.json",
-            {
-                "schema_version": "m1-performance-cache-v1",
-                "restart_ordinal": ordinal,
-                "namespace": f"m1-performance-{measurement_id}-{ordinal}",
-                "empty_before_execution": True,
-            },
-        )
-        restarts.append(
-            {
-                "restart_ordinal": ordinal,
-                "process_id": pid,
-                "process_start_token": str(token),
-                "start_record": {"uri": start.uri, "sha256": start.sha256},
-                "exit_record": {"uri": exit_record.uri, "sha256": exit_record.sha256},
-                "cache_namespace": {"uri": cache.uri, "sha256": cache.sha256},
-                "baseline_ns": [baseline, baseline],
-                "candidate_ns": [candidate, candidate],
-            }
-        )
-    envelope = {
-        "schema_version": "m1-kernel-performance-evidence-v1",
-        "binding": {
-            "task_id": str(suite.context.task_id),
-            "candidate_id": str(suite.context.candidate_id),
-            "baseline_epoch_id": str(suite.context.baseline_epoch_id),
-            "target_snapshot_id": str(suite.context.target_snapshot_id),
-            "target_id": suite.context.target_id,
-            "target_fingerprint": (
-                suite.context.target_fingerprint if bindings else "sha256:" + "f" * 64
-            ),
-            "workload_id": suite.context.workload_id,
-            "workload_hash": suite.context.workload_hash,
-            "stage0_run_id": str(suite.context.stage0_run_id),
-            "stage0_protocol_hash": suite.context.stage0_protocol_hash,
-            "measurement_id": str(measurement_id),
-            "metric_name": "kernel_latency",
-            "unit": "ns",
-            "protocol_version": "m1-kernel-performance-evidence-v1",
-            "lease_id": str(uuid4()),
-            "lease_scope": "exclusive",
-            "resource_id": "hcu-7",
-            "fencing_token": 23,
-            "environment_fingerprint": suite.context.target_fingerprint,
-        },
-        "stage0_mde_evidence": {
+    provenance = _provenance("measurement_harness")
+    round_id = uuid4()
+    performance_lease_id = uuid4()
+    performance_fencing_token = 23
+    candidate_ticks = max(1, round(100.0 * (1.0 - fmean(effects))))
+    protocol = suite.stage0_protocol.protocol
+    expected_samples = (
+        protocol.sampling.restart_count
+        * len(protocol.sampling.signal_segment_order)
+        * protocol.sampling.signal_samples_per_segment
+    )
+    payload = {
+        "task_id": str(suite.context.task_id),
+        "candidate_id": str(suite.context.candidate_id),
+        "adapter_profile": PROFILE,
+        "round_id": str(round_id),
+        "baseline_epoch_id": str(suite.context.baseline_epoch_id),
+        "stage0_run_id": str(suite.context.stage0_run_id),
+        "target_snapshot_id": str(suite.context.target_snapshot_id),
+        "target_fingerprint": suite.context.target_fingerprint,
+        "target": suite.target.model_dump(mode="json"),
+        "workload_id": suite.context.workload_id,
+        "workload_hash": suite.context.workload_hash,
+        "configuration_hash": "sha256:" + "2" * 64,
+        "baseline_source": {"source_hash": suite.context.baseline_source_hash},
+        "candidate_source": {"source_hash": suite.context.candidate_source_hash},
+        "artifact": suite.artifact.model_dump(mode="json"),
+        "stage0_report": {
             "uri": suite.stage0_mde.uri,
             "sha256": suite.stage0_mde.sha256,
+            "input_digest": suite.stage0_input_digest,
+            "protocol_version": suite.stage0_protocol.protocol.protocol_version,
+            "protocol_hash": suite.stage0_protocol.protocol_hash,
         },
-        "restarts": restarts,
-        "adapter_provenance": [_provenance("measurement_harness").model_dump(mode="json")],
-        "cleanup_evidence": {
-            "fence": {"resource_id": "hcu-7", "fencing_token": 23, "fenced": cleanup},
-            "health": {"resource_id": "hcu-7", "healthy": cleanup},
+        "budget": {"max_samples": expected_samples, "max_wall_seconds": 60},
+        "_job_context": {
+            "lease_id": str(performance_lease_id),
+            "lease_scope": "exclusive",
+            "resource_id": suite.context.resource_id,
+            "fencing_token": performance_fencing_token,
         },
-        "producer_summary": summary or {},
     }
-    raw = write_evidence(
-        suite.root / f"performance-{measurement_id}-raw.json",
-        envelope,
+    clock = FixtureClock()
+
+    def factory(arm, ordinal, _payload, output_dir):
+        return FixtureWorkload(
+            arm,
+            ordinal,
+            clock,
+            suite.target.inference_image.registry_digest,
+            suite.artifact.content_hash,
+            candidate_ticks,
+            output_dir,
+            provenance,
+        )
+
+    harness = M1TrustedMeasurementHarness(
+        provenance=provenance,
+        evidence_root=suite.root,
+        evidence_reader=_PortableReader(suite.root),
+        workload_factory=factory,
+        telemetry=FixtureTelemetry(),
+        device_timer=FixtureTimer(),
+        lifecycle_recorder=FixtureLifecycle(),
+        cleaner=FixtureCleaner(),
+        clock=clock,
     )
+    measurement = harness.run(payload, suite.root)
+    original = M1MeasurementEvidence.model_validate_json(
+        _PortableReader(suite.root).read_bytes(
+            measurement.raw_samples_uri,
+            measurement.raw_samples_hash,
+        )
+    )
+    raw_uri = measurement.raw_samples_uri
+    raw_hash = measurement.raw_samples_hash
+    if not cleanup or not bindings:
+        document = original.model_dump(mode="json")
+        if not cleanup:
+            document["cleanup_evidence"]["health"]["healthy"] = False
+        if not bindings:
+            document["binding"]["target_fingerprint"] = "sha256:" + "f" * 64
+        mutated = write_evidence(
+            suite.root / f"performance-{measurement.measurement_id}-mutated.json",
+            document,
+        )
+        raw_uri = mutated.uri
+        raw_hash = mutated.sha256
+    if summary is not None or raw_hash != measurement.raw_samples_hash:
+        measurement = measurement.model_copy(
+            update={
+                "raw_samples_uri": raw_uri,
+                "raw_samples_hash": raw_hash,
+                "summary": summary or measurement.summary,
+            }
+        )
     reference = M1PerformanceEvidenceReference(
-        measurement_id=measurement_id,
-        uri=raw.uri,
-        sha256=raw.sha256,
+        measurement_id=measurement.measurement_id,
+        uri=raw_uri,
+        sha256=raw_hash,
+    )
+    report = original.plan.stage0_authority.report
+    performance_context = M1PerformanceVerificationContext(
+        task_id=suite.context.task_id,
+        candidate_id=suite.context.candidate_id,
+        round_id=round_id,
+        baseline_epoch_id=suite.context.baseline_epoch_id,
+        stage0_run_id=suite.context.stage0_run_id,
+        target_snapshot_id=suite.context.target_snapshot_id,
+        target_id=suite.context.target_id,
+        target_fingerprint=suite.context.target_fingerprint,
+        environment_fingerprint=original.binding.environment_fingerprint,
+        workload_id=suite.context.workload_id,
+        workload_hash=suite.context.workload_hash,
+        configuration_hash=original.binding.configuration_hash,
+        image_digest=original.binding.image_digest,
+        baseline_source_hash=suite.context.baseline_source_hash,
+        candidate_source_hash=suite.context.candidate_source_hash,
+        artifact_id=suite.context.artifact_id,
+        artifact_hash=suite.context.artifact_hash,
+        adapter_profile=PROFILE,
+        stage0_report_uri=report.uri,
+        stage0_report_hash=report.sha256,
+        stage0_input_digest=report.input_digest,
+        stage0_protocol_version=report.protocol_version,
+        stage0_protocol_hash=report.protocol_hash,
+        lease_id=performance_lease_id,
+        resource_id=suite.context.resource_id,
+        fencing_token=performance_fencing_token,
     )
     result = M1PerformanceVerifier(
         suite.protocol,
         _PortableReader(suite.root),
     ).verify(
         correctness,
-        suite.context,
+        performance_context,
         reference,
     )
+    suite.performance_context = performance_context
+    suite.measurement = measurement
     return reference, result
 
 
@@ -795,9 +849,53 @@ def test_performance_ignores_producer_summary_and_fails_closed(tmp_path: Path) -
     hash_invalid = M1PerformanceVerifier(
         suite.protocol,
         _PortableReader(suite.root),
-    ).verify(correctness, suite.context, tampered)
+    ).verify(correctness, suite.performance_context, tampered)
     assert hash_invalid.verdict is ManualCandidateVerdict.INVALID
     assert hash_invalid.failure_codes == ("evidence_hash_mismatch",)
+
+    wrong_lease = suite.performance_context.model_copy(update={"lease_id": uuid4()})
+    lease_invalid = M1PerformanceVerifier(
+        suite.protocol,
+        _PortableReader(suite.root),
+    ).verify(correctness, wrong_lease, reference)
+    assert lease_invalid.failure_codes == ("performance_lease_binding_mismatch",)
+    wrong_profile = suite.performance_context.model_copy(update={"adapter_profile": "other-real"})
+    profile_invalid = M1PerformanceVerifier(
+        suite.protocol,
+        _PortableReader(suite.root),
+    ).verify(correctness, wrong_profile, reference)
+    assert profile_invalid.failure_codes == ("performance_binding_mismatch",)
+
+    reader = _PortableReader(suite.root)
+    document = reader.read(reference.uri, reference.sha256)
+    event_reference = document["acquisitions"][0]["samples"][0]["device_event_record"]
+    event = reader.read(event_reference["uri"], event_reference["sha256"])
+    event["finished_device_ticks"] += 1
+    changed_event = write_evidence(suite.root / "changed-device-event.json", event)
+    document["acquisitions"][0]["samples"][0]["device_event_record"] = {
+        "uri": changed_event.uri,
+        "sha256": changed_event.sha256,
+    }
+    changed_main = write_evidence(suite.root / "changed-performance-main.json", document)
+    changed_reference = reference.model_copy(
+        update={"uri": changed_main.uri, "sha256": changed_main.sha256}
+    )
+    changed_result = M1PerformanceVerifier(suite.protocol, reader).verify(
+        correctness,
+        suite.performance_context,
+        changed_reference,
+    )
+    assert changed_result.failure_codes == ("performance_event_binding_mismatch",)
+
+    budget_document = reader.read(reference.uri, reference.sha256)
+    budget_document["plan"]["stage0_authority"]["sample_budget_hash"] = SHA_A
+    changed_budget = write_evidence(suite.root / "changed-sample-budget.json", budget_document)
+    budget_result = M1PerformanceVerifier(suite.protocol, reader).verify(
+        correctness,
+        suite.performance_context,
+        reference.model_copy(update={"uri": changed_budget.uri, "sha256": changed_budget.sha256}),
+    )
+    assert budget_result.verdict is ManualCandidateVerdict.INVALID
 
 
 @pytest.mark.parametrize("failure_kind", ["correctness", "performance"])
@@ -828,33 +926,24 @@ def test_invalid_evidence_still_produces_immutable_failure_bundle(
             _PortableReader(suite.root),
         ).verify(
             correctness,
-            suite.context,
+            suite.performance_context,
             performance_reference.model_copy(update={"sha256": SHA_A}),
         )
         performance_reference = performance_reference.model_copy(update={"sha256": SHA_A})
 
-    measurement_provenance = _provenance("measurement_harness")
-    measurement = MeasurementSeries(
-        measurement_id=performance_reference.measurement_id,
-        status="measured",
-        metric_name="kernel_latency",
-        unit="ns",
-        protocol_version="m1-kernel-performance-evidence-v1",
-        sample_count=8,
-        warmup_count=2,
-        process_restart_count=4,
-        raw_samples_uri=performance_reference.uri,
-        raw_samples_hash=performance_reference.sha256,
-        environment_fingerprint=suite.context.target_fingerprint,
-        summary={"passed": True, "speedup": 999},
-        adapter_provenance=measurement_provenance,
-        synthetic=False,
-        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+    measurement_provenance = suite.measurement.adapter_provenance
+    measurement = suite.measurement.model_copy(
+        update={
+            "raw_samples_uri": performance_reference.uri,
+            "raw_samples_hash": performance_reference.sha256,
+            "summary": {"passed": True, "speedup": 999},
+        }
     )
     context = M1AdjudicationContext(
         verification=suite.context,
+        performance_verification=suite.performance_context,
         job_id=uuid4(),
-        round_id=uuid4(),
+        round_id=suite.performance_context.round_id,
         measurement=measurement,
         created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
         adapter_provenance=(
@@ -867,6 +956,15 @@ def test_invalid_evidence_still_produces_immutable_failure_bundle(
     assert result.verdict is ManualCandidateVerdict.INVALID
     assert result.evidence.summary["automatic_release_allowed"] is False
     assert result.evidence.summary["correctness_failure_codes"] == list(correctness.failure_codes)
+    detached_measurement = measurement.model_copy(
+        update={"raw_samples_hash": "sha256:" + "b" * 64}
+    )
+    with pytest.raises(ValueError, match="another Performance Reference"):
+        build_m1_adjudication_result(
+            context.model_copy(update={"measurement": detached_measurement}),
+            correctness,
+            performance,
+        )
     report_root = tmp_path / f"{failure_kind}-report"
     report_root.mkdir()
     first = write_m1_signoff_report(report_root, result, correctness, performance)
@@ -885,38 +983,41 @@ def test_report_is_deterministic_bound_and_never_authorizes_release(tmp_path: Pa
     )
     suite = _Suite(tmp_path / "evidence")
     correctness = suite.verify()
-    performance_reference, performance = _performance(suite, correctness, [0.1, 0.11, 0.09, 0.1])
-    measurement_provenance = _provenance("measurement_harness")
-    measurement = MeasurementSeries(
-        measurement_id=performance_reference.measurement_id,
-        status="measured",
-        metric_name="kernel_latency",
-        unit="ns",
-        protocol_version="m1-performance-v1",
-        sample_count=8,
-        warmup_count=2,
-        process_restart_count=4,
-        raw_samples_uri=performance_reference.uri,
-        raw_samples_hash=performance_reference.sha256,
-        environment_fingerprint=suite.context.target_fingerprint,
-        summary={"producer_verdict": "ignored"},
-        adapter_provenance=measurement_provenance,
-        synthetic=False,
-        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+    _, performance = _performance(suite, correctness, [0.1, 0.11, 0.09, 0.1])
+    measurement = suite.measurement.model_copy(
+        update={"summary": {"producer_verdict": "ignored"}}
     )
+    measurement_provenance = measurement.adapter_provenance
     adjudication_provenance = (
         measurement_provenance,
         _provenance("candidate_adjudicator"),
     )
     context = M1AdjudicationContext(
         verification=suite.context,
+        performance_verification=suite.performance_context,
         job_id=uuid4(),
-        round_id=uuid4(),
+        round_id=suite.performance_context.round_id,
         measurement=measurement,
         created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
         adapter_provenance=adjudication_provenance,
     )
     result = build_m1_adjudication_result(context, correctness, performance)
+    wrong_metadata = measurement.model_copy(
+        update={
+            "metric_name": "throughput",
+            "unit": "requests/s",
+            "protocol_version": "wrong-v99",
+            "sample_count": 1,
+            "warmup_count": 0,
+            "process_restart_count": 0,
+        }
+    )
+    with pytest.raises(ValueError, match="metadata differs"):
+        build_m1_adjudication_result(
+            context.model_copy(update={"measurement": wrong_metadata}),
+            correctness,
+            performance,
+        )
     tampered_measurement = measurement.model_copy(
         update={"summary": {"producer_verdict": "faster", "speedup": 999}}
     )
