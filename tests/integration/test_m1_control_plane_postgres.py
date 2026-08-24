@@ -22,6 +22,7 @@ from hcuopt.contracts.v1 import (
     ManualCandidateSignoffRequest,
     ManualCandidateTaskCreate,
     ManualCorrectnessResult,
+    ManualHotspotIntakeCreate,
     ManualPerformanceEvidenceResult,
     WorkerRegister,
 )
@@ -314,6 +315,61 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
                 other_task["task_id"],
                 self._candidate_request(other_task["task_id"]),
             )
+
+    def test_manual_hotspot_intake_is_immutable_and_binds_candidate_job(self) -> None:
+        task = self.repository.create_manual_candidate_task(
+            self._task_request("m1-hotspot-task")
+        )
+        baseline = self.repository.get_baseline(task["task_id"])
+        assert baseline is not None
+        request = ManualHotspotIntakeCreate(
+            baseline_epoch_id=baseline["baseline_epoch_id"],
+            symbol="sglang::fused_layernorm",
+            operation_name="layer_norm",
+            shape=[1, 4096],
+            dtype="bfloat16",
+            meta={"hidden_size": 4096},
+            implementation_location="python/sglang/srt/layers/layernorm.py:42",
+            replacement_point="sglang.srt.layers.layernorm",
+            call_path=["model.forward", "decoder.forward", "layer_norm"],
+            profiler_raw_output_uri="file:///evidence/profiler.json",
+            profiler_raw_output_hash="sha256:" + "2" * 64,
+            share_ratio=0.18,
+            opportunity_score=0.72,
+            upstream_dedup_status="no_match",
+            patchability="patchable",
+            selection_reason="largest reviewed Python/Triton hotspot",
+            candidate_kind="business",
+            actor="reviewer",
+            adapter_provenance=[self.provenance],
+            idempotency_key="m1-hotspot-intake",
+        )
+
+        first = self.repository.create_manual_hotspot_intake(task["task_id"], request)
+        replay = self.repository.create_manual_hotspot_intake(task["task_id"], request)
+        self.assertEqual(first["hotspot_id"], replay["hotspot_id"])
+        self.assertEqual(first["intake_hash"], replay["intake_hash"])
+        with self.assertRaises(Conflict):
+            self.repository.create_manual_hotspot_intake(
+                task["task_id"],
+                request.model_copy(update={"selection_reason": "different evidence"}),
+            )
+
+        candidate_request = self._candidate_request(task["task_id"]).model_copy(
+            update={"hotspot_id": first["hotspot_id"]}
+        )
+        candidate = self.repository.create_manual_candidate(
+            task["task_id"], candidate_request
+        )
+        summary = self.repository.manual_candidate_summary(task["task_id"])
+        self.assertEqual(candidate["hotspot_id"], first["hotspot_id"])
+        self.assertEqual(len(summary["hotspots"]), 1)
+        self.assertEqual(summary["hotspots"][0]["candidate_kind"], "business")
+        self.assertEqual(summary["jobs"][0]["payload"]["hotspot_id"], str(first["hotspot_id"]))
+        self.assertEqual(
+            summary["jobs"][0]["payload"]["hotspot_intake_hash"],
+            first["intake_hash"],
+        )
 
     def test_baseline_is_immutable_and_terminal_build_failure_converges(self) -> None:
         task = self.repository.create_manual_candidate_task(self._task_request())

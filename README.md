@@ -123,6 +123,7 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [F1-A Framework Smoke 控制面](docs/framework-smoke-control-plane.md)
 - [S0-A Stage 0 控制面](docs/s0-control-plane.md)
 - [S0-C Profiler 与可逆 Overlay 能力探针](docs/s0-runtime-probes.md)
+- [M1-C 人工热点与启动时 Overlay 制品链](docs/m1-hotspot-overlay.md)
 - [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)

@@ -6,7 +6,9 @@ from typing import Any
 from hcuopt.adapters.interfaces import (
     ArtifactStoreAdapter,
     BuilderAdapter,
+    CandidateBuilderAdapter,
     CandidateGenerator,
+    CandidateRuntimeAdapter,
     EvaluatorAdapter,
     ExecutionAdapter,
     MeasurementHarness,
@@ -27,6 +29,8 @@ class AdapterRegistry:
     profiler: ProfilerAdapter | None = None
     candidate_generator: CandidateGenerator | None = None
     builder: BuilderAdapter | None = None
+    candidate_builder: CandidateBuilderAdapter | None = None
+    candidate_runtime: CandidateRuntimeAdapter | None = None
     measurement_harness: MeasurementHarness | None = None
     stage0_probe: Stage0ProbeAdapter | None = None
     evaluator: EvaluatorAdapter | None = None
@@ -69,6 +73,8 @@ class AdapterRegistry:
             "profiler",
             "candidate_generator",
             "builder",
+            "candidate_builder",
+            "candidate_runtime",
             "measurement_harness",
             "stage0_probe",
             "evaluator",

@@ -46,6 +46,7 @@ class OverlayCapabilityProbe:
         resource_id: str,
         fencing_token: int,
         max_wall_seconds: int | None = None,
+        lease_scope: LeaseScope = LeaseScope.EXCLUSIVE,
     ) -> dict[str, Any]:
         if max_wall_seconds is not None and (
             isinstance(max_wall_seconds, bool) or max_wall_seconds < 1
@@ -59,6 +60,8 @@ class OverlayCapabilityProbe:
             or fencing_token < 1
         ):
             raise ValueError("overlay probe requires a positive fencing_token")
+        if lease_scope not in {LeaseScope.SHARED, LeaseScope.EXCLUSIVE}:
+            raise ValueError("overlay probe requires a shared or exclusive lease scope")
         frozen = OverlayProbeConfiguration.model_validate(configuration)
         baseline = frozen.baseline_source
         candidate = frozen.candidate_source
@@ -67,7 +70,7 @@ class OverlayCapabilityProbe:
         overlay_target = frozen.overlay_mount_target
 
         baseline_request = self._execution_request(
-            frozen.baseline, target, resource_id, fencing_token
+            frozen.baseline, target, resource_id, fencing_token, lease_scope=lease_scope
         )
         candidate_request = self._execution_request(
             frozen.candidate,
@@ -76,9 +79,10 @@ class OverlayCapabilityProbe:
             fencing_token,
             artifact=artifact,
             overlay_target=overlay_target,
+            lease_scope=lease_scope,
         )
         recovery_request = self._execution_request(
-            frozen.recovery, target, resource_id, fencing_token
+            frozen.recovery, target, resource_id, fencing_token, lease_scope=lease_scope
         )
 
         self._validate_sources(baseline, candidate, artifact)
@@ -306,6 +310,7 @@ class OverlayCapabilityProbe:
         *,
         artifact: ArtifactManifest | None = None,
         overlay_target: str | None = None,
+        lease_scope: LeaseScope = LeaseScope.EXCLUSIVE,
     ) -> ExecutionRequest:
         mounts = list(phase.mounts)
         if artifact is not None:
@@ -326,7 +331,7 @@ class OverlayCapabilityProbe:
             working_directory=phase.working_directory,
             environment=phase.environment,
             timeout_seconds=phase.timeout_seconds,
-            lease_scope=LeaseScope.EXCLUSIVE,
+            lease_scope=lease_scope,
             resource_id=resource_id,
             fencing_token=fencing_token,
             container_image=target.inference_image.immutable_reference,

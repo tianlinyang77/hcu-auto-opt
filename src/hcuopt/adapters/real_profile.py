@@ -4,9 +4,14 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from hcuopt.adapters.build_cache import LocalBuildCache
 from hcuopt.adapters.execution import CommandRunner, ContainerExecutionAdapter
 from hcuopt.adapters.git_source import GitSourceManager
 from hcuopt.adapters.local_artifact_store import LocalArtifactStore
+from hcuopt.adapters.manual_candidate import (
+    CandidateSourcePackageStore,
+    ManualOverlayCandidateBuilder,
+)
 from hcuopt.adapters.noop_builder import NoopBuilder
 from hcuopt.adapters.profiles import (
     REAL_FRAMEWORK_SMOKE_PROFILE,
@@ -36,11 +41,63 @@ from hcuopt.measurement.timers import DeviceTimer, HostClock
 from hcuopt.runtime_probes import (
     DeploymentContentAddressedEvidencePublisher,
     EvidencePublisher,
+    ManualCandidateOverlayRuntime,
+    ManualOverlayRuntimeProfile,
     OverlayCapabilityProbe,
     ProfilerCapabilityProbe,
     RuntimeProbeAdapter,
     RuntimeProbeProfile,
 )
+
+
+def build_m1_source_artifact_registry(
+    target: TargetSpec,
+    output_dir: Path,
+    *,
+    trusted_source_root: Path,
+    runtime_configuration: ManualOverlayRuntimeProfile,
+    evidence_root: Path,
+    allowed_overlay_roots: tuple[str, ...],
+    runner: CommandRunner | None = None,
+) -> AdapterRegistry:
+    """Compose M1-C build and runtime boundaries from deployment-owned inputs."""
+
+    profile = runtime_configuration.profile
+    output_root = output_dir.resolve()
+    source_manager = GitSourceManager(profile)
+    artifact_store = LocalArtifactStore(output_root / "artifacts", profile)
+    source_packages = CandidateSourcePackageStore(
+        trusted_source_root,
+        profile=profile,
+        allowed_overlay_roots=allowed_overlay_roots,
+        approved_mount_targets=runtime_configuration.replacement_points,
+    )
+    candidate_builder = ManualOverlayCandidateBuilder(
+        source_manager,
+        source_packages,
+        artifact_store,
+        LocalBuildCache(output_root / "build-cache"),
+        profile=profile,
+    )
+    executor = ContainerExecutionAdapter(runner, profile=profile)
+    cleaner = ContainerResourceCleaner(target, runner, profile=profile)
+    candidate_runtime = ManualCandidateOverlayRuntime(
+        source_manager,
+        OverlayCapabilityProbe(executor, cleaner),
+        cleaner,
+        target,
+        runtime_configuration,
+        evidence_root=evidence_root,
+    )
+    return AdapterRegistry(
+        profile=profile,
+        candidate_builder=candidate_builder,
+        candidate_runtime=candidate_runtime,
+        executor=executor,
+        resource_cleaner=cleaner,
+        source_manager=source_manager,
+        artifact_store=artifact_store,
+    )
 
 
 def build_nmz36_framework_smoke_registry(

@@ -7,6 +7,7 @@ MIGRATIONS = {
     4: "0004_framework_smoke_dual_execution.sql",
     5: "0005_stage0_control_plane.sql",
     6: "0006_m1_manual_candidate_control_plane.sql",
+    7: "0007_m1_hotspot_overlay_pipeline.sql",
 }
 
 

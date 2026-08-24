@@ -282,7 +282,52 @@ class ManualBaselineView(BaselineView):
     adapter_profile: str
 
 
+class ManualHotspotIntakeCreate(ContractModel):
+    baseline_epoch_id: UUID
+    symbol: str = Field(min_length=1, max_length=1000)
+    operation_name: str = Field(min_length=1, max_length=500)
+    shape: list[int | str] = Field(min_length=1, max_length=32)
+    dtype: str = Field(min_length=1, max_length=100)
+    meta: dict[str, Any] = Field(default_factory=dict)
+    implementation_location: str = Field(min_length=1, max_length=2000)
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    call_path: list[str] = Field(min_length=1, max_length=64)
+    profiler_raw_output_uri: str = Field(min_length=1)
+    profiler_raw_output_hash: str = Field(pattern=SHA256_PATTERN)
+    share_ratio: float = Field(ge=0.0, le=1.0)
+    opportunity_score: float = Field(ge=0.0, le=1.0)
+    upstream_dedup_status: Literal["no_match", "match", "unknown"]
+    upstream_reference: str | None = Field(default=None, max_length=2000)
+    patchability: Literal["patchable", "unpatchable", "requires_native_change"]
+    selection_reason: str = Field(min_length=1, max_length=4000)
+    candidate_kind: ManualCandidateKind
+    actor: str = Field(min_length=1, max_length=200)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: Literal[False] = False
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+    @model_validator(mode="after")
+    def require_real_profiler_provenance(self) -> ManualHotspotIntakeCreate:
+        if any(
+            item.implementation_kind == "fake" for item in self.adapter_provenance
+        ):
+            raise ValueError("M1 Hotspot Intake cannot use fake Profiler provenance")
+        if self.upstream_dedup_status == "match" and not self.upstream_reference:
+            raise ValueError("an upstream match requires its reference")
+        if self.patchability != "patchable":
+            raise ValueError("M1 Candidate intake requires a patchable Python/Triton hotspot")
+        return self
+
+
+class ManualHotspotIntakeView(ManualHotspotIntakeCreate):
+    hotspot_id: UUID
+    task_id: UUID
+    intake_hash: str = Field(pattern=SHA256_PATTERN)
+    created_at: datetime
+
+
 class ManualCandidateCreate(ContractModel):
+    hotspot_id: UUID | None = None
     baseline_epoch_id: UUID
     source_hash: str = Field(pattern=SHA256_PATTERN)
     optimization_intent: str = Field(min_length=1, max_length=2000)
@@ -307,6 +352,7 @@ class ManualCandidateView(ReadModel):
     task_id: UUID
     round_id: UUID
     baseline_epoch_id: UUID
+    hotspot_id: UUID | None = None
     source_hash: str
     variant: str
     state: CandidateState
@@ -451,6 +497,7 @@ class ManualCandidateSignoffView(ReadModel):
 class ManualCandidateSummary(ContractModel):
     task: ManualCandidateTaskView
     baseline: ManualBaselineView
+    hotspots: list[ManualHotspotIntakeView] = Field(default_factory=list)
     candidate: ManualCandidateView | None
     jobs: list[dict[str, Any]]
     artifacts: list[dict[str, Any]]
