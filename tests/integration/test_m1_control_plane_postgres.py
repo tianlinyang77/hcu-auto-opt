@@ -307,6 +307,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         self.assertEqual(len(summary["jobs"]), 1)
         self.assertEqual(summary["jobs"][0]["job_type"], JobType.MANUAL_BUILD.value)
         self.assertEqual(summary["jobs"][0]["lease_scope"], "none")
+        self.assertEqual(summary["jobs"][0]["payload"]["adapter_profile"], PROFILE)
         self.assertEqual(
             summary["jobs"][0]["payload"]["stage0_report"],
             {
@@ -562,6 +563,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         performance_job = self.repository.claim_job("m1-full-gpu-worker")
         assert performance_job is not None
         self.assertEqual(performance_job["job_type"], JobType.MANUAL_PERFORMANCE.value)
+        self.assertEqual(performance_job["payload"]["adapter_profile"], PROFILE)
         measurement = MeasurementSeries(
             status="measured",
             metric_name="latency",

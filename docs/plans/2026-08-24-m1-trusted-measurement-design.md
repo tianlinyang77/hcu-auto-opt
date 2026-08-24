@@ -20,22 +20,28 @@ small process-factory protocol, so scripted fixtures can run before C is merged 
 real factory can be registered later without changing evidence contracts.
 
 The B result is one `MeasurementSeries` whose raw URI points to a canonical,
-content-hashed `m1-measurement-evidence-v1` document. The document contains:
+content-hashed `m1-kernel-performance-evidence-v1` document governed by
+ADR-0006. The document contains:
 
 - immutable Task, Candidate, Baseline Epoch, Target, image, source, workload,
   configuration, Artifact, Stage 0 report, and exclusive-lease bindings;
 - a hashed plan with ABBA acquisition order, warmups, samples, restart/process budget,
-  metric, unit, and the current Stage 0 noise/MDE/confidence authority;
+  metric, unit, the current Stage 0 noise/MDE/confidence authority, and the exact
+  Stage 0 sampling-budget descriptor/hash;
 - raw device-event and host intervals, calibration inputs, process identities,
-  acquisition order, telemetry, startup activation observations, and lifecycle records;
+  acquisition order, telemetry, startup activation observations, independently hashed
+  child-process Event/cache records, and lifecycle records;
+- fenced and healthy cleanup evidence bound to the same resource/fencing token;
 - no producer-authored performance verdict.
 
 ## Safety rules
 
-Every acquisition starts a fresh process. Candidate acquisitions must attest the exact
+Every acquisition starts a fresh process and a unique cache namespace proven empty before
+execution. Candidate acquisitions must attest the exact
 Artifact content hash and startup Overlay mode; baseline acquisitions must attest that
 no Candidate Artifact was loaded. Each process is closed in `finally`, must be reaped,
 and the exclusive HCU resource is fenced and health-checked even when collection fails.
+The success evidence is written only after cleanup, so its content hash covers cleanup.
 
 The harness reads and hashes the Formal Stage 0 machine report itself below a configured
 trusted evidence root. Its verification section must match the Task's Stage0Run,

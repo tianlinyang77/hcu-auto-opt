@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
@@ -19,10 +20,13 @@ from hcuopt.measurement.evidence import write_evidence
 from hcuopt.measurement.m1_harness import M1TrustedMeasurementHarness
 from hcuopt.measurement.m1_models import (
     M1ActivationEvidence,
+    M1DeviceEventRecord,
     M1MeasurementEvidence,
     M1MeasurementPlan,
+    M1SampleBudget,
     M1Stage0Authority,
     M1Stage0ReportReference,
+    m1_sample_budget_hash,
 )
 from hcuopt.measurement.models import ProcessIdentity
 from hcuopt.targets import load_target, target_fingerprint
@@ -46,6 +50,11 @@ def _path_from_uri(uri: str) -> Path:
     if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
         path = path[1:]
     return Path(path)
+
+
+def _proc_stat(process_id: int, start_token: str, *, state: str = "S") -> str:
+    start_ticks = start_token.rsplit(":", 1)[-1]
+    return f"{process_id} (fixture) {state} " + " ".join(["1"] * 18 + [start_ticks])
 
 
 class FixtureClock:
@@ -112,7 +121,7 @@ class FixtureLifecycle:
             "restart_ordinal": restart_ordinal,
             "observer_process_id": 1,
             "process_id": identity.pid,
-            "proc_stat_line": f"{identity.pid} (fixture) S 1 1 1 0",
+            "proc_stat_line": _proc_stat(identity.pid, identity.start_token),
             "captured_monotonic_ns": captured_monotonic_ns,
         }
 
@@ -123,7 +132,7 @@ class FixtureLifecycle:
             "restart_ordinal": restart_ordinal,
             "observer_process_id": 1,
             "process_id": identity.pid,
-            "proc_stat_line": f"{identity.pid} (fixture) Z 1 1 1 0",
+            "proc_stat_line": _proc_stat(identity.pid, identity.start_token, state="Z"),
             "captured_monotonic_ns": captured_monotonic_ns,
             "waitpid_result_pid": identity.pid,
             "wait_status": 0,
@@ -139,13 +148,22 @@ class FixtureWorkload:
         image_digest: str,
         artifact_hash: str,
         candidate_ticks: int,
+        output_dir: Path,
+        provenance: AdapterProvenance,
     ) -> None:
         self.arm = arm
-        self.identity = ProcessIdentity(pid=20_000 + ordinal, start_token=f"start-{ordinal}")
+        self.ordinal = ordinal
+        self.identity = ProcessIdentity(
+            pid=20_000 + ordinal,
+            start_token=f"linux-proc-startticks:{30_000 + ordinal}",
+        )
         self.clock = clock
         self.image_digest = image_digest
         self.artifact_hash = artifact_hash
         self.candidate_ticks = candidate_ticks
+        self.output_dir = output_dir
+        self.provenance = provenance
+        self.sample_ordinal = 0
         self.alive = True
 
     def process_identity(self):
@@ -153,17 +171,49 @@ class FixtureWorkload:
 
     def activation_evidence(self):
         candidate = self.arm == "candidate"
+        namespace_hash = "sha256:" + f"{40_000 + self.ordinal:064x}"[-64:]
+        cache_file = write_evidence(
+            self.output_dir / "child" / f"a{self.ordinal}-cache.json",
+            {
+                "schema_version": "m1-performance-cache-v1",
+                "acquisition_ordinal": self.ordinal,
+                "arm": self.arm,
+                "process_id": self.identity.pid,
+                "process_start_token": self.identity.start_token,
+                "namespace_hash": namespace_hash,
+                "empty_before_execution": True,
+            },
+        )
+        import_file = None
+        if candidate:
+            import_file = write_evidence(
+                self.output_dir / "child" / f"a{self.ordinal}-import.json",
+                {
+                    "schema_version": "m1-overlay-import-v1",
+                    "acquisition_ordinal": self.ordinal,
+                    "process_id": self.identity.pid,
+                    "process_start_token": self.identity.start_token,
+                    "image_digest": self.image_digest,
+                    "artifact_content_hash": self.artifact_hash,
+                    "activation_mode": "startup_overlay",
+                },
+            )
         return {
             "arm": self.arm,
             "activation_mode": "startup_overlay" if candidate else "baseline",
             "image_digest": self.image_digest,
             "loaded_artifact_hash": self.artifact_hash if candidate else None,
             "import_attestation": (
-                {"uri": "file:///fixture/import.json", "sha256": "sha256:" + "8" * 64}
+                {"uri": import_file.uri, "sha256": import_file.sha256}
                 if candidate
                 else None
             ),
-            "cache_namespace_hash": "sha256:" + f"{20_000 + int(self.identity.pid):064x}"[-64:],
+            "cache_namespace_hash": namespace_hash,
+            "cache_namespace_evidence": {
+                "uri": cache_file.uri,
+                "sha256": cache_file.sha256,
+            },
+            "cache_empty_before_execution": True,
         }
 
     def synchronize(self):
@@ -177,15 +227,27 @@ class FixtureWorkload:
         finished_host = self.clock.now_ns()
         base = started_host * 10
         elapsed = self.candidate_ticks if self.arm == "candidate" else 100
-        return {
-            "process_id": self.identity.pid,
-            "process_start_token": self.identity.start_token,
-            "batch_iterations": iterations,
-            "started_monotonic_ns": started_host,
-            "finished_monotonic_ns": finished_host,
-            "started_device_ticks": base,
-            "finished_device_ticks": base + elapsed,
-        }
+        record = M1DeviceEventRecord(
+            process_id=self.identity.pid,
+            process_start_token=self.identity.start_token,
+            batch_iterations=iterations,
+            started_monotonic_ns=started_host,
+            finished_monotonic_ns=finished_host,
+            started_device_ticks=base,
+            finished_device_ticks=base + elapsed,
+            arm=self.arm,
+            acquisition_ordinal=self.ordinal,
+            sample_ordinal=self.sample_ordinal,
+            timer_provenance=self.provenance.model_dump(mode="python"),
+        )
+        event_file = write_evidence(
+            self.output_dir
+            / "child"
+            / f"a{self.ordinal}-s{self.sample_ordinal}-event.json",
+            record,
+        )
+        self.sample_ordinal += 1
+        return {"uri": event_file.uri, "sha256": event_file.sha256}
 
     def close(self):
         self.alive = False
@@ -195,6 +257,12 @@ class FixtureWorkload:
 
 
 def _authority(reference: M1Stage0ReportReference) -> M1Stage0Authority:
+    sample_budget = M1SampleBudget(
+        acquisition_order=("baseline", "candidate", "candidate", "baseline"),
+        warmup_count=1,
+        samples_per_acquisition=2,
+        batch_iterations=10,
+    )
     return M1Stage0Authority(
         report=reference,
         metric_name="kernel_elapsed",
@@ -208,6 +276,8 @@ def _authority(reference: M1Stage0ReportReference) -> M1Stage0Authority:
         bootstrap_resamples=10_000,
         bootstrap_method="percentile",
         bootstrap_seed_source="input_evidence_sha256",
+        sample_budget=sample_budget,
+        sample_budget_hash=m1_sample_budget_hash(sample_budget),
     )
 
 
@@ -245,9 +315,22 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
         content_hash="sha256:" + "6" * 64,
         source_snapshot_id=uuid4(),
     )
+    provenance = AdapterProvenance(
+        profile="m1-real-fixture",
+        capability="measurement_harness",
+        adapter_name="M1TrustedMeasurementHarness",
+        adapter_version="1",
+        implementation_kind="real",
+    )
+    expected_samples = (
+        protocol.protocol.sampling.restart_count
+        * len(protocol.protocol.sampling.signal_segment_order)
+        * protocol.protocol.sampling.signal_samples_per_segment
+    )
     payload = {
         "task_id": str(uuid4()),
         "candidate_id": str(artifact.candidate_id),
+        "adapter_profile": provenance.profile,
         "round_id": str(uuid4()),
         "baseline_epoch_id": str(uuid4()),
         "stage0_run_id": str(stage0_run_id),
@@ -267,7 +350,7 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
             "protocol_version": protocol.protocol.protocol_version,
             "protocol_hash": protocol.protocol_hash,
         },
-        "budget": {"max_samples": 8},
+        "budget": {"max_samples": expected_samples, "max_wall_seconds": 60},
         "_job_context": {
             "lease_id": str(uuid4()),
             "lease_scope": "exclusive",
@@ -277,7 +360,7 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
     }
     clock = FixtureClock()
 
-    def factory(arm, ordinal, _payload, _output_dir):
+    def factory(arm, ordinal, _payload, output_dir):
         return FixtureWorkload(
             arm,
             ordinal,
@@ -285,24 +368,12 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
             target.inference_image.registry_digest,
             artifact.content_hash,
             candidate_ticks,
-        )
-
-    def plan_factory(_payload, authority):
-        return M1MeasurementPlan(
-            warmup_count=1,
-            samples_per_acquisition=2,
-            batch_iterations=10,
-            stage0_authority=authority,
+            output_dir,
+            provenance,
         )
 
     harness = M1TrustedMeasurementHarness(
-        provenance=AdapterProvenance(
-            profile="m1-real-fixture",
-            capability="measurement_harness",
-            adapter_name="M1TrustedMeasurementHarness",
-            adapter_version="1",
-            implementation_kind="real",
-        ),
+        provenance=provenance,
         evidence_root=tmp_path,
         evidence_reader=PortableReader(tmp_path),
         workload_factory=factory,
@@ -311,7 +382,6 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
         lifecycle_recorder=FixtureLifecycle(),
         cleaner=FixtureCleaner(),
         clock=clock,
-        plan_factory=plan_factory,
     )
     return harness, payload
 
@@ -324,18 +394,24 @@ def test_m1_harness_preserves_noop_and_known_signal_as_raw_evidence(
     result = harness.run_manual_performance(payload, tmp_path)
 
     assert result.measurement.status == "measured"
-    assert result.measurement.sample_count == 8
+    assert result.measurement.sample_count == 400
     assert result.measurement.summary["verdict_owner"] == "candidate_adjudicator"
     assert "verdict" not in result.measurement.summary
     evidence_path = _path_from_uri(result.measurement.raw_samples_uri)
     evidence = M1MeasurementEvidence.model_validate_json(evidence_path.read_bytes())
-    assert [item.arm for item in evidence.acquisitions] == [
+    assert evidence.schema_version == "m1-kernel-performance-evidence-v1"
+    assert evidence.plan.sample_budget == evidence.plan.stage0_authority.sample_budget
+    assert evidence.binding.adapter_profile == "m1-real-fixture"
+    assert [item.arm for item in evidence.acquisitions[:4]] == [
         "baseline",
         "candidate",
         "candidate",
         "baseline",
     ]
-    assert len({item.process_id for item in evidence.acquisitions}) == 4
+    assert len({item.process_id for item in evidence.acquisitions}) == 40
+    assert len({item.activation.cache_namespace_hash for item in evidence.acquisitions}) == 40
+    assert evidence.cleanup_evidence.fence["resource_id"] == "hcu-7"
+    assert evidence.cleanup_evidence.fence["fencing_token"] == 7
     candidate_deltas = [
         sample.finished_device_ticks - sample.started_device_ticks
         for item in evidence.acquisitions
@@ -343,6 +419,101 @@ def test_m1_harness_preserves_noop_and_known_signal_as_raw_evidence(
         for sample in item.samples
     ]
     assert set(candidate_deltas) == {candidate_ticks}
+
+
+def test_m1_evidence_contract_rejects_cache_event_and_cleanup_rebinding(
+    tmp_path: Path,
+) -> None:
+    harness, payload = _fixture(tmp_path)
+    result = harness.run_manual_performance(payload, tmp_path)
+    evidence_path = _path_from_uri(result.measurement.raw_samples_uri)
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+    reused_cache = deepcopy(evidence)
+    reused_cache["acquisitions"][1]["activation"]["cache_namespace_hash"] = reused_cache[
+        "acquisitions"
+    ][0]["activation"]["cache_namespace_hash"]
+    with pytest.raises(ValidationError, match="fresh cache namespace"):
+        M1MeasurementEvidence.model_validate_json(json.dumps(reused_cache))
+
+    reused_event = deepcopy(evidence)
+    reused_event["acquisitions"][1]["samples"][0]["device_event_record"] = reused_event[
+        "acquisitions"
+    ][0]["samples"][0]["device_event_record"]
+    with pytest.raises(ValidationError, match="raw device Event"):
+        M1MeasurementEvidence.model_validate_json(json.dumps(reused_event))
+
+    detached_cleanup = deepcopy(evidence)
+    detached_cleanup["cleanup_evidence"]["fence"].update(
+        {"resource_id": "hcu-999", "fencing_token": 999}
+    )
+    detached_cleanup["cleanup_evidence"]["health"]["resource_id"] = "hcu-999"
+    with pytest.raises(ValidationError, match="another lease resource"):
+        M1MeasurementEvidence.model_validate_json(json.dumps(detached_cleanup))
+
+
+def test_m1_harness_rejects_nonzero_process_exit_and_hashes_cleanup_in_failure(
+    tmp_path: Path,
+) -> None:
+    harness, payload = _fixture(tmp_path)
+    lifecycle = harness.lifecycle_recorder
+
+    class NonzeroExitLifecycle:
+        def record_started(self, *args, **kwargs):
+            return lifecycle.record_started(*args, **kwargs)
+
+        def record_reaped(self, *args, **kwargs):
+            record = dict(lifecycle.record_reaped(*args, **kwargs))
+            record["wait_status"] = 9
+            return record
+
+    harness.lifecycle_recorder = NonzeroExitLifecycle()
+    with pytest.raises(Exception, match="did not exit successfully"):
+        harness.run_manual_performance(payload, tmp_path)
+
+    failure_files = list((tmp_path / "m1").glob("*/failure.json"))
+    assert len(failure_files) == 1
+    failure = json.loads(failure_files[0].read_text(encoding="utf-8"))
+    assert failure["cleanup_evidence"]["fence"]["resource_id"] == "hcu-7"
+    assert failure["cleanup_evidence"]["fence"]["fencing_token"] == 7
+    assert failure["cleanup_evidence"]["health"]["healthy"] is True
+
+
+def test_m1_harness_rejects_detached_stage0_and_task_budgets(tmp_path: Path) -> None:
+    harness, payload = _fixture(tmp_path)
+
+    def smaller_plan(_payload, authority):
+        return M1MeasurementPlan(
+            acquisition_order=("baseline", "candidate", "candidate", "baseline"),
+            warmup_count=1,
+            samples_per_acquisition=2,
+            batch_iterations=10,
+            stage0_authority=authority,
+        )
+
+    harness.plan_factory = smaller_plan
+    with pytest.raises(ValidationError, match="sampling budget"):
+        harness.run_manual_performance(payload, tmp_path)
+
+    harness, payload = _fixture(tmp_path / "wall-budget")
+    payload["budget"]["max_wall_seconds"] = 0
+    with pytest.raises(Exception, match="positive integer"):
+        harness.run_manual_performance(payload, tmp_path / "wall-budget")
+
+    harness, payload = _fixture(tmp_path / "expired-wall-budget")
+
+    class ExpiringClock:
+        def __init__(self) -> None:
+            self.value = 0
+
+        def now_ns(self) -> int:
+            self.value += 400_000_000
+            return self.value
+
+    harness.clock = ExpiringClock()
+    payload["budget"]["max_wall_seconds"] = 1
+    with pytest.raises(Exception, match="exceeded max_wall_seconds"):
+        harness.run_manual_performance(payload, tmp_path / "expired-wall-budget")
 
 
 def test_m1_plan_and_activation_fail_closed() -> None:
@@ -368,6 +539,10 @@ def test_m1_plan_and_activation_fail_closed() -> None:
             image_digest="sha256:" + "4" * 64,
             loaded_artifact_hash="sha256:" + "5" * 64,
             cache_namespace_hash="sha256:" + "6" * 64,
+            cache_namespace_evidence={
+                "uri": "file:///cache.json",
+                "sha256": "sha256:" + "7" * 64,
+            },
         )
 
 

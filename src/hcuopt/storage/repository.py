@@ -2354,6 +2354,7 @@ class PostgresRepository:
 
             metadata = {
                 "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
+                "adapter_profile": task["adapter_profile"],
                 "stage0_run_id": str(task["stage0_run_id"]),
                 "stage0_protocol_hash": baseline["stage0_protocol_hash"],
                 "stage0_report": stage0_report,
@@ -2441,6 +2442,7 @@ class PostgresRepository:
             payload = {
                 "task_id": str(task_id),
                 "candidate_id": str(candidate_id),
+                "adapter_profile": task["adapter_profile"],
                 "round_id": str(round_id),
                 "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
                 "baseline_source": baseline_source.model_dump(mode="json"),

@@ -33,11 +33,13 @@ Stage0Run、TargetSnapshot、Target、Workload 和注册协议全部一致时，
 
 测量按 `Baseline-Candidate-Candidate-Baseline` 分组执行。每个 acquisition 都必须使用新的
 外部进程，并记录进程身份、启动/回收原始记录、设备 Event、host interval、warmup、样本
-顺序、镜像、缓存 namespace、Overlay import attestation、运行前后遥测和 finally 清理证据。
+顺序、镜像、缓存 namespace、Overlay import attestation 和运行前后遥测。采集结束后再执行
+Fence/Health；只有资源和 fencing token 与本次 Lease 一致时，才把清理结果写进最终证据。
 Candidate 必须证明加载的是 Job 绑定的 Artifact Hash；Baseline 必须证明未加载 Candidate。
 
-B 最终只返回一个指向 `m1-measurement-evidence-v1` 原始文件的 `MeasurementSeries`。文件和
-计划都有内容 Hash，且模型明确禁止 producer verdict。`faster/slower/inconclusive/invalid`
+B 最终只返回一个指向 `m1-kernel-performance-evidence-v1` 原始文件的 `MeasurementSeries`。
+主文件 Hash 同时覆盖计划、样本和清理结果，且模型明确禁止 producer verdict。
+`faster/slower/inconclusive/invalid`
 只能由 D 重新读取原始样本后给出。
 
 ## 不可变绑定
@@ -176,7 +178,8 @@ pytest tests/unit/test_m1_measurement.py tests/unit/test_m1_control_plane.py -q
 ```
 
 nmz36 Target Lock 测试还需要 C 提供真实的 `M1WorkloadFactory`：它负责在锁定镜像中分别
-启动干净 Baseline 和只读 startup Overlay Candidate，并返回 Artifact import attestation。
+启动干净 Baseline 和只读 startup Overlay Candidate，并返回 Artifact import attestation、
+哈希化缓存证明和实现 B Event Record 协议的进程入口。
 B 不接受 Job payload 传入命令、mount 或任意 Python 入口。
 
 本地测试能验收 A 控制面和 B 证据生产逻辑；只有 C/D Real Adapter 接齐后，才运行 nmz36

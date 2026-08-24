@@ -23,8 +23,10 @@ factory injectable until M1-C freezes its Overlay launch contract.
 - Test: `tests/unit/test_m1_measurement.py`
 
 Define strict immutable bindings, Stage 0 authority, plan, acquisition, activation,
-sample, and evidence models. Enforce ABBA balance, unique process identities, Candidate
-Artifact attestation, ordered samples, and absence of a producer verdict.
+sample, and evidence models. Enforce ABBA balance, Stage 0 sampling-budget equality,
+unique process/cache identities, Candidate Artifact attestation, ordered samples,
+lease-bound cleanup, and absence of a producer verdict. Record the shared decision in
+ADR-0006 so D imports this Contract instead of defining a second schema.
 
 ### Task 2: Load and bind Formal Stage 0 authority
 
@@ -43,8 +45,10 @@ bindings and derive the current MDE/noise/confidence authority and a canonical p
 - Test: `tests/unit/test_m1_measurement.py`
 
 Collect ABBA Baseline/Candidate acquisitions with a fresh external process per arm,
-device-event timing, warmups, telemetry, lifecycle records, lease checks, content-hashed
-raw evidence, and finally cleanup. Return `ManualPerformanceEvidenceResult` only.
+hashed child-process device-event records, warmups, telemetry, lifecycle records, lease
+checks, continuous wall-clock budget checks, and finally cleanup. Write the success
+evidence only after cleanup so the raw hash covers it. Return
+`ManualPerformanceEvidenceResult` only.
 
 ### Task 4: Connect the durable M1 Job
 
