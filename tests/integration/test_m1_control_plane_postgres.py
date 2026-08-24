@@ -138,6 +138,10 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             "measurement": "pass",
             "profiler": "degraded",
             "hot_patch": "overlay_only",
+            "timer_resolution_ns": 100.0,
+            "noise_sigma_ns": 200.0,
+            "noise_cv": 0.01,
+            "mde_ratio": 0.03,
             "synthetic": False,
         }
         report = {
@@ -146,6 +150,10 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             "automatic_release_allowed": False,
             "evidence_authority": "formal",
             "protocol_version": "s0-g0-v2",
+            "protocol_hash": "sha256:" + "c" * 64,
+            "input_digest": "sha256:" + "d" * 64,
+            "machine_report_uri": "file:///m1/stage0-report.json",
+            "machine_report_hash": "sha256:" + "a" * 64,
         }
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -299,6 +307,16 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         self.assertEqual(len(summary["jobs"]), 1)
         self.assertEqual(summary["jobs"][0]["job_type"], JobType.MANUAL_BUILD.value)
         self.assertEqual(summary["jobs"][0]["lease_scope"], "none")
+        self.assertEqual(
+            summary["jobs"][0]["payload"]["stage0_report"],
+            {
+                "uri": "file:///m1/stage0-report.json",
+                "sha256": "sha256:" + "a" * 64,
+                "input_digest": "sha256:" + "d" * 64,
+                "protocol_version": "s0-g0-v2",
+                "protocol_hash": "sha256:" + "c" * 64,
+            },
+        )
 
         with self.assertRaises(Conflict):
             self.repository.create_manual_candidate(
