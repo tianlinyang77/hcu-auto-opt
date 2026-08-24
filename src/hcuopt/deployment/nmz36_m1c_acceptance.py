@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--candidate-id", required=True, type=UUID)
     parser.add_argument("--hotspot-id", required=True, type=UUID)
+    parser.add_argument("--hotspot-intake-hash", required=True)
     parser.add_argument("--lease-id", required=True, type=UUID)
     parser.add_argument("--resource-id", default="hcu-7")
     parser.add_argument("--fencing-token", required=True, type=int)
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         profiler_evidence_hash=args.profiler_evidence_hash,
         reviewed_by=args.reviewed_by,
     )
+    hotspot_intake_hash = args.hotspot_intake_hash
     artifact_store = LocalArtifactStore(output_dir / "artifacts", PROFILE)
     packages = CandidateSourcePackageStore(
         args.trusted_source_root,
@@ -126,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
             "candidate_source_hash": candidate_hash,
             "replacement_point": args.logical_replacement_point,
             "candidate_kind": "fixture",
+            "hotspot_intake_hash": hotspot_intake_hash,
+            "hotspot": {
+                "profiler_raw_output_uri": args.profiler_evidence_uri,
+                "profiler_raw_output_hash": args.profiler_evidence_hash,
+            },
         },
         output_dir,
     )
@@ -174,13 +181,12 @@ def main(argv: list[str] | None = None) -> int:
         {
             "candidate_id": str(args.candidate_id),
             "hotspot_id": str(args.hotspot_id),
-            "hotspot_intake_hash": _sha256(
-                args.profiler_evidence_hash.encode("utf-8")
-            ),
+            "hotspot_intake_hash": hotspot_intake_hash,
             "baseline_source": baseline.model_dump(mode="json"),
             "candidate_source": build.source.model_dump(mode="json"),
             "artifact": build.artifact.model_dump(mode="json"),
             "replacement_point": args.logical_replacement_point,
+            "candidate_kind": "fixture",
             "target": target.model_dump(mode="json"),
             "target_fingerprint": target_fingerprint(target),
             "budget": {"max_wall_seconds": 1800},

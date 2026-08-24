@@ -40,7 +40,8 @@ POST /v1/manual-candidate/tasks/<task-id>/hotspots
 Candidate Source Hash、替换点、候选分类、Profiler 证据和审核人。每个替换文件还必须有
 独立 SHA256。当前启动时 Overlay 只接受一个最小替换文件；Worker 只接受部署配置中允许的
 SGLang Python/Triton 路径和容器内挂载目标，且只替换 Baseline 中已经存在的普通
-`.py`/`.pyi` 文件。
+`.py`/`.pyi` 文件。Worker 还会把清单中的 Profiler URI/Hash 与 durable Hotspot Intake
+逐项比较；只写了相同 Hotspot ID 但换了原始证据的源码包会失败关闭。
 
 ## `manual_build` 执行过程
 
@@ -51,7 +52,8 @@ SGLang Python/Triton 路径和容器内挂载目标，且只替换 Baseline 中�
   → 只写入清单列出的替换文件
   → 校验修改路径和 Candidate Source Hash
   → 生成确定性的干净 Candidate Commit/SourceSnapshot
-  → 将最小替换文件生成 python_overlay Artifact（不是整仓源码包）
+  → 从已冻结的 Candidate Worktree 读取最小替换文件并生成 python_overlay Artifact
+    （不再次信任外部源码包，也不是整仓源码包）
   → 按 Artifact SHA256 原子发布为只读文件
   → 写入不可变 Build Cache 索引
   → 删除 Candidate Worktree，并复查 Baseline 未改变

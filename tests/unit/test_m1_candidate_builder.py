@@ -24,6 +24,9 @@ from hcuopt.workers.handlers import JobHandlers
 
 PROFILE = "m1-candidate-builder-test-v1"
 REPLACEMENT_PATH = "python/sglang/triton_kernel.py"
+PROFILER_URI = "file:///trusted/profiler.json"
+PROFILER_HASH = "sha256:" + "a" * 64
+HOTSPOT_INTAKE_HASH = "sha256:" + "d" * 64
 
 
 def _sha256(value: bytes) -> str:
@@ -82,8 +85,8 @@ def _publish_source_package(
         overlay_mount_target="/opt/sglang/python/sglang/triton_kernel.py",
         candidate_kind="fixture",
         files=[{"path": replacement_path, "content_hash": _sha256(replacement)}],
-        profiler_evidence_uri="file:///trusted/profiler.json",
-        profiler_evidence_hash="sha256:" + "a" * 64,
+        profiler_evidence_uri=PROFILER_URI,
+        profiler_evidence_hash=PROFILER_HASH,
         reviewed_by="reviewer",
         reviewed_at=datetime.now(timezone.utc),
     )
@@ -150,6 +153,11 @@ def test_manual_build_creates_reproducible_read_only_overlay_without_dirtying_ba
         "candidate_source_hash": candidate_hash,
         "replacement_point": "sglang.triton_kernel",
         "candidate_kind": "fixture",
+        "hotspot_intake_hash": HOTSPOT_INTAKE_HASH,
+        "hotspot": {
+            "profiler_raw_output_uri": PROFILER_URI,
+            "profiler_raw_output_hash": PROFILER_HASH,
+        },
     }
 
     first = handlers.handle_manual_build(payload)
@@ -213,4 +221,107 @@ def test_manual_build_rejects_package_outside_approved_overlay_roots(
             candidate_source_hash=candidate_hash,
             replacement_point="sglang.triton_kernel",
             candidate_kind="fixture",  # type: ignore[arg-type]
+            profiler_evidence_uri=PROFILER_URI,
+            profiler_evidence_hash=PROFILER_HASH,
         )
+
+
+def test_manual_build_rejects_profiler_evidence_that_differs_from_hotspot_intake(
+    tmp_path: Path,
+) -> None:
+    repository, commit = _repository_with_overlay_point(tmp_path / "origin")
+    output_dir = tmp_path / "run"
+    manager = GitSourceManager(PROFILE)
+    baseline = manager.prepare_baseline(
+        target_for(repository, tmp_path / "baseline", commit), output_dir
+    )
+    candidate_id = uuid4()
+    hotspot_id = uuid4()
+    replacement = b"MARKER = 'candidate'\n"
+    candidate_hash = _candidate_hash(
+        manager, baseline, candidate_id, output_dir, replacement
+    )
+    _publish_source_package(
+        tmp_path / "trusted-input",
+        candidate_id=candidate_id,
+        hotspot_id=hotspot_id,
+        baseline_hash=baseline.source_hash,
+        candidate_hash=candidate_hash,
+        replacement=replacement,
+    )
+    builder = _builder(manager, tmp_path / "trusted-input", output_dir)
+
+    with pytest.raises(SourceArtifactError, match="does not match the durable M1 Job"):
+        builder.build_candidate(
+            {
+                "candidate_id": str(candidate_id),
+                "hotspot_id": str(hotspot_id),
+                "baseline_source": baseline.model_dump(mode="json"),
+                "candidate_source_hash": candidate_hash,
+                "replacement_point": "sglang.triton_kernel",
+                "candidate_kind": "fixture",
+                "hotspot_intake_hash": HOTSPOT_INTAKE_HASH,
+                "hotspot": {
+                    "profiler_raw_output_uri": PROFILER_URI,
+                    "profiler_raw_output_hash": "sha256:" + "b" * 64,
+                },
+            },
+            output_dir,
+        )
+    assert not (output_dir / "worktrees").exists()
+
+
+def test_manual_build_reads_artifact_from_frozen_candidate_not_mutated_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, commit = _repository_with_overlay_point(tmp_path / "origin")
+    output_dir = tmp_path / "run"
+    trusted_root = tmp_path / "trusted-input"
+    manager = GitSourceManager(PROFILE)
+    baseline = manager.prepare_baseline(
+        target_for(repository, tmp_path / "baseline", commit), output_dir
+    )
+    candidate_id = uuid4()
+    hotspot_id = uuid4()
+    replacement = b"MARKER = 'candidate'\n"
+    candidate_hash = _candidate_hash(
+        manager, baseline, candidate_id, output_dir, replacement
+    )
+    _publish_source_package(
+        trusted_root,
+        candidate_id=candidate_id,
+        hotspot_id=hotspot_id,
+        baseline_hash=baseline.source_hash,
+        candidate_hash=candidate_hash,
+        replacement=replacement,
+    )
+    builder = _builder(manager, trusted_root, output_dir)
+    original_apply = builder.source_packages.apply
+
+    def mutate_after_apply(package, candidate_root):  # type: ignore[no-untyped-def]
+        changed = original_apply(package, candidate_root)
+        (package.files_root / REPLACEMENT_PATH).write_bytes(b"MUTATED AFTER SNAPSHOT APPLY\n")
+        return changed
+
+    monkeypatch.setattr(builder.source_packages, "apply", mutate_after_apply)
+    result = builder.build_candidate(
+        {
+            "candidate_id": str(candidate_id),
+            "hotspot_id": str(hotspot_id),
+            "baseline_source": baseline.model_dump(mode="json"),
+            "candidate_source_hash": candidate_hash,
+            "replacement_point": "sglang.triton_kernel",
+            "candidate_kind": "fixture",
+            "hotspot_intake_hash": HOTSPOT_INTAKE_HASH,
+            "hotspot": {
+                "profiler_raw_output_uri": PROFILER_URI,
+                "profiler_raw_output_hash": PROFILER_HASH,
+            },
+        },
+        output_dir,
+    )
+
+    artifact = file_uri_to_path(result.artifact.uri)
+    assert artifact.read_bytes() == replacement
+    assert result.artifact.content_hash == _sha256(replacement)

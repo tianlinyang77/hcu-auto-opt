@@ -68,6 +68,8 @@ class CandidateSourcePackageStore:
         candidate_source_hash: str,
         replacement_point: str,
         candidate_kind: ManualCandidateKind,
+        profiler_evidence_uri: str,
+        profiler_evidence_hash: str,
     ) -> LoadedCandidateSourcePackage:
         package_dir = self._package_dir(candidate_source_hash)
         if package_dir.is_symlink() or not package_dir.is_dir():
@@ -88,6 +90,8 @@ class CandidateSourcePackageStore:
             candidate_source_hash,
             replacement_point,
             candidate_kind,
+            profiler_evidence_uri,
+            profiler_evidence_hash,
         )
         actual = (
             manifest.candidate_id,
@@ -96,6 +100,8 @@ class CandidateSourcePackageStore:
             manifest.candidate_source_hash,
             manifest.replacement_point,
             manifest.candidate_kind,
+            manifest.profiler_evidence_uri,
+            manifest.profiler_evidence_hash,
         )
         if actual != expected:
             raise SourceArtifactError(
@@ -248,6 +254,22 @@ class ManualOverlayCandidateBuilder:
         candidate_source_hash = str(payload["candidate_source_hash"])
         replacement_point = str(payload["replacement_point"])
         candidate_kind = ManualCandidateKind(str(payload["candidate_kind"]))
+        hotspot = payload.get("hotspot")
+        if not isinstance(hotspot, Mapping):
+            raise SourceArtifactError(
+                "M1 build requires the durable Hotspot Intake evidence"
+            )
+        profiler_evidence_uri = hotspot.get("profiler_raw_output_uri")
+        profiler_evidence_hash = hotspot.get("profiler_raw_output_hash")
+        hotspot_intake_hash = payload.get("hotspot_intake_hash")
+        if not isinstance(profiler_evidence_uri, str) or not profiler_evidence_uri:
+            raise SourceArtifactError("M1 Hotspot Intake has no Profiler evidence URI")
+        if not isinstance(profiler_evidence_hash, str):
+            raise SourceArtifactError("M1 Hotspot Intake has no Profiler evidence Hash")
+        self._require_sha256(profiler_evidence_hash, "Profiler evidence Hash")
+        if not isinstance(hotspot_intake_hash, str):
+            raise SourceArtifactError("M1 build has no Hotspot Intake Hash")
+        self._require_sha256(hotspot_intake_hash, "Hotspot Intake Hash")
         package = self.source_packages.load(
             candidate_id=candidate_id,
             hotspot_id=hotspot_id,
@@ -255,6 +277,8 @@ class ManualOverlayCandidateBuilder:
             candidate_source_hash=candidate_source_hash,
             replacement_point=replacement_point,
             candidate_kind=candidate_kind,
+            profiler_evidence_uri=profiler_evidence_uri,
+            profiler_evidence_hash=profiler_evidence_hash,
         )
 
         candidate = self.source_manager.create_candidate(
@@ -280,48 +304,70 @@ class ManualOverlayCandidateBuilder:
                     )
                 }
             )
-            recipe = self._recipe(package)
+            recipe = self._recipe(package, hotspot_intake_hash)
             cache_key = self.cache_key(source, recipe)
             artifact = self.build_cache.lookup(cache_key)
             if artifact is None:
                 built_path = self._build_overlay_artifact(
-                    package, candidate_id, output_dir
+                    file_uri_to_path(source.worktree_uri),
+                    package.manifest.files[0].path,
+                    package.manifest.files[0].content_hash,
+                    candidate_id,
+                    output_dir,
                 )
-                artifact = ArtifactManifest(
-                    artifact_id=uuid5(
-                        NAMESPACE_URL,
-                        f"hcuopt:m1-artifact:{candidate_id}:{self._sha256(built_path)}",
-                    ),
-                    candidate_id=candidate_id,
-                    kind="python_overlay",
-                    uri=built_path.as_uri(),
-                    content_hash=self._sha256(built_path),
-                    source_snapshot_id=source.snapshot_id,
-                    build_recipe=recipe,
-                    metadata={
-                        "source_hash": source.source_hash,
-                        "hotspot_id": str(hotspot_id),
-                        "replacement_point": replacement_point,
-                        "overlay_mount_target": package.manifest.overlay_mount_target,
-                        "candidate_kind": candidate_kind.value,
-                        "package_manifest_hash": package.manifest_hash,
-                        "overlay_files": [
-                            item.model_dump(mode="json") for item in package.manifest.files
-                        ],
-                        "read_only": True,
-                        "build_cache_key": cache_key,
-                        "adapter_provenance": [
-                            item.model_dump(mode="json")
-                            for item in self._provenance_chain()
-                            if item.capability != "artifact_store"
-                        ],
-                    },
-                    synthetic=False,
-                )
-                artifact = self.artifact_store.publish(artifact, built_path)
-                built_path.unlink(missing_ok=True)
+                try:
+                    artifact = ArtifactManifest(
+                        artifact_id=uuid5(
+                            NAMESPACE_URL,
+                            f"hcuopt:m1-artifact:{candidate_id}:{self._sha256(built_path)}",
+                        ),
+                        candidate_id=candidate_id,
+                        kind="python_overlay",
+                        uri=built_path.as_uri(),
+                        content_hash=self._sha256(built_path),
+                        source_snapshot_id=source.snapshot_id,
+                        build_recipe=recipe,
+                        metadata={
+                            "source_hash": source.source_hash,
+                            "hotspot_id": str(hotspot_id),
+                            "hotspot_intake_hash": hotspot_intake_hash,
+                            "profiler_evidence_uri": profiler_evidence_uri,
+                            "profiler_evidence_hash": profiler_evidence_hash,
+                            "replacement_point": replacement_point,
+                            "overlay_mount_target": package.manifest.overlay_mount_target,
+                            "candidate_kind": candidate_kind.value,
+                            "package_manifest_hash": package.manifest_hash,
+                            "overlay_files": [
+                                item.model_dump(mode="json")
+                                for item in package.manifest.files
+                            ],
+                            "read_only": True,
+                            "build_cache_key": cache_key,
+                            "adapter_provenance": [
+                                item.model_dump(mode="json")
+                                for item in self._provenance_chain()
+                                if item.capability != "artifact_store"
+                            ],
+                        },
+                        synthetic=False,
+                    )
+                    artifact = self.artifact_store.publish(artifact, built_path)
+                finally:
+                    built_path.unlink(missing_ok=True)
                 self.build_cache.record(cache_key, artifact)
-            self._validate_cached_artifact(artifact, candidate_id, source, cache_key)
+            self._validate_cached_artifact(
+                artifact,
+                candidate_id,
+                hotspot_id,
+                source,
+                package,
+                replacement_point,
+                candidate_kind,
+                hotspot_intake_hash,
+                profiler_evidence_uri,
+                profiler_evidence_hash,
+                cache_key,
+            )
             provenance = self._provenance_chain()
             return ManualCandidateBuildResult(
                 candidate_id=candidate_id,
@@ -344,27 +390,37 @@ class ManualOverlayCandidateBuilder:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
-    def _recipe(self, package: LoadedCandidateSourcePackage) -> dict[str, Any]:
+    def _recipe(
+        self,
+        package: LoadedCandidateSourcePackage,
+        hotspot_intake_hash: str,
+    ) -> dict[str, Any]:
         return {
             "name": M1_OVERLAY_RECIPE_VERSION,
             "package_manifest_hash": package.manifest_hash,
+            "hotspot_intake_hash": hotspot_intake_hash,
             "artifact_format": "raw-python-source",
             "files": [item.path for item in package.manifest.files],
         }
 
     @staticmethod
     def _build_overlay_artifact(
-        package: LoadedCandidateSourcePackage,
+        candidate_root: Path,
+        relative_path: str,
+        expected_content_hash: str,
         candidate_id: UUID,
         output_dir: Path,
     ) -> Path:
         build_root = output_dir.resolve() / "builds"
         build_root.mkdir(parents=True, exist_ok=True)
         destination = build_root / f"{candidate_id}.overlay.py"
-        source_item = package.manifest.files[0]
-        source = CandidateSourcePackageStore._resolve_package_file(
-            package.files_root, source_item.path
-        )
+        source = (candidate_root.resolve(strict=True) / relative_path).resolve(strict=True)
+        if candidate_root.resolve(strict=True) not in source.parents or not source.is_file():
+            raise SourceArtifactError("finalized Candidate Overlay source escapes its Worktree")
+        if ManualOverlayCandidateBuilder._sha256(source) != expected_content_hash:
+            raise SourceArtifactError(
+                "finalized Candidate Overlay differs from the reviewed replacement"
+            )
         temporary_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -387,20 +443,68 @@ class ManualOverlayCandidateBuilder:
         self,
         artifact: ArtifactManifest,
         candidate_id: UUID,
+        hotspot_id: UUID,
         source: SourceSnapshot,
+        package: LoadedCandidateSourcePackage,
+        replacement_point: str,
+        candidate_kind: ManualCandidateKind,
+        hotspot_intake_hash: str,
+        profiler_evidence_uri: str,
+        profiler_evidence_hash: str,
         cache_key: str,
     ) -> None:
+        expected_metadata = {
+            "source_hash": source.source_hash,
+            "hotspot_id": str(hotspot_id),
+            "hotspot_intake_hash": hotspot_intake_hash,
+            "profiler_evidence_uri": profiler_evidence_uri,
+            "profiler_evidence_hash": profiler_evidence_hash,
+            "replacement_point": replacement_point,
+            "overlay_mount_target": package.manifest.overlay_mount_target,
+            "candidate_kind": candidate_kind.value,
+            "package_manifest_hash": package.manifest_hash,
+            "overlay_files": [
+                item.model_dump(mode="json") for item in package.manifest.files
+            ],
+            "read_only": True,
+            "immutable": True,
+            "build_cache_key": cache_key,
+        }
         if (
             artifact.candidate_id != candidate_id
             or artifact.source_snapshot_id != source.snapshot_id
             or artifact.kind != "python_overlay"
             or artifact.synthetic
-            or artifact.metadata.get("build_cache_key") != cache_key
+            or any(
+                artifact.metadata.get(name) != value
+                for name, value in expected_metadata.items()
+            )
         ):
             raise ArtifactIntegrityError("cached M1 artifact has mismatched identity bindings")
-        path = file_uri_to_path(artifact.uri).resolve(strict=True)
+        raw_path = file_uri_to_path(artifact.uri)
+        if raw_path.is_symlink():
+            raise ArtifactIntegrityError("cached M1 artifact cannot be a symlink")
+        path = raw_path.resolve(strict=True)
+        digest = artifact.content_hash.removeprefix("sha256:")
+        expected_path = (
+            self.artifact_store.root / "sha256" / digest[:2] / digest[2:]
+        ).resolve(strict=True)
+        if path != expected_path or not path.is_file() or path.stat().st_mode & 0o222:
+            raise ArtifactIntegrityError(
+                "cached M1 artifact is outside the immutable content-addressed store"
+            )
         if self._sha256(path) != artifact.content_hash:
             raise ArtifactIntegrityError("cached M1 artifact content hash does not match")
+
+    @staticmethod
+    def _require_sha256(value: str, label: str) -> None:
+        digest = value.removeprefix("sha256:")
+        if (
+            not value.startswith("sha256:")
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise SourceArtifactError(f"M1 {label} is not a canonical SHA256")
 
     def _provenance_chain(self) -> list[AdapterProvenance]:
         return [

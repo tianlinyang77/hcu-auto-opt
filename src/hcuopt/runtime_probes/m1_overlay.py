@@ -138,9 +138,17 @@ class ManualCandidateOverlayRuntime:
         if (
             artifact.candidate_id != candidate_id
             or artifact.source_snapshot_id != expected_candidate.snapshot_id
+            or artifact.kind != "python_overlay"
+            or artifact.synthetic
+            or artifact.metadata.get("source_hash") != expected_candidate.source_hash
             or artifact.metadata.get("hotspot_id") != str(hotspot_id)
+            or artifact.metadata.get("hotspot_intake_hash")
+            != payload.get("hotspot_intake_hash")
             or artifact.metadata.get("replacement_point") != logical_replacement
             or artifact.metadata.get("overlay_mount_target") != mount_target
+            or artifact.metadata.get("candidate_kind") != payload.get("candidate_kind")
+            or artifact.metadata.get("read_only") is not True
+            or artifact.metadata.get("immutable") is not True
         ):
             raise ExecutionSafetyError("M1 Overlay Artifact has mismatched durable bindings")
 
@@ -278,8 +286,15 @@ class ManualCandidateOverlayRuntime:
         path = raw[0].get("path")
         if not isinstance(path, str) or not path.endswith((".py", ".pyi")):
             raise ExecutionSafetyError("M1 Artifact Overlay path is invalid")
-        if path.startswith("/") or "\\" in path or ".." in path.split("/"):
+        parts = path.split("/")
+        if (
+            path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
             raise ExecutionSafetyError("M1 Artifact Overlay path escapes the Worktree")
+        if raw[0].get("content_hash") != artifact.content_hash:
+            raise ExecutionSafetyError("M1 Artifact Overlay file Hash is inconsistent")
         return path
 
     @staticmethod

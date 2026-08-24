@@ -52,6 +52,24 @@ def _provenance(kind: str = "real") -> AdapterProvenance:
     )
 
 
+def _build_provenance(kind: str = "real") -> list[AdapterProvenance]:
+    return [
+        AdapterProvenance(
+            profile=PROFILE,
+            capability=capability,
+            adapter_name=f"Fixture{capability}",
+            adapter_version="1",
+            implementation_kind=kind,
+        )
+        for capability in (
+            "source_manager",
+            "candidate_source_intake",
+            "candidate_builder",
+            "artifact_store",
+        )
+    ]
+
+
 def test_m1_has_an_independent_single_candidate_state_chain() -> None:
     assert (
         transition_task(
@@ -155,12 +173,23 @@ def test_manual_build_contract_rejects_fake_or_unbound_artifacts() -> None:
         uri="file:///artifact.py",
         content_hash="sha256:" + "d" * 64,
         source_snapshot_id=source.snapshot_id,
+        metadata={
+            "source_hash": source.source_hash,
+            "read_only": True,
+            "immutable": True,
+            "overlay_files": [
+                {
+                    "path": "python/sglang/triton_kernel.py",
+                    "content_hash": "sha256:" + "d" * 64,
+                }
+            ],
+        },
     )
     result = ManualCandidateBuildResult(
         candidate_id=candidate_id,
         source=source,
         artifact=artifact,
-        adapter_provenance=[_provenance()],
+        adapter_provenance=_build_provenance(),
     )
     assert result.synthetic is False
     with pytest.raises(ValidationError, match="fake Adapter provenance"):
@@ -168,14 +197,14 @@ def test_manual_build_contract_rejects_fake_or_unbound_artifacts() -> None:
             candidate_id=candidate_id,
             source=source,
             artifact=artifact,
-            adapter_provenance=[_provenance("fake")],
+            adapter_provenance=_build_provenance("fake"),
         )
     with pytest.raises(ValidationError, match="exact Candidate SourceSnapshot"):
         ManualCandidateBuildResult(
             candidate_id=candidate_id,
             source=source,
             artifact=artifact.model_copy(update={"source_snapshot_id": uuid4()}),
-            adapter_provenance=[_provenance()],
+            adapter_provenance=_build_provenance(),
         )
 
 

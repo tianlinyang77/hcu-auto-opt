@@ -379,18 +379,43 @@ class ManualCandidateBuildResult(ContractModel):
 
     @model_validator(mode="after")
     def bind_candidate_artifact(self) -> ManualCandidateBuildResult:
+        required_capabilities = {
+            "source_manager",
+            "candidate_source_intake",
+            "candidate_builder",
+            "artifact_store",
+        }
         if any(
             item.implementation_kind == "fake" for item in self.adapter_provenance
         ):
             raise ValueError("M1 build cannot use fake Adapter provenance")
+        if len({item.profile for item in self.adapter_provenance}) != 1:
+            raise ValueError("M1 build Adapter provenance must use one Profile")
+        capabilities = {item.capability for item in self.adapter_provenance}
+        if not required_capabilities.issubset(capabilities):
+            raise ValueError("M1 build result omits required C Adapter provenance")
         if self.source.kind != "candidate" or not self.source.clean:
             raise ValueError("M1 build requires a clean Candidate SourceSnapshot")
         if self.artifact.candidate_id != self.candidate_id:
             raise ValueError("Artifact candidate_id does not match the M1 Candidate")
         if self.artifact.source_snapshot_id != self.source.snapshot_id:
             raise ValueError("Artifact must bind the exact Candidate SourceSnapshot")
-        if self.artifact.synthetic:
-            raise ValueError("M1 cannot persist a synthetic Candidate Artifact")
+        if self.artifact.kind != "python_overlay" or self.artifact.synthetic:
+            raise ValueError("M1 requires a real Python/Triton Overlay Artifact")
+        if (
+            self.artifact.metadata.get("source_hash") != self.source.source_hash
+            or self.artifact.metadata.get("read_only") is not True
+            or self.artifact.metadata.get("immutable") is not True
+        ):
+            raise ValueError("M1 Artifact metadata does not bind its immutable source")
+        overlay_files = self.artifact.metadata.get("overlay_files")
+        if (
+            not isinstance(overlay_files, list)
+            or len(overlay_files) != 1
+            or not isinstance(overlay_files[0], dict)
+            or overlay_files[0].get("content_hash") != self.artifact.content_hash
+        ):
+            raise ValueError("M1 Overlay Artifact content differs from its file manifest")
         return self
 
 

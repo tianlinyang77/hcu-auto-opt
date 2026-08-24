@@ -34,6 +34,9 @@ PROFILE = "m1-c-scripted-v1"
 SOURCE_PATH = "python/sglang/triton_kernel.py"
 MOUNT_TARGET = "/opt/sglang/python/sglang/triton_kernel.py"
 ACTIVATION_MARKER = "m1-scripted-candidate-v1"
+PROFILER_URI = "file:///trusted/profiler.json"
+PROFILER_HASH = "sha256:" + "a" * 64
+HOTSPOT_INTAKE_HASH = "sha256:" + "d" * 64
 
 
 def _git(repository: Path, *arguments: str) -> str:
@@ -185,8 +188,8 @@ def test_m1_c_scripted_build_activation_and_recovery_chain(tmp_path: Path) -> No
         overlay_mount_target=MOUNT_TARGET,
         candidate_kind="fixture",
         files=[{"path": SOURCE_PATH, "content_hash": _sha256(replacement)}],
-        profiler_evidence_uri="file:///trusted/profiler.json",
-        profiler_evidence_hash="sha256:" + "a" * 64,
+        profiler_evidence_uri=PROFILER_URI,
+        profiler_evidence_hash=PROFILER_HASH,
         reviewed_by="reviewer",
         reviewed_at=datetime.now(timezone.utc),
     )
@@ -215,6 +218,11 @@ def test_m1_c_scripted_build_activation_and_recovery_chain(tmp_path: Path) -> No
             "candidate_source_hash": candidate_hash,
             "replacement_point": "sglang.triton_kernel",
             "candidate_kind": "fixture",
+            "hotspot_intake_hash": HOTSPOT_INTAKE_HASH,
+            "hotspot": {
+                "profiler_raw_output_uri": PROFILER_URI,
+                "profiler_raw_output_hash": PROFILER_HASH,
+            },
         },
         output_dir,
     )
@@ -247,11 +255,12 @@ def test_m1_c_scripted_build_activation_and_recovery_chain(tmp_path: Path) -> No
         {
             "candidate_id": str(candidate_id),
             "hotspot_id": str(hotspot_id),
-            "hotspot_intake_hash": "sha256:" + "d" * 64,
+            "hotspot_intake_hash": HOTSPOT_INTAKE_HASH,
             "baseline_source": baseline.model_dump(mode="json"),
             "candidate_source": build.source.model_dump(mode="json"),
             "artifact": build.artifact.model_dump(mode="json"),
             "replacement_point": "sglang.triton_kernel",
+            "candidate_kind": "fixture",
             "target": target.model_dump(mode="json"),
             "target_fingerprint": target_fingerprint(target),
             "budget": {"max_wall_seconds": 60},
