@@ -46,6 +46,15 @@ class MeasurementHarness(Protocol):
     def run(self, plan: Mapping[str, Any], output_dir: Path) -> MeasurementSeries: ...
 
 
+@runtime_checkable
+class ManualPerformanceMeasurementHarness(Protocol):
+    provenance: AdapterProvenance
+
+    def run_manual_performance(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> Any: ...
+
+
 class Stage0ProbeAdapter(Protocol):
     provenance: AdapterProvenance
     target_fingerprint: str
