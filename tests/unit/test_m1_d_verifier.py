@@ -22,6 +22,7 @@ from hcuopt.evaluation.evidence_reader import EvidenceReadError, HashedEvidenceR
 from hcuopt.evaluation.m1_protocol import (
     M1CorrectnessCase,
     M1HotspotCorrectnessSpec,
+    M1InputExpectation,
     M1OutputSpec,
     M1ProtocolError,
     M1TensorSpec,
@@ -32,16 +33,16 @@ from hcuopt.evaluation.m1_protocol import (
 from hcuopt.evaluation.m1_reporting import (
     M1_SIGNOFF_WARNING,
     M1AdjudicationContext,
+    M1FailedCandidateAdjudicationResult,
     build_m1_adjudication_result,
     write_m1_signoff_report,
 )
 from hcuopt.evaluation.m1_verifier import (
     M1CorrectnessEvidenceReference,
     M1CorrectnessVerifier,
-    M1PerformanceInput,
-    M1RestartSamples,
+    M1PerformanceEvidenceReference,
+    M1PerformanceVerifier,
     M1VerificationContext,
-    adjudicate_performance,
 )
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence, write_evidence_bytes
 
@@ -69,6 +70,16 @@ def _provenance(capability: str) -> AdapterProvenance:
     )
 
 
+def _input_tensors(seed: int, special: str) -> list[dict[str, object]]:
+    if special == "nan":
+        values: list[object] = ["nan", 1.0]
+    elif special == "positive_inf":
+        values = ["positive_inf", 1.0]
+    else:
+        values = [float(seed), float(seed + 1)]
+    return [{"name": "x", "shape": [2], "dtype": "float32", "values": values}]
+
+
 def _hotspot(reference_source_hash: str = SHA_A) -> M1HotspotCorrectnessSpec:
     return M1HotspotCorrectnessSpec(
         hotspot_id="fixture/vector_add",
@@ -93,6 +104,16 @@ def _hotspot(reference_source_hash: str = SHA_A) -> M1HotspotCorrectnessSpec:
                 repeats=2,
             ),
         ),
+        input_expectations=tuple(
+            M1InputExpectation(
+                case_id="basic",
+                seed=seed,
+                special_value=special,
+                input_hash=_hash_bytes(canonical_json_bytes(_input_tensors(seed, special))),
+            )
+            for seed in (0, 1)
+            for special in ("ordinary", "nan", "positive_inf")
+        ),
     )
 
 
@@ -116,6 +137,23 @@ class _Suite:
         self.baseline_epoch_id = uuid4()
         self.target_snapshot_id = uuid4()
         self.stage0_run_id = uuid4()
+        self.stage0_mde = write_evidence(
+            root / "stage0-mde.json",
+            {
+                "schema_version": "m1-stage0-mde-reference-v1",
+                "stage0_run_id": str(self.stage0_run_id),
+                "target_snapshot_id": str(self.target_snapshot_id),
+                "target_fingerprint": "sha256:" + "7" * 64,
+                "workload_id": "m1-fixture-v1",
+                "workload_hash": "sha256:" + "8" * 64,
+                "stage0_protocol_hash": "sha256:" + "9" * 64,
+                "metric_name": "kernel_latency",
+                "unit": "ns",
+                "sample_budget_hash": "sha256:" + "d" * 64,
+                "mde_ratio": 0.03,
+                "verification_input_digest": "sha256:" + "e" * 64,
+            },
+        )
         self.baseline_snapshot = SourceSnapshot(
             kind="baseline",
             repository="git@example/hcuopt",
@@ -156,6 +194,8 @@ class _Suite:
             workload_hash="sha256:" + "8" * 64,
             stage0_run_id=self.stage0_run_id,
             stage0_protocol_hash="sha256:" + "9" * 64,
+            stage0_mde_evidence_uri=self.stage0_mde.uri,
+            stage0_mde_evidence_hash=self.stage0_mde.sha256,
             baseline_source_snapshot_id=self.baseline_snapshot.snapshot_id,
             baseline_source_hash=self.baseline_snapshot.source_hash,
             candidate_source_snapshot_id=self.candidate_snapshot.snapshot_id,
@@ -248,6 +288,8 @@ class _Suite:
             "candidate_source_hash",
             "artifact_id",
             "artifact_hash",
+            "stage0_mde_evidence_uri",
+            "stage0_mde_evidence_hash",
         ]:
             binding.pop(name)
         binding.update(
@@ -313,22 +355,7 @@ class _Suite:
                             "seed": seed,
                             "special_value": special,
                             "repeat_ordinal": repeat,
-                            "inputs": [
-                                {
-                                    "name": "x",
-                                    "shape": [2],
-                                    "dtype": "float32",
-                                    "values": (
-                                        ["nan", 1.0]
-                                        if special == "nan"
-                                        else (
-                                            ["positive_inf", 1.0]
-                                            if special == "positive_inf"
-                                            else [float(seed), float(seed + 1)]
-                                        )
-                                    ),
-                                }
-                            ],
+                            "inputs": _input_tensors(seed, special),
                             "outputs": [
                                 {
                                     "name": "y",
@@ -353,47 +380,148 @@ class _Suite:
 
 
 def _performance(
+    suite: _Suite,
     correctness,
     effects: list[float],
     *,
     summary=None,
     cleanup=True,
     bindings=True,
-    evidence_hash: str | None = None,
 ):
     measurement_id = uuid4()
     restarts = []
     for ordinal, effect in enumerate(effects):
+        pid = 2000 + ordinal
+        token = 7000 + ordinal
         baseline = 100.0
         candidate = baseline * (1.0 - effect)
-        restarts.append(
-            M1RestartSamples(
-                restart_ordinal=ordinal,
-                baseline_ns=(baseline, baseline),
-                candidate_ns=(candidate, candidate),
-            )
+        start = write_evidence(
+            suite.root / f"performance-{measurement_id}-{ordinal}-start.json",
+            {
+                "schema_version": "process-lifecycle-v1",
+                "event": "started",
+                "restart_ordinal": ordinal,
+                "observer_process_id": 999,
+                "process_id": pid,
+                "proc_stat_line": _proc_stat(pid, token),
+                "captured_monotonic_ns": 1000 + ordinal * 100,
+                "waitpid_result_pid": None,
+                "wait_status": None,
+            },
         )
-    evidence = M1PerformanceInput(
+        exit_record = write_evidence(
+            suite.root / f"performance-{measurement_id}-{ordinal}-exit.json",
+            {
+                "schema_version": "process-lifecycle-v1",
+                "event": "reaped",
+                "restart_ordinal": ordinal,
+                "observer_process_id": 999,
+                "process_id": pid,
+                "proc_stat_line": _proc_stat(pid, token),
+                "captured_monotonic_ns": 1050 + ordinal * 100,
+                "waitpid_result_pid": pid,
+                "wait_status": 0,
+            },
+        )
+        cache = write_evidence(
+            suite.root / f"performance-{measurement_id}-{ordinal}-cache.json",
+            {
+                "schema_version": "m1-performance-cache-v1",
+                "restart_ordinal": ordinal,
+                "namespace": f"m1-performance-{measurement_id}-{ordinal}",
+                "empty_before_execution": True,
+            },
+        )
+        restarts.append(
+            {
+                "restart_ordinal": ordinal,
+                "process_id": pid,
+                "process_start_token": str(token),
+                "start_record": {"uri": start.uri, "sha256": start.sha256},
+                "exit_record": {"uri": exit_record.uri, "sha256": exit_record.sha256},
+                "cache_namespace": {"uri": cache.uri, "sha256": cache.sha256},
+                "baseline_ns": [baseline, baseline],
+                "candidate_ns": [candidate, candidate],
+            }
+        )
+    envelope = {
+        "schema_version": "m1-kernel-performance-evidence-v1",
+        "binding": {
+            "task_id": str(suite.context.task_id),
+            "candidate_id": str(suite.context.candidate_id),
+            "baseline_epoch_id": str(suite.context.baseline_epoch_id),
+            "target_snapshot_id": str(suite.context.target_snapshot_id),
+            "target_id": suite.context.target_id,
+            "target_fingerprint": (
+                suite.context.target_fingerprint if bindings else "sha256:" + "f" * 64
+            ),
+            "workload_id": suite.context.workload_id,
+            "workload_hash": suite.context.workload_hash,
+            "stage0_run_id": str(suite.context.stage0_run_id),
+            "stage0_protocol_hash": suite.context.stage0_protocol_hash,
+            "measurement_id": str(measurement_id),
+            "metric_name": "kernel_latency",
+            "unit": "ns",
+            "protocol_version": "m1-kernel-performance-evidence-v1",
+            "lease_id": str(uuid4()),
+            "lease_scope": "exclusive",
+            "resource_id": "hcu-7",
+            "fencing_token": 23,
+            "environment_fingerprint": suite.context.target_fingerprint,
+        },
+        "stage0_mde_evidence": {
+            "uri": suite.stage0_mde.uri,
+            "sha256": suite.stage0_mde.sha256,
+        },
+        "restarts": restarts,
+        "adapter_provenance": [_provenance("measurement_harness").model_dump(mode="json")],
+        "cleanup_evidence": {
+            "fence": {"resource_id": "hcu-7", "fencing_token": 23, "fenced": cleanup},
+            "health": {"resource_id": "hcu-7", "healthy": cleanup},
+        },
+        "producer_summary": summary or {},
+    }
+    raw = write_evidence(
+        suite.root / f"performance-{measurement_id}-raw.json",
+        envelope,
+    )
+    reference = M1PerformanceEvidenceReference(
         measurement_id=measurement_id,
-        evidence_hash=evidence_hash or "sha256:" + "b" * 64,
-        stage0_mde_ratio=0.03,
-        restarts=tuple(restarts),
-        lease_id=uuid4(),
-        resource_id="hcu-7",
-        fencing_token=23,
-        process_identities=tuple(f"{2000 + item}:token-{item}" for item in range(len(restarts))),
-        cache_namespaces=tuple(f"m1-performance-{item}" for item in range(len(restarts))),
-        environment_fingerprint="sha256:" + "7" * 64,
-        cleanup_hash="sha256:" + "c" * 64,
-        cleanup_healthy=cleanup,
-        bindings_valid=bindings,
-        producer_summary=summary or {},
+        uri=raw.uri,
+        sha256=raw.sha256,
     )
-    return evidence, adjudicate_performance(
+    result = M1PerformanceVerifier(
+        suite.protocol,
+        _PortableReader(suite.root),
+    ).verify(
         correctness,
-        evidence,
-        load_registered_m1_protocol(),
+        suite.context,
+        reference,
     )
+    return reference, result
+
+
+def _correctness_reference_with_outputs(
+    suite: _Suite,
+    hotspot: M1HotspotCorrectnessSpec,
+    reference_document: dict[str, object],
+    candidate_document: dict[str, object],
+    *,
+    name: str,
+) -> M1CorrectnessEvidenceReference:
+    envelope = copy.deepcopy(suite.envelope)
+    envelope["binding"]["hotspot_spec_hash"] = m1_hotspot_spec_sha256(hotspot)
+    for variant, document in (
+        ("reference", reference_document),
+        ("candidate", candidate_document),
+    ):
+        artifact = write_evidence(suite.root / f"{name}-{variant}.json", document)
+        execution = next(item for item in envelope["executions"] if item["variant"] == variant)
+        execution["normalized_output"] = {
+            "uri": artifact.uri,
+            "sha256": artifact.sha256,
+        }
+    return suite.with_envelope(envelope, f"{name}-evidence.json")
 
 
 def test_registered_protocol_is_strict_and_hotspot_tolerances_are_explicit(tmp_path: Path) -> None:
@@ -465,6 +593,66 @@ def test_correctness_rejects_missing_or_wrong_input_binding(
     )
     assert result.verdict == "invalid"
     assert result.failure_codes == (failure_code,)
+
+
+def test_correctness_recomputes_seed_generation_from_frozen_input_hashes(
+    tmp_path: Path,
+) -> None:
+    suite = _Suite(tmp_path / "seed-generation")
+    reference = copy.deepcopy(suite.output_documents["reference"])
+    candidate = copy.deepcopy(suite.output_documents["candidate"])
+    for document in (reference, candidate):
+        for record in document["records"]:
+            if record["seed"] == 0 and record["special_value"] == "ordinary":
+                record["inputs"] = _input_tensors(1, "ordinary")
+    result = M1CorrectnessVerifier(suite.protocol, _PortableReader(suite.root)).verify(
+        suite.context,
+        suite.hotspot,
+        _correctness_reference_with_outputs(
+            suite,
+            suite.hotspot,
+            reference,
+            candidate,
+            name="seed-mismatch",
+        ),
+    )
+    assert result.verdict == "invalid"
+    assert result.failure_codes == ("input_generation_mismatch",)
+
+
+def test_correctness_validates_special_value_semantics_not_only_labels(
+    tmp_path: Path,
+) -> None:
+    suite = _Suite(tmp_path / "special-semantics")
+    expectations = tuple(
+        item.model_copy(
+            update={
+                "input_hash": _hash_bytes(
+                    canonical_json_bytes(_input_tensors(item.seed, "ordinary"))
+                )
+            }
+        )
+        for item in suite.hotspot.input_expectations
+    )
+    mislabeled_hotspot = suite.hotspot.model_copy(update={"input_expectations": expectations})
+    reference = copy.deepcopy(suite.output_documents["reference"])
+    candidate = copy.deepcopy(suite.output_documents["candidate"])
+    for document in (reference, candidate):
+        for record in document["records"]:
+            record["inputs"] = _input_tensors(record["seed"], "ordinary")
+    result = M1CorrectnessVerifier(suite.protocol, _PortableReader(suite.root)).verify(
+        suite.context,
+        mislabeled_hotspot,
+        _correctness_reference_with_outputs(
+            suite,
+            mislabeled_hotspot,
+            reference,
+            candidate,
+            name="special-mislabeled",
+        ),
+    )
+    assert result.verdict == "invalid"
+    assert result.failure_codes == ("special_value_semantics_mismatch",)
 
 
 def test_correctness_uses_declared_tolerance_boundary_and_rejects_cross_candidate(
@@ -567,35 +755,140 @@ def test_correctness_rechecks_reference_source_cleanup_and_cache(tmp_path: Path)
 def test_performance_verdicts_use_restart_ci_and_stage0_mde(
     tmp_path: Path, effects: list[float], expected: ManualCandidateVerdict
 ) -> None:
-    correctness = _Suite(tmp_path / expected.value).verify()
-    _, result = _performance(correctness, effects)
+    suite = _Suite(tmp_path / expected.value)
+    correctness = suite.verify()
+    _, result = _performance(suite, correctness, effects)
     assert result.verdict is expected
     assert result.confidence_interval is not None
 
 
 def test_performance_ignores_producer_summary_and_fails_closed(tmp_path: Path) -> None:
-    correctness = _Suite(tmp_path / "valid").verify()
-    first_input, first = _performance(correctness, [0.1] * 4, summary={"verdict": "slower"})
-    second_input = first_input.model_copy(
-        update={"producer_summary": {"verdict": "faster", "speedup": 99}}
+    suite = _Suite(tmp_path / "valid")
+    correctness = suite.verify()
+    _, faster = _performance(
+        suite,
+        correctness,
+        [0.1] * 4,
+        summary={"verdict": "slower"},
     )
-    second = adjudicate_performance(correctness, second_input, load_registered_m1_protocol())
-    assert first == second
-    _, invalid = _performance(correctness, [0.1] * 4, cleanup=False)
+    assert faster.verdict is ManualCandidateVerdict.FASTER
+    _, slower = _performance(
+        suite,
+        correctness,
+        [-0.2] * 4,
+        summary={"verdict": "faster", "speedup": 99},
+    )
+    assert slower.verdict is ManualCandidateVerdict.SLOWER
+    _, invalid = _performance(suite, correctness, [0.1] * 4, cleanup=False)
     assert invalid.verdict is ManualCandidateVerdict.INVALID
-    incorrect = _Suite(tmp_path / "incorrect", candidate_delta=0.25).verify()
-    _, blocked = _performance(incorrect, [0.1] * 4)
+    _, wrong_binding = _performance(suite, correctness, [0.1] * 4, bindings=False)
+    assert wrong_binding.verdict is ManualCandidateVerdict.INVALID
+    assert wrong_binding.failure_codes == ("performance_binding_mismatch",)
+    incorrect_suite = _Suite(tmp_path / "incorrect", candidate_delta=0.25)
+    incorrect = incorrect_suite.verify()
+    _, blocked = _performance(incorrect_suite, incorrect, [0.1] * 4)
     assert blocked.verdict is ManualCandidateVerdict.INVALID
     assert blocked.effect_ratio is None
 
+    reference, _ = _performance(suite, correctness, [0.1] * 4)
+    tampered = reference.model_copy(update={"sha256": SHA_A})
+    hash_invalid = M1PerformanceVerifier(
+        suite.protocol,
+        _PortableReader(suite.root),
+    ).verify(correctness, suite.context, tampered)
+    assert hash_invalid.verdict is ManualCandidateVerdict.INVALID
+    assert hash_invalid.failure_codes == ("evidence_hash_mismatch",)
 
-def test_report_is_deterministic_bound_and_never_authorizes_release(tmp_path: Path) -> None:
-    suite = _Suite(tmp_path / "evidence")
-    correctness = suite.verify()
-    performance_input, performance = _performance(correctness, [0.1, 0.11, 0.09, 0.1])
+
+@pytest.mark.parametrize("failure_kind", ["correctness", "performance"])
+def test_invalid_evidence_still_produces_immutable_failure_bundle(
+    tmp_path: Path,
+    failure_kind: str,
+) -> None:
+    suite = _Suite(tmp_path / failure_kind)
+    if failure_kind == "correctness":
+        correctness = M1CorrectnessVerifier(
+            suite.protocol,
+            _PortableReader(suite.root),
+        ).verify(
+            suite.context,
+            suite.hotspot,
+            suite.reference.model_copy(update={"sha256": SHA_A}),
+        )
+        performance_reference, performance = _performance(
+            suite,
+            correctness,
+            [0.1] * 4,
+        )
+    else:
+        correctness = suite.verify()
+        performance_reference, _ = _performance(suite, correctness, [0.1] * 4)
+        performance = M1PerformanceVerifier(
+            suite.protocol,
+            _PortableReader(suite.root),
+        ).verify(
+            correctness,
+            suite.context,
+            performance_reference.model_copy(update={"sha256": SHA_A}),
+        )
+        performance_reference = performance_reference.model_copy(update={"sha256": SHA_A})
+
     measurement_provenance = _provenance("measurement_harness")
     measurement = MeasurementSeries(
-        measurement_id=performance_input.measurement_id,
+        measurement_id=performance_reference.measurement_id,
+        status="measured",
+        metric_name="kernel_latency",
+        unit="ns",
+        protocol_version="m1-kernel-performance-evidence-v1",
+        sample_count=8,
+        warmup_count=2,
+        process_restart_count=4,
+        raw_samples_uri=performance_reference.uri,
+        raw_samples_hash=performance_reference.sha256,
+        environment_fingerprint=suite.context.target_fingerprint,
+        summary={"passed": True, "speedup": 999},
+        adapter_provenance=measurement_provenance,
+        synthetic=False,
+        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+    )
+    context = M1AdjudicationContext(
+        verification=suite.context,
+        job_id=uuid4(),
+        round_id=uuid4(),
+        measurement=measurement,
+        created_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        adapter_provenance=(
+            measurement_provenance,
+            _provenance("candidate_adjudicator"),
+        ),
+    )
+    result = build_m1_adjudication_result(context, correctness, performance)
+    assert isinstance(result, M1FailedCandidateAdjudicationResult)
+    assert result.verdict is ManualCandidateVerdict.INVALID
+    assert result.evidence.summary["automatic_release_allowed"] is False
+    assert result.evidence.summary["correctness_failure_codes"] == list(correctness.failure_codes)
+    report_root = tmp_path / f"{failure_kind}-report"
+    report_root.mkdir()
+    first = write_m1_signoff_report(report_root, result, correctness, performance)
+    second = write_m1_signoff_report(report_root, result, correctness, performance)
+    assert first == second
+    assert (report_root / "correctness.json").is_file()
+    assert (report_root / "performance.json").is_file()
+    assert (report_root / "evidence-bundle.json").is_file()
+    assert (report_root / "signoff.md").is_file()
+    assert (report_root / "sha256sums.json").is_file()
+
+
+def test_report_is_deterministic_bound_and_never_authorizes_release(tmp_path: Path) -> None:
+    assert M1_SIGNOFF_WARNING == (
+        "人工批准仅表示本 Candidate 证据已接受，不授权自动发布、自动安装或生产灰度。"
+    )
+    suite = _Suite(tmp_path / "evidence")
+    correctness = suite.verify()
+    performance_reference, performance = _performance(suite, correctness, [0.1, 0.11, 0.09, 0.1])
+    measurement_provenance = _provenance("measurement_harness")
+    measurement = MeasurementSeries(
+        measurement_id=performance_reference.measurement_id,
         status="measured",
         metric_name="kernel_latency",
         unit="ns",
@@ -603,8 +896,8 @@ def test_report_is_deterministic_bound_and_never_authorizes_release(tmp_path: Pa
         sample_count=8,
         warmup_count=2,
         process_restart_count=4,
-        raw_samples_uri=(suite.root / "performance-raw.json").as_uri(),
-        raw_samples_hash=performance_input.evidence_hash,
+        raw_samples_uri=performance_reference.uri,
+        raw_samples_hash=performance_reference.sha256,
         environment_fingerprint=suite.context.target_fingerprint,
         summary={"producer_verdict": "ignored"},
         adapter_provenance=measurement_provenance,

@@ -43,6 +43,7 @@ class M1KernelCorrectnessProtocol(_M1ProtocolModel):
     confidence_level: float = Field(gt=0.5, lt=1.0)
     bootstrap_method: Literal["percentile"]
     bootstrap_seed_source: Literal["input_evidence_sha256"]
+    large_value_min_abs: float = Field(gt=0)
 
     @model_validator(mode="after")
     def validate_repeat_bounds(self) -> M1KernelCorrectnessProtocol:
@@ -135,14 +136,30 @@ class M1CorrectnessCase(_M1ProtocolModel):
         return self
 
 
+class M1InputExpectation(_M1ProtocolModel):
+    case_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    seed: int
+    special_value: Literal[
+        "ordinary",
+        "zero",
+        "negative",
+        "large",
+        "nan",
+        "positive_inf",
+        "negative_inf",
+    ]
+    input_hash: str = Field(pattern=SHA256_PATTERN)
+
+
 class M1HotspotCorrectnessSpec(_M1ProtocolModel):
     schema_version: Literal["m1-hotspot-correctness-spec-v1"] = "m1-hotspot-correctness-spec-v1"
     hotspot_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
     reference_implementation: str = Field(min_length=1, max_length=1000)
     reference_source_hash: str = Field(pattern=SHA256_PATTERN)
     cases: tuple[M1CorrectnessCase, ...] = Field(min_length=1, max_length=100)
+    input_expectations: tuple[M1InputExpectation, ...] = Field(min_length=1)
 
-    @field_validator("cases", mode="before")
+    @field_validator("cases", "input_expectations", mode="before")
     @classmethod
     def freeze_cases(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
@@ -152,6 +169,17 @@ class M1HotspotCorrectnessSpec(_M1ProtocolModel):
         case_ids = [item.case_id for item in self.cases]
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("Hotspot correctness case IDs must be unique")
+        expected = {
+            (case.case_id, seed, special)
+            for case in self.cases
+            for seed in case.seeds
+            for special in case.special_values
+        }
+        actual = {(item.case_id, item.seed, item.special_value) for item in self.input_expectations}
+        if len(actual) != len(self.input_expectations):
+            raise ValueError("Hotspot input expectations must be unique")
+        if actual != expected:
+            raise ValueError("Hotspot input expectations must cover every case/seed/special value")
         return self
 
 

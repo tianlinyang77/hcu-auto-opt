@@ -55,6 +55,8 @@ class M1VerificationContext(_M1Model):
     workload_hash: str = Field(pattern=SHA256_PATTERN)
     stage0_run_id: UUID
     stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_mde_evidence_uri: str = Field(min_length=1, max_length=4000)
+    stage0_mde_evidence_hash: str = Field(pattern=SHA256_PATTERN)
     baseline_source_snapshot_id: UUID
     baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
     candidate_source_snapshot_id: UUID
@@ -264,7 +266,7 @@ class M1RestartSamples(_M1Model):
         return self
 
 
-class M1PerformanceInput(_M1Model):
+class _VerifiedPerformanceInput(_M1Model):
     measurement_id: UUID
     evidence_hash: str = Field(pattern=SHA256_PATTERN)
     stage0_mde_ratio: float = Field(gt=0, lt=1)
@@ -287,7 +289,7 @@ class M1PerformanceInput(_M1Model):
         return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
-    def validate_restart_order(self) -> M1PerformanceInput:
+    def validate_restart_order(self) -> _VerifiedPerformanceInput:
         ordinals = [item.restart_ordinal for item in self.restarts]
         if ordinals != list(range(len(ordinals))):
             raise ValueError("performance restart ordinals must be consecutive and ordered")
@@ -307,14 +309,14 @@ class M1PerformanceVerificationResult(_M1Model):
     input_digest: str = Field(pattern=SHA256_PATTERN)
     measurement_id: UUID
     raw_evidence_hash: str = Field(pattern=SHA256_PATTERN)
-    lease_id: UUID
-    lease_scope: Literal[LeaseScope.EXCLUSIVE]
-    resource_id: str = Field(min_length=1, max_length=200)
-    fencing_token: int = Field(ge=1)
-    process_identities: tuple[str, ...] = Field(min_length=2)
-    cache_namespaces: tuple[str, ...] = Field(min_length=2)
-    environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
-    cleanup_hash: str = Field(pattern=SHA256_PATTERN)
+    lease_id: UUID | None = None
+    lease_scope: Literal[LeaseScope.EXCLUSIVE] | None = None
+    resource_id: str | None = Field(default=None, min_length=1, max_length=200)
+    fencing_token: int | None = Field(default=None, ge=1)
+    process_identities: tuple[str, ...] = ()
+    cache_namespaces: tuple[str, ...] = ()
+    environment_fingerprint: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    cleanup_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     effect_ratio: float | None = None
     confidence_interval: tuple[float, float] | None = None
     credible_threshold: float
@@ -334,6 +336,110 @@ class M1PerformanceVerificationResult(_M1Model):
     @classmethod
     def freeze_sequences(cls, value: object) -> object:
         return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def require_audit_fields_for_a_conclusion(self) -> M1PerformanceVerificationResult:
+        if self.verdict is not ManualCandidateVerdict.INVALID and (
+            self.lease_id is None
+            or self.lease_scope is None
+            or self.resource_id is None
+            or self.fencing_token is None
+            or len(self.process_identities) < 2
+            or len(self.cache_namespaces) < 2
+            or self.environment_fingerprint is None
+            or self.cleanup_hash is None
+        ):
+            raise ValueError("performance conclusion requires complete raw-evidence audit fields")
+        return self
+
+
+class M1PerformanceEvidenceReference(_M1Model):
+    measurement_id: UUID
+    uri: str = Field(min_length=1, max_length=4000)
+    sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+class M1PerformanceBinding(_M1Model):
+    task_id: UUID
+    candidate_id: UUID
+    baseline_epoch_id: UUID
+    target_snapshot_id: UUID
+    target_id: str = Field(min_length=1, max_length=200)
+    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    workload_id: str = Field(min_length=1, max_length=200)
+    workload_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_run_id: UUID
+    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    measurement_id: UUID
+    metric_name: Literal["kernel_latency"]
+    unit: Literal["ns"]
+    protocol_version: Literal["m1-kernel-performance-evidence-v1"]
+    lease_id: UUID
+    lease_scope: Literal[LeaseScope.EXCLUSIVE]
+    resource_id: str = Field(min_length=1, max_length=200)
+    fencing_token: int = Field(ge=1)
+    environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
+
+
+class M1Stage0MDEEvidence(_M1Model):
+    schema_version: Literal["m1-stage0-mde-reference-v1"]
+    stage0_run_id: UUID
+    target_snapshot_id: UUID
+    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    workload_id: str = Field(min_length=1, max_length=200)
+    workload_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    metric_name: Literal["kernel_latency"]
+    unit: Literal["ns"]
+    sample_budget_hash: str = Field(pattern=SHA256_PATTERN)
+    mde_ratio: float = Field(gt=0, lt=1)
+    verification_input_digest: str = Field(pattern=SHA256_PATTERN)
+
+
+class M1PerformanceCacheEvidence(_M1Model):
+    schema_version: Literal["m1-performance-cache-v1"]
+    restart_ordinal: int = Field(ge=0)
+    namespace: str = Field(min_length=1, max_length=500)
+    empty_before_execution: Literal[True]
+
+
+class M1PerformanceRestartEvidence(_M1Model):
+    restart_ordinal: int = Field(ge=0)
+    process_id: int = Field(ge=1)
+    process_start_token: str = Field(min_length=1, max_length=200)
+    start_record: RawEvidenceFileV2
+    exit_record: RawEvidenceFileV2
+    cache_namespace: RawEvidenceFileV2
+    baseline_ns: tuple[float, ...] = Field(min_length=1, max_length=1_000_000)
+    candidate_ns: tuple[float, ...] = Field(min_length=1, max_length=1_000_000)
+
+    @field_validator("baseline_ns", "candidate_ns", mode="before")
+    @classmethod
+    def freeze_samples(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+class M1PerformanceEvidenceV1(_M1Model):
+    schema_version: Literal["m1-kernel-performance-evidence-v1"]
+    binding: M1PerformanceBinding
+    stage0_mde_evidence: RawEvidenceFileV2
+    restarts: tuple[M1PerformanceRestartEvidence, ...] = Field(min_length=2, max_length=1000)
+    adapter_provenance: tuple[AdapterProvenance, ...] = Field(min_length=1)
+    cleanup_evidence: dict[str, Any]
+    producer_summary: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("restarts", "adapter_provenance", mode="before")
+    @classmethod
+    def freeze_sequences(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def require_ordered_real_evidence(self) -> M1PerformanceEvidenceV1:
+        if [item.restart_ordinal for item in self.restarts] != list(range(len(self.restarts))):
+            raise ValueError("performance restart evidence must be consecutive and ordered")
+        if any(item.implementation_kind != "real" for item in self.adapter_provenance):
+            raise ValueError("performance evidence requires real Adapter provenance")
+        return self
 
 
 class M1CorrectnessVerifier:
@@ -506,6 +612,7 @@ class M1CorrectnessVerifier:
             outputs["reference"],
             outputs["candidate"],
             self.protocol.max_output_elements,
+            self.protocol.large_value_min_abs,
         )
         verdict = "correct" if not mismatches else "incorrect"
         return M1CorrectnessVerificationResult(
@@ -624,6 +731,12 @@ class M1CorrectnessVerifier:
             )
         if _procfs_start_token(start.proc_stat_line) != process.process_start_token:
             raise M1EvidenceError("process_identity_mismatch", "process start token is incorrect")
+        if _procfs_start_token(exit_record.proc_stat_line) != process.process_start_token:
+            raise M1EvidenceError("process_identity_mismatch", "reaped process token is incorrect")
+        if exit_record.waitpid_result_pid != process.process_id or exit_record.wait_status != 0:
+            raise M1EvidenceError(
+                "process_exit_invalid", "process did not exit successfully and get reaped"
+            )
 
     @staticmethod
     def _verify_cleanup(context: M1VerificationContext, cleanup: dict[str, Any]) -> None:
@@ -639,9 +752,211 @@ class M1CorrectnessVerifier:
             raise M1EvidenceError("cleanup_binding_mismatch", "cleanup belongs to another lease")
 
 
-def adjudicate_performance(
+class M1PerformanceVerifier:
+    provenance = AdapterProvenance(
+        profile="m1-d-verifier",
+        capability="candidate_adjudicator",
+        adapter_name="M1PerformanceVerifier",
+        adapter_version="1",
+        implementation_kind="real",
+    )
+
+    def __init__(self, protocol: LoadedM1Protocol, reader: HashedEvidenceReader) -> None:
+        registered = load_registered_m1_protocol(protocol.protocol.protocol_version)
+        if (
+            protocol.protocol_hash != registered.protocol_hash
+            or protocol.canonical_bytes != registered.canonical_bytes
+        ):
+            raise M1EvidenceError(
+                "protocol_not_registered",
+                "performance verification requires repository-registered protocol content",
+            )
+        if reader.max_bytes > protocol.protocol.max_evidence_bytes:
+            raise M1EvidenceError(
+                "evidence_budget_unenforced",
+                "evidence reader limit exceeds the registered M1 protocol",
+            )
+        self.loaded_protocol = protocol
+        self.reader = reader
+
+    def verify(
+        self,
+        correctness: M1CorrectnessVerificationResult,
+        context: M1VerificationContext,
+        reference: M1PerformanceEvidenceReference,
+    ) -> M1PerformanceVerificationResult:
+        fallback_digest = _digest(
+            {
+                "correctness_input_digest": correctness.input_digest,
+                "context": context,
+                "performance_evidence": reference,
+                "protocol_hash": self.loaded_protocol.protocol_hash,
+            }
+        )
+        if correctness.verdict != "correct":
+            return _invalid_performance_reference(
+                reference,
+                fallback_digest,
+                "correctness_not_established",
+                "performance cannot be judged unless correctness is correct",
+            )
+        try:
+            encoded = self.reader.read_bytes(reference.uri, reference.sha256)
+            evidence = M1PerformanceEvidenceV1.model_validate_json(encoded)
+            verified = self._verify_evidence(context, reference, evidence)
+            return _adjudicate_verified_performance(
+                correctness,
+                verified,
+                self.loaded_protocol,
+            )
+        except (EvidenceReadError, M1EvidenceError, ValidationError, ValueError) as exc:
+            return _invalid_performance_reference(
+                reference,
+                fallback_digest,
+                str(getattr(exc, "code", "performance_evidence_invalid")),
+                str(exc),
+            )
+
+    def _verify_evidence(
+        self,
+        context: M1VerificationContext,
+        reference: M1PerformanceEvidenceReference,
+        evidence: M1PerformanceEvidenceV1,
+    ) -> _VerifiedPerformanceInput:
+        binding = evidence.binding
+        expected = {
+            "task_id": context.task_id,
+            "candidate_id": context.candidate_id,
+            "baseline_epoch_id": context.baseline_epoch_id,
+            "target_snapshot_id": context.target_snapshot_id,
+            "target_id": context.target_id,
+            "target_fingerprint": context.target_fingerprint,
+            "workload_id": context.workload_id,
+            "workload_hash": context.workload_hash,
+            "stage0_run_id": context.stage0_run_id,
+            "stage0_protocol_hash": context.stage0_protocol_hash,
+            "measurement_id": reference.measurement_id,
+            "resource_id": context.resource_id,
+            "environment_fingerprint": context.target_fingerprint,
+        }
+        actual = binding.model_dump()
+        if any(actual[name] != value for name, value in expected.items()):
+            raise M1EvidenceError(
+                "performance_binding_mismatch",
+                "performance evidence belongs to another immutable input",
+            )
+        if (
+            evidence.stage0_mde_evidence.uri != context.stage0_mde_evidence_uri
+            or evidence.stage0_mde_evidence.sha256 != context.stage0_mde_evidence_hash
+        ):
+            raise M1EvidenceError(
+                "stage0_mde_binding_mismatch",
+                "performance evidence is bound to another Stage 0 MDE report",
+            )
+        stage0_mde = M1Stage0MDEEvidence.model_validate_json(
+            self.reader.read_bytes(
+                evidence.stage0_mde_evidence.uri,
+                evidence.stage0_mde_evidence.sha256,
+            )
+        )
+        if any(
+            (
+                stage0_mde.stage0_run_id != context.stage0_run_id,
+                stage0_mde.target_snapshot_id != context.target_snapshot_id,
+                stage0_mde.target_fingerprint != context.target_fingerprint,
+                stage0_mde.workload_id != context.workload_id,
+                stage0_mde.workload_hash != context.workload_hash,
+                stage0_mde.stage0_protocol_hash != context.stage0_protocol_hash,
+                stage0_mde.metric_name != binding.metric_name,
+                stage0_mde.unit != binding.unit,
+            )
+        ):
+            raise M1EvidenceError(
+                "stage0_mde_binding_mismatch",
+                "Stage 0 MDE report belongs to another Target/Workload/metric",
+            )
+        self._verify_cleanup(binding, evidence.cleanup_evidence)
+        restarts: list[M1RestartSamples] = []
+        process_identities: list[str] = []
+        cache_namespaces: list[str] = []
+        for item in evidence.restarts:
+            start = ProcessLifecycleRecordV2.model_validate_json(
+                self.reader.read_bytes(item.start_record.uri, item.start_record.sha256)
+            )
+            exit_record = ProcessLifecycleRecordV2.model_validate_json(
+                self.reader.read_bytes(item.exit_record.uri, item.exit_record.sha256)
+            )
+            if (
+                start.event != "started"
+                or exit_record.event != "reaped"
+                or start.restart_ordinal != item.restart_ordinal
+                or exit_record.restart_ordinal != item.restart_ordinal
+                or start.process_id != item.process_id
+                or exit_record.process_id != item.process_id
+                or _procfs_start_token(start.proc_stat_line) != item.process_start_token
+                or _procfs_start_token(exit_record.proc_stat_line) != item.process_start_token
+                or start.captured_monotonic_ns >= exit_record.captured_monotonic_ns
+                or exit_record.waitpid_result_pid != item.process_id
+                or exit_record.wait_status != 0
+            ):
+                raise M1EvidenceError(
+                    "performance_process_invalid",
+                    f"restart {item.restart_ordinal} process lifecycle is invalid",
+                )
+            cache = M1PerformanceCacheEvidence.model_validate_json(
+                self.reader.read_bytes(item.cache_namespace.uri, item.cache_namespace.sha256)
+            )
+            if cache.restart_ordinal != item.restart_ordinal:
+                raise M1EvidenceError(
+                    "performance_cache_binding_mismatch",
+                    "performance cache evidence belongs to another restart",
+                )
+            restarts.append(
+                M1RestartSamples(
+                    restart_ordinal=item.restart_ordinal,
+                    baseline_ns=item.baseline_ns,
+                    candidate_ns=item.candidate_ns,
+                )
+            )
+            process_identities.append(f"{item.process_id}:{item.process_start_token}")
+            cache_namespaces.append(cache.namespace)
+        return _VerifiedPerformanceInput(
+            measurement_id=binding.measurement_id,
+            evidence_hash=reference.sha256,
+            stage0_mde_ratio=stage0_mde.mde_ratio,
+            restarts=tuple(restarts),
+            lease_id=binding.lease_id,
+            lease_scope=binding.lease_scope,
+            resource_id=binding.resource_id,
+            fencing_token=binding.fencing_token,
+            process_identities=tuple(process_identities),
+            cache_namespaces=tuple(cache_namespaces),
+            environment_fingerprint=binding.environment_fingerprint,
+            cleanup_hash=_digest(evidence.cleanup_evidence),
+            cleanup_healthy=True,
+            bindings_valid=True,
+        )
+
+    @staticmethod
+    def _verify_cleanup(binding: M1PerformanceBinding, cleanup: dict[str, Any]) -> None:
+        if not cleanup_is_healthy(cleanup):
+            raise M1EvidenceError("performance_cleanup_unhealthy", "cleanup is not healthy")
+        fence = cleanup.get("fence", {})
+        health = cleanup.get("health", {})
+        if (
+            fence.get("resource_id") != binding.resource_id
+            or fence.get("fencing_token") != binding.fencing_token
+            or health.get("resource_id") != binding.resource_id
+        ):
+            raise M1EvidenceError(
+                "performance_cleanup_binding_mismatch",
+                "performance cleanup belongs to another lease",
+            )
+
+
+def _adjudicate_verified_performance(
     correctness: M1CorrectnessVerificationResult,
-    evidence: M1PerformanceInput,
+    evidence: _VerifiedPerformanceInput,
     protocol: LoadedM1Protocol,
 ) -> M1PerformanceVerificationResult:
     input_digest = _digest(
@@ -721,7 +1036,7 @@ def adjudicate_performance(
 
 
 def _invalid_performance(
-    evidence: M1PerformanceInput,
+    evidence: _VerifiedPerformanceInput,
     input_digest: str,
     code: str,
     reason: str,
@@ -745,16 +1060,38 @@ def _invalid_performance(
     )
 
 
+def _invalid_performance_reference(
+    reference: M1PerformanceEvidenceReference,
+    input_digest: str,
+    code: str,
+    reason: str,
+) -> M1PerformanceVerificationResult:
+    return M1PerformanceVerificationResult(
+        verdict=ManualCandidateVerdict.INVALID,
+        input_digest=input_digest,
+        measurement_id=reference.measurement_id,
+        raw_evidence_hash=reference.sha256,
+        credible_threshold=0.0,
+        failure_codes=(code,),
+        reasons=(reason,),
+    )
+
+
 def _compare_outputs(
     hotspot: M1HotspotCorrectnessSpec,
     reference: M1NormalizedOutputV1,
     candidate: M1NormalizedOutputV1,
     max_elements: int,
+    large_value_min_abs: float,
 ) -> tuple[list[M1Mismatch], int, int, float | None, float | None]:
     if reference.hotspot_id != hotspot.hotspot_id or candidate.hotspot_id != hotspot.hotspot_id:
         raise M1EvidenceError("hotspot_binding_mismatch", "normalized output Hotspot is wrong")
     expected_keys: set[tuple[str, int, str, int]] = set()
     cases = {item.case_id: item for item in hotspot.cases}
+    expected_input_hashes = {
+        (item.case_id, item.seed, item.special_value): item.input_hash
+        for item in hotspot.input_expectations
+    }
     for case in hotspot.cases:
         for seed in case.seeds:
             for special in case.special_values:
@@ -796,6 +1133,18 @@ def _compare_outputs(
                     "input_value_mismatch",
                     f"reference and Candidate received different input {name}",
                 )
+        expected_input_hash = expected_input_hashes[(key[0], key[1], key[2])]
+        actual_input_hash = _input_tensor_hash(reference_by_key[key].inputs)
+        if actual_input_hash != expected_input_hash:
+            raise M1EvidenceError(
+                "input_generation_mismatch",
+                "input values do not match the frozen case/seed/special-value expectation",
+            )
+        _validate_special_value(
+            key[2],
+            reference_by_key[key].inputs,
+            large_value_min_abs,
+        )
         if set(reference_outputs) != set(expected_outputs) or set(candidate_outputs) != set(
             expected_outputs
         ):
@@ -859,6 +1208,41 @@ def _index_tensors(outputs: tuple[M1TensorOutput, ...]) -> dict[str, M1TensorOut
     if len(indexed) != len(outputs):
         raise M1EvidenceError("output_name_duplicate", "normalized output names repeat")
     return indexed
+
+
+def _input_tensor_hash(inputs: tuple[M1TensorOutput, ...]) -> str:
+    value = [item.model_dump(mode="json") for item in inputs]
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _validate_special_value(
+    special_value: str,
+    inputs: tuple[M1TensorOutput, ...],
+    large_value_min_abs: float,
+) -> None:
+    values = [value for tensor in inputs for value in tensor.values]
+    tokens = {value for value in values if isinstance(value, str)}
+    numeric = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    valid = {
+        "ordinary": not tokens,
+        "nan": "nan" in tokens,
+        "positive_inf": "positive_inf" in tokens,
+        "negative_inf": "negative_inf" in tokens,
+        "zero": any(value == 0 for value in numeric),
+        "negative": any(value < 0 for value in numeric),
+        "large": any(
+            math.isfinite(value) and abs(value) >= large_value_min_abs for value in numeric
+        ),
+    }.get(special_value, False)
+    if not valid:
+        raise M1EvidenceError(
+            "special_value_semantics_mismatch",
+            f"input does not satisfy declared special value {special_value}",
+        )
 
 
 def _compare_scalar(

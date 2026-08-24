@@ -15,7 +15,6 @@ from hcuopt.evaluation.m1_reporting import (
     write_m1_signoff_report,
 )
 from hcuopt.evaluation.m1_verifier import M1CorrectnessVerifier
-from hcuopt.measurement.evidence import write_evidence
 from tests.unit.test_m1_d_verifier import _performance, _provenance, _Suite
 
 
@@ -27,29 +26,15 @@ def test_scripted_raw_evidence_to_signoff_bundle(tmp_path: Path) -> None:
         HashedEvidenceReader(suite.root),
     ).verify(suite.context, suite.hotspot, suite.reference)
     effects = [0.10, 0.11, 0.09, 0.10]
-    raw_measurement = write_evidence(
-        suite.root / "performance-raw.json",
-        {
-            "schema_version": "m1-scripted-performance-raw-v1",
-            "restarts": [
-                {
-                    "restart_ordinal": ordinal,
-                    "baseline_ns": [100.0, 100.0],
-                    "candidate_ns": [100.0 * (1.0 - effect)] * 2,
-                }
-                for ordinal, effect in enumerate(effects)
-            ],
-        },
-    )
-    performance_input, performance = _performance(
+    performance_reference, performance = _performance(
+        suite,
         correctness,
         effects,
         summary={"producer_verdict": "slower"},
-        evidence_hash=raw_measurement.sha256,
     )
     measurement_provenance = _provenance("measurement_harness")
     measurement = MeasurementSeries(
-        measurement_id=performance_input.measurement_id,
+        measurement_id=performance_reference.measurement_id,
         status="measured",
         metric_name="kernel_latency",
         unit="ns",
@@ -57,8 +42,8 @@ def test_scripted_raw_evidence_to_signoff_bundle(tmp_path: Path) -> None:
         sample_count=8,
         warmup_count=2,
         process_restart_count=4,
-        raw_samples_uri=raw_measurement.uri,
-        raw_samples_hash=performance_input.evidence_hash,
+        raw_samples_uri=performance_reference.uri,
+        raw_samples_hash=performance_reference.sha256,
         environment_fingerprint=suite.context.target_fingerprint,
         summary={"producer_verdict": "slower"},
         adapter_provenance=measurement_provenance,
@@ -85,5 +70,5 @@ def test_scripted_raw_evidence_to_signoff_bundle(tmp_path: Path) -> None:
     assert correctness.verdict == "correct"
     assert performance.verdict.value == "faster"
     assert result.evidence.summary["automatic_release_allowed"] is False
-    assert raw_measurement.uri in result.evidence.raw_uris
+    assert performance_reference.uri in result.evidence.raw_uris
     assert Path(artifacts.manifest["uri"].removeprefix("file://")).is_file()

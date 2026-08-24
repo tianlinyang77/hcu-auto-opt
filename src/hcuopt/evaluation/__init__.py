@@ -3,6 +3,7 @@ from hcuopt.evaluation.m1_protocol import (
     M1_CORRECTNESS_PROTOCOL_VERSION,
     LoadedM1Protocol,
     M1HotspotCorrectnessSpec,
+    M1InputExpectation,
     M1KernelCorrectnessProtocol,
     load_registered_m1_protocol,
 )
@@ -10,16 +11,19 @@ from hcuopt.evaluation.m1_reporting import (
     M1_SIGNOFF_WARNING,
     M1AdjudicationContext,
     M1EvidenceSummaryV1,
+    M1FailedCandidateAdjudicationResult,
+    M1FailureEvidenceSummaryV1,
     build_m1_adjudication_result,
     write_m1_signoff_report,
 )
 from hcuopt.evaluation.m1_verifier import (
     M1CorrectnessVerificationResult,
     M1CorrectnessVerifier,
-    M1PerformanceInput,
+    M1PerformanceEvidenceReference,
+    M1PerformanceEvidenceV1,
     M1PerformanceVerificationResult,
+    M1PerformanceVerifier,
     M1VerificationContext,
-    adjudicate_performance,
 )
 from hcuopt.evaluation.sglang_smoke import (
     FRAMEWORK_SMOKE_PROTOCOL_VERSION,
@@ -78,10 +82,15 @@ __all__ = [
     "M1CorrectnessVerificationResult",
     "M1CorrectnessVerifier",
     "M1EvidenceSummaryV1",
+    "M1FailedCandidateAdjudicationResult",
+    "M1FailureEvidenceSummaryV1",
     "M1HotspotCorrectnessSpec",
+    "M1InputExpectation",
     "M1KernelCorrectnessProtocol",
-    "M1PerformanceInput",
+    "M1PerformanceEvidenceReference",
+    "M1PerformanceEvidenceV1",
     "M1PerformanceVerificationResult",
+    "M1PerformanceVerifier",
     "M1VerificationContext",
     "M1_CORRECTNESS_PROTOCOL_VERSION",
     "M1_SIGNOFF_WARNING",
@@ -116,5 +125,4 @@ __all__ = [
     "write_evidence_artifacts",
     "write_m1_signoff_report",
     "write_workload_spec",
-    "adjudicate_performance",
 ]

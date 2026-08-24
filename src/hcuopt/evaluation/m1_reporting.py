@@ -84,6 +84,8 @@ class M1EvidenceSummaryV1(_ReportModel):
     workload_hash: str = Field(pattern=SHA256_PATTERN)
     stage0_run_id: UUID
     stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_mde_evidence_uri: str
+    stage0_mde_evidence_hash: str = Field(pattern=SHA256_PATTERN)
     baseline_source_snapshot_id: UUID
     baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
     candidate_source_snapshot_id: UUID
@@ -137,6 +139,66 @@ class M1EvidenceSummaryV1(_ReportModel):
         return self
 
 
+class M1FailureEvidenceSummaryV1(_ReportModel):
+    schema_version: Literal["m1-failure-adjudication-summary-v1"] = (
+        "m1-failure-adjudication-summary-v1"
+    )
+    verdict: Literal[ManualCandidateVerdict.INVALID] = ManualCandidateVerdict.INVALID
+    correctness_verdict: Literal["correct", "incorrect", "invalid"]
+    task_id: UUID
+    candidate_id: UUID
+    baseline_epoch_id: UUID
+    target_snapshot_id: UUID
+    target_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    workload_id: str
+    workload_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_run_id: UUID
+    stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_mde_evidence_uri: str
+    stage0_mde_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    baseline_source_snapshot_id: UUID
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    candidate_source_snapshot_id: UUID
+    candidate_source_hash: str = Field(pattern=SHA256_PATTERN)
+    artifact_id: UUID
+    artifact_hash: str = Field(pattern=SHA256_PATTERN)
+    correctness_protocol_version: str
+    correctness_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    hotspot_spec_hash: str = Field(pattern=SHA256_PATTERN)
+    measurement_id: UUID
+    measurement_raw_uri: str
+    measurement_raw_hash: str = Field(pattern=SHA256_PATTERN)
+    correctness_input_digest: str = Field(pattern=SHA256_PATTERN)
+    performance_input_digest: str = Field(pattern=SHA256_PATTERN)
+    adjudication_input_digest: str = Field(pattern=SHA256_PATTERN)
+    correctness_failure_codes: tuple[str, ...]
+    performance_failure_codes: tuple[str, ...]
+    verifier_version: Literal["m1-d-verifier-v1"] = "m1-d-verifier-v1"
+    automatic_release_allowed: Literal[False] = False
+
+    @field_validator("correctness_failure_codes", "performance_failure_codes", mode="before")
+    @classmethod
+    def freeze_failures(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
+class M1FailedCandidateAdjudicationResult(_ReportModel):
+    candidate_id: UUID
+    verdict: Literal[ManualCandidateVerdict.INVALID] = ManualCandidateVerdict.INVALID
+    evidence: EvidenceBundle
+    synthetic: Literal[False] = False
+
+    @model_validator(mode="after")
+    def bind_failure_evidence(self) -> M1FailedCandidateAdjudicationResult:
+        if self.evidence.candidate_id != self.candidate_id:
+            raise ValueError("failure EvidenceBundle is bound to another Candidate")
+        if self.evidence.summary.get("automatic_release_allowed") is not False:
+            raise ValueError("failure EvidenceBundle must deny automatic release")
+        if self.evidence.synthetic:
+            raise ValueError("failure EvidenceBundle cannot be synthetic")
+        return self
+
+
 class M1ReportArtifacts(_ReportModel):
     correctness: dict[str, Any]
     performance: dict[str, Any]
@@ -149,14 +211,11 @@ def build_m1_adjudication_result(
     context: M1AdjudicationContext,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
-) -> ManualCandidateAdjudicationResult:
+) -> ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult:
     if context.measurement.measurement_id != performance.measurement_id:
         raise ValueError("performance verdict is bound to another MeasurementSeries")
-    if (
-        correctness.verdict != "correct"
-        and performance.verdict is not ManualCandidateVerdict.INVALID
-    ):
-        raise ValueError("performance must be invalid when correctness is not established")
+    if correctness.verdict != "correct" or performance.verdict is ManualCandidateVerdict.INVALID:
+        return _build_failure_adjudication_result(context, correctness, performance)
     if (
         context.measurement.raw_samples_uri is None
         or context.measurement.raw_samples_hash is None
@@ -205,6 +264,7 @@ def build_m1_adjudication_result(
         {
             *(item["uri"] for item in correctness.input_evidence),
             *(context.additional_raw_uris),
+            binding.stage0_mde_evidence_uri,
             *(
                 [context.measurement.raw_samples_uri]
                 if context.measurement.raw_samples_uri is not None
@@ -254,6 +314,8 @@ def build_m1_adjudication_result(
         workload_hash=binding.workload_hash,
         stage0_run_id=binding.stage0_run_id,
         stage0_protocol_hash=binding.stage0_protocol_hash,
+        stage0_mde_evidence_uri=binding.stage0_mde_evidence_uri,
+        stage0_mde_evidence_hash=binding.stage0_mde_evidence_hash,
         baseline_source_snapshot_id=binding.baseline_source_snapshot_id,
         baseline_source_hash=binding.baseline_source_hash,
         candidate_source_snapshot_id=binding.candidate_source_snapshot_id,
@@ -312,9 +374,94 @@ def build_m1_adjudication_result(
     )
 
 
+def _build_failure_adjudication_result(
+    context: M1AdjudicationContext,
+    correctness: M1CorrectnessVerificationResult,
+    performance: M1PerformanceVerificationResult,
+) -> M1FailedCandidateAdjudicationResult:
+    measurement = context.measurement
+    if measurement.raw_samples_uri is None or measurement.raw_samples_hash is None:
+        raise ValueError("failure adjudication requires the available raw measurement reference")
+    binding = context.verification
+    input_digest = _digest(
+        {
+            "job_id": context.job_id,
+            "round_id": context.round_id,
+            "verification": binding,
+            "correctness": correctness,
+            "performance": performance,
+            "measurement_id": measurement.measurement_id,
+            "failure": True,
+        }
+    )
+    evidence_id = uuid5(
+        NAMESPACE_URL,
+        f"hcuopt:m1:{context.job_id}:{binding.candidate_id}:{input_digest}:failure-evidence",
+    )
+    raw_uris = sorted(
+        {
+            *(item["uri"] for item in correctness.input_evidence),
+            measurement.raw_samples_uri,
+            binding.stage0_mde_evidence_uri,
+            *context.additional_raw_uris,
+        }
+    )
+    summary = M1FailureEvidenceSummaryV1(
+        correctness_verdict=correctness.verdict,
+        task_id=binding.task_id,
+        candidate_id=binding.candidate_id,
+        baseline_epoch_id=binding.baseline_epoch_id,
+        target_snapshot_id=binding.target_snapshot_id,
+        target_fingerprint=binding.target_fingerprint,
+        workload_id=binding.workload_id,
+        workload_hash=binding.workload_hash,
+        stage0_run_id=binding.stage0_run_id,
+        stage0_protocol_hash=binding.stage0_protocol_hash,
+        stage0_mde_evidence_uri=binding.stage0_mde_evidence_uri,
+        stage0_mde_evidence_hash=binding.stage0_mde_evidence_hash,
+        baseline_source_snapshot_id=binding.baseline_source_snapshot_id,
+        baseline_source_hash=binding.baseline_source_hash,
+        candidate_source_snapshot_id=binding.candidate_source_snapshot_id,
+        candidate_source_hash=binding.candidate_source_hash,
+        artifact_id=binding.artifact_id,
+        artifact_hash=binding.artifact_hash,
+        correctness_protocol_version=correctness.protocol_version,
+        correctness_protocol_hash=correctness.protocol_hash,
+        hotspot_spec_hash=correctness.hotspot_spec_hash,
+        measurement_id=measurement.measurement_id,
+        measurement_raw_uri=measurement.raw_samples_uri,
+        measurement_raw_hash=measurement.raw_samples_hash,
+        correctness_input_digest=correctness.input_digest,
+        performance_input_digest=performance.input_digest,
+        adjudication_input_digest=input_digest,
+        correctness_failure_codes=correctness.failure_codes,
+        performance_failure_codes=performance.failure_codes,
+    )
+    evidence = EvidenceBundle(
+        evidence_id=evidence_id,
+        task_id=binding.task_id,
+        candidate_id=binding.candidate_id,
+        baseline_epoch_id=binding.baseline_epoch_id,
+        target_id=binding.target_id,
+        evidence_type="m1_candidate_failure",
+        protocol_version=correctness.protocol_version,
+        artifact_ids=[binding.artifact_id],
+        measurement_ids=[measurement.measurement_id],
+        summary=summary.model_dump(mode="json"),
+        raw_uris=raw_uris,
+        adapter_provenance=list(context.adapter_provenance),
+        synthetic=False,
+        created_at=context.created_at,
+    )
+    return M1FailedCandidateAdjudicationResult(
+        candidate_id=binding.candidate_id,
+        evidence=evidence,
+    )
+
+
 def write_m1_signoff_report(
     root: Path,
-    result: ManualCandidateAdjudicationResult,
+    result: ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
 ) -> M1ReportArtifacts:
@@ -350,11 +497,18 @@ def write_m1_signoff_report(
 
 
 def _render_signoff(
-    result: ManualCandidateAdjudicationResult,
+    result: ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
 ) -> str:
-    summary = M1EvidenceSummaryV1.model_validate_json(canonical_json_bytes(result.evidence.summary))
+    if isinstance(result, M1FailedCandidateAdjudicationResult):
+        summary = M1FailureEvidenceSummaryV1.model_validate_json(
+            canonical_json_bytes(result.evidence.summary)
+        )
+    else:
+        summary = M1EvidenceSummaryV1.model_validate_json(
+            canonical_json_bytes(result.evidence.summary)
+        )
     failure_codes = sorted({*correctness.failure_codes, *performance.failure_codes})
     failures = [f"- `{item}`" for item in failure_codes] or ["- 无"]
     confidence = (
