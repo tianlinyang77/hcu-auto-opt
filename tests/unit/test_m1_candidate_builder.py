@@ -268,7 +268,7 @@ def test_manual_build_rejects_profiler_evidence_that_differs_from_hotspot_intake
             },
             output_dir,
         )
-    assert not (output_dir / "worktrees").exists()
+    assert not any((output_dir / "worktrees").iterdir())
 
 
 def test_manual_build_reads_artifact_from_frozen_candidate_not_mutated_package(

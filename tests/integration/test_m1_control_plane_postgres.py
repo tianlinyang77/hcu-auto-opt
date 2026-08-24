@@ -226,6 +226,47 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             idempotency_key=key,
         )
 
+    def _hotspot_request(
+        self,
+        task_id: UUID,
+        key: str = "m1-hotspot-intake",
+    ) -> ManualHotspotIntakeCreate:
+        baseline = self.repository.get_baseline(task_id)
+        assert baseline is not None
+        return ManualHotspotIntakeCreate(
+            baseline_epoch_id=baseline["baseline_epoch_id"],
+            symbol="sglang::fused_layernorm",
+            operation_name="layer_norm",
+            shape=[1, 4096],
+            dtype="bfloat16",
+            meta={"hidden_size": 4096},
+            implementation_location="python/sglang/srt/layers/layernorm.py:42",
+            replacement_point="sglang.srt.layers.layernorm",
+            call_path=["model.forward", "decoder.forward", "layer_norm"],
+            profiler_raw_output_uri="file:///evidence/profiler.json",
+            profiler_raw_output_hash="sha256:" + "2" * 64,
+            share_ratio=0.18,
+            opportunity_score=0.72,
+            upstream_dedup_status="no_match",
+            patchability="patchable",
+            selection_reason="largest reviewed Python/Triton hotspot",
+            candidate_kind="business",
+            actor="reviewer",
+            adapter_provenance=[self.provenance],
+            idempotency_key=key,
+        )
+
+    def _build_provenance(self) -> list[AdapterProvenance]:
+        return [
+            self.provenance.model_copy(update={"capability": capability})
+            for capability in (
+                "source_manager",
+                "candidate_source_intake",
+                "candidate_builder",
+                "artifact_store",
+            )
+        ]
+
     def test_task_and_candidate_are_concurrently_idempotent_and_bound(self) -> None:
         request = self._task_request()
         barrier = threading.Barrier(2)
@@ -320,30 +361,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         task = self.repository.create_manual_candidate_task(
             self._task_request("m1-hotspot-task")
         )
-        baseline = self.repository.get_baseline(task["task_id"])
-        assert baseline is not None
-        request = ManualHotspotIntakeCreate(
-            baseline_epoch_id=baseline["baseline_epoch_id"],
-            symbol="sglang::fused_layernorm",
-            operation_name="layer_norm",
-            shape=[1, 4096],
-            dtype="bfloat16",
-            meta={"hidden_size": 4096},
-            implementation_location="python/sglang/srt/layers/layernorm.py:42",
-            replacement_point="sglang.srt.layers.layernorm",
-            call_path=["model.forward", "decoder.forward", "layer_norm"],
-            profiler_raw_output_uri="file:///evidence/profiler.json",
-            profiler_raw_output_hash="sha256:" + "2" * 64,
-            share_ratio=0.18,
-            opportunity_score=0.72,
-            upstream_dedup_status="no_match",
-            patchability="patchable",
-            selection_reason="largest reviewed Python/Triton hotspot",
-            candidate_kind="business",
-            actor="reviewer",
-            adapter_provenance=[self.provenance],
-            idempotency_key="m1-hotspot-intake",
-        )
+        request = self._hotspot_request(task["task_id"])
 
         first = self.repository.create_manual_hotspot_intake(task["task_id"], request)
         replay = self.repository.create_manual_hotspot_intake(task["task_id"], request)
@@ -513,9 +531,15 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         task = self.repository.create_manual_candidate_task(
             self._task_request("m1-full-workflow-task")
         )
+        hotspot = self.repository.create_manual_hotspot_intake(
+            task["task_id"],
+            self._hotspot_request(task["task_id"], "m1-full-workflow-hotspot"),
+        )
         candidate = self.repository.create_manual_candidate(
             task["task_id"],
-            self._candidate_request(task["task_id"], "m1-full-workflow-candidate"),
+            self._candidate_request(
+                task["task_id"], "m1-full-workflow-candidate"
+            ).model_copy(update={"hotspot_id": hotspot["hotspot_id"]}),
         )
         coordinator = ManualCandidateCoordinator(self.repository)
         self.repository.register_worker(
@@ -543,12 +567,29 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             uri="file:///m1/overlay.py",
             content_hash="sha256:" + "4" * 64,
             source_snapshot_id=candidate_source.snapshot_id,
+            metadata={
+                "source_hash": candidate_source.source_hash,
+                "hotspot_id": str(hotspot["hotspot_id"]),
+                "hotspot_intake_hash": hotspot["intake_hash"],
+                "profiler_evidence_uri": hotspot["profiler_raw_output_uri"],
+                "profiler_evidence_hash": hotspot["profiler_raw_output_hash"],
+                "replacement_point": candidate["replacement_point"],
+                "candidate_kind": candidate["candidate_kind"],
+                "read_only": True,
+                "immutable": True,
+                "overlay_files": [
+                    {
+                        "path": "python/sglang/srt/layers/layernorm.py",
+                        "content_hash": "sha256:" + "4" * 64,
+                    }
+                ],
+            },
         )
         build_result = ManualCandidateBuildResult(
             candidate_id=candidate["candidate_id"],
             source=candidate_source,
             artifact=artifact,
-            adapter_provenance=[self.provenance],
+            adapter_provenance=self._build_provenance(),
         ).model_dump(mode="json")
         completed_build = self.repository.complete_job(
             build_job["job_id"],
