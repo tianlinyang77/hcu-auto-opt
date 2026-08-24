@@ -1,0 +1,11 @@
+protocol_version: m1-kernel-correctness-v1
+schema_version: m1-kernel-correctness-protocol-v1
+max_output_elements: 1000000
+max_evidence_bytes: 67108864
+max_execution_seconds: 600
+min_repeats: 2
+max_repeats: 20
+bootstrap_resamples: 10000
+confidence_level: 0.95
+bootstrap_method: percentile
+bootstrap_seed_source: input_evidence_sha256
