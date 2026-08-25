@@ -25,6 +25,7 @@ from hcuopt.contracts.v1 import (
     ManualCandidateBuildResult,
     ManualCandidateCreate,
     ManualCorrectnessResult,
+    ManualHotspotIntakeCreate,
     ManualPerformanceEvidenceResult,
 )
 from hcuopt.domain.enums import (
@@ -49,6 +50,24 @@ def _provenance(kind: str = "real") -> AdapterProvenance:
         adapter_version="1",
         implementation_kind=kind,
     )
+
+
+def _build_provenance(kind: str = "real") -> list[AdapterProvenance]:
+    return [
+        AdapterProvenance(
+            profile=PROFILE,
+            capability=capability,
+            adapter_name=f"Fixture{capability}",
+            adapter_version="1",
+            implementation_kind=kind,
+        )
+        for capability in (
+            "source_manager",
+            "candidate_source_intake",
+            "candidate_builder",
+            "artifact_store",
+        )
+    ]
 
 
 def test_m1_has_an_independent_single_candidate_state_chain() -> None:
@@ -98,6 +117,43 @@ def test_manual_candidate_contract_rejects_non_overlay_tracks() -> None:
         ManualCandidateCreate.model_validate({**base, "release_mode": "manual_only"})
 
 
+def test_manual_hotspot_intake_requires_real_traceable_profiler_evidence() -> None:
+    payload = {
+        "baseline_epoch_id": str(uuid4()),
+        "symbol": "sglang::kernel",
+        "operation_name": "layer_norm",
+        "shape": [1, 4096],
+        "dtype": "bfloat16",
+        "implementation_location": "python/sglang/kernel.py:42",
+        "replacement_point": "sglang.kernel",
+        "call_path": ["model.forward", "sglang.kernel"],
+        "profiler_raw_output_uri": "file:///evidence/profiler.json",
+        "profiler_raw_output_hash": "sha256:" + "9" * 64,
+        "share_ratio": 0.2,
+        "opportunity_score": 0.8,
+        "upstream_dedup_status": "no_match",
+        "patchability": "patchable",
+        "selection_reason": "reviewed top Python/Triton hotspot",
+        "candidate_kind": "business",
+        "actor": "reviewer",
+        "adapter_provenance": [_provenance().model_dump(mode="json")],
+        "idempotency_key": "m1-hotspot-fixture",
+    }
+    intake = ManualHotspotIntakeCreate.model_validate(payload)
+    assert intake.synthetic is False
+    with pytest.raises(ValidationError, match="fake Profiler provenance"):
+        ManualHotspotIntakeCreate.model_validate(
+            {
+                **payload,
+                "adapter_provenance": [_provenance("fake").model_dump(mode="json")],
+            }
+        )
+    with pytest.raises(ValidationError, match="requires a patchable"):
+        ManualHotspotIntakeCreate.model_validate(
+            {**payload, "patchability": "requires_native_change"}
+        )
+
+
 def test_manual_build_contract_rejects_fake_or_unbound_artifacts() -> None:
     candidate_id = uuid4()
     baseline_id = uuid4()
@@ -117,12 +173,23 @@ def test_manual_build_contract_rejects_fake_or_unbound_artifacts() -> None:
         uri="file:///artifact.py",
         content_hash="sha256:" + "d" * 64,
         source_snapshot_id=source.snapshot_id,
+        metadata={
+            "source_hash": source.source_hash,
+            "read_only": True,
+            "immutable": True,
+            "overlay_files": [
+                {
+                    "path": "python/sglang/triton_kernel.py",
+                    "content_hash": "sha256:" + "d" * 64,
+                }
+            ],
+        },
     )
     result = ManualCandidateBuildResult(
         candidate_id=candidate_id,
         source=source,
         artifact=artifact,
-        adapter_provenance=[_provenance()],
+        adapter_provenance=_build_provenance(),
     )
     assert result.synthetic is False
     with pytest.raises(ValidationError, match="fake Adapter provenance"):
@@ -130,14 +197,14 @@ def test_manual_build_contract_rejects_fake_or_unbound_artifacts() -> None:
             candidate_id=candidate_id,
             source=source,
             artifact=artifact,
-            adapter_provenance=[_provenance("fake")],
+            adapter_provenance=_build_provenance("fake"),
         )
     with pytest.raises(ValidationError, match="exact Candidate SourceSnapshot"):
         ManualCandidateBuildResult(
             candidate_id=candidate_id,
             source=source,
             artifact=artifact.model_copy(update={"source_snapshot_id": uuid4()}),
-            adapter_provenance=[_provenance()],
+            adapter_provenance=_build_provenance(),
         )
 
 
@@ -345,6 +412,7 @@ def test_openapi_exposes_m1_without_allowing_executable_public_budget() -> None:
     assert rejected.status_code == 422
     assert "/v1/manual-candidate/tasks" in schema["paths"]
     assert "/v1/manual-candidate/tasks/{task_id}/candidates" in schema["paths"]
+    assert "/v1/manual-candidate/tasks/{task_id}/hotspots" in schema["paths"]
     assert "/v1/manual-candidate/tasks/{task_id}/summary" in schema["paths"]
     assert "/v1/manual-candidate/tasks/{task_id}/signoff" in schema["paths"]
 

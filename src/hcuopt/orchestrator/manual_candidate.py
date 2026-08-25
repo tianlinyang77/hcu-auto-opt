@@ -78,6 +78,27 @@ class ManualCandidateCoordinator:
             raise Conflict("Candidate SourceSnapshot Hash differs from Candidate intake")
         if result.artifact.kind != "python_overlay":
             raise Conflict("M1 currently accepts only a Python/Triton startup Overlay")
+        hotspot = job["payload"].get("hotspot")
+        if not isinstance(hotspot, dict):
+            raise Conflict("M1 build Job is missing its durable Hotspot Intake")
+        expected_artifact_metadata = {
+            "source_hash": candidate["source_hash"],
+            "hotspot_id": str(job["payload"].get("hotspot_id")),
+            "hotspot_intake_hash": job["payload"].get("hotspot_intake_hash"),
+            "profiler_evidence_uri": hotspot.get("profiler_raw_output_uri"),
+            "profiler_evidence_hash": hotspot.get("profiler_raw_output_hash"),
+            "replacement_point": candidate["replacement_point"],
+            "candidate_kind": candidate["candidate_kind"],
+            "read_only": True,
+            "immutable": True,
+        }
+        if any(
+            result.artifact.metadata.get(name) != value
+            for name, value in expected_artifact_metadata.items()
+        ):
+            raise Conflict(
+                "M1 Artifact metadata differs from Candidate or Hotspot Intake bindings"
+            )
 
         provenance = [item.model_dump(mode="json") for item in result.adapter_provenance]
         self.repository.record_source_snapshot(

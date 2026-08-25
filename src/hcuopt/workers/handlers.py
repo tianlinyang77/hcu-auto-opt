@@ -22,6 +22,7 @@ from hcuopt.contracts.platform_v1 import (
 from hcuopt.contracts.v1 import (
     FrameworkSmokeResult,
     FrameworkSmokeVariantExecution,
+    ManualCandidateBuildResult,
     ManualPerformanceEvidenceResult,
     NoopBuildResult,
     PairedFrameworkSmokeResult,
@@ -109,6 +110,16 @@ class JobHandlers:
             builder.provenance.model_dump(mode="json")
         ]
         return result
+
+    def handle_manual_build(self, payload: dict[str, Any]) -> dict[str, Any]:
+        builder = self.adapters.require("candidate_builder")
+        result = builder.build_candidate(payload, self.output_dir)
+        validated = ManualCandidateBuildResult.model_validate(result)
+        if builder.provenance not in validated.adapter_provenance:
+            raise ExecutionSafetyError(
+                "M1 build result omits the active Candidate Builder provenance"
+            )
+        return validated.model_dump(mode="json")
 
     def handle_correctness(self, payload: dict[str, Any]) -> dict[str, Any]:
         evaluator = self.adapters.require("evaluator")

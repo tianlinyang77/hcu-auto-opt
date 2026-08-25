@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -120,6 +121,97 @@ class GitSourceManager:
         self._require_managed_candidate(candidate_path, output_dir)
         self._remove_worktree(baseline_path, candidate_path)
         self._assert_snapshot_unchanged(baseline, baseline_path)
+
+    def finalize_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate: SourceSnapshot,
+        candidate_id: UUID,
+        changed_paths: tuple[str, ...],
+        expected_source_hash: str,
+        output_dir: Path,
+    ) -> SourceSnapshot:
+        """Commit a reviewed replacement set and return a clean immutable snapshot."""
+
+        if baseline.kind != "baseline" or not baseline.clean:
+            raise SourceIntegrityError("candidate finalization requires a clean baseline")
+        if candidate.kind != "candidate" or candidate.parent_snapshot_id != baseline.snapshot_id:
+            raise SourceIntegrityError("candidate does not belong to the supplied baseline")
+        if candidate.commit != baseline.commit:
+            raise SourceIntegrityError("candidate must start from the exact baseline commit")
+        if not changed_paths:
+            raise SourceIntegrityError("M1 candidate must replace at least one source file")
+
+        baseline_path = file_uri_to_path(baseline.worktree_uri)
+        candidate_path = file_uri_to_path(candidate.worktree_uri)
+        self._require_managed_candidate(candidate_path, output_dir)
+        self._assert_snapshot_unchanged(baseline, baseline_path)
+
+        expected_paths = tuple(sorted(set(changed_paths)))
+        actual_paths = tuple(
+            sorted(
+                item
+                for item in self._git(candidate_path, "diff", "--name-only", "--").splitlines()
+                if item
+            )
+        )
+        untracked_paths = tuple(
+            sorted(
+                item
+                for item in self._git(
+                    candidate_path,
+                    "ls-files",
+                    "--others",
+                    "--exclude-standard",
+                ).splitlines()
+                if item
+            )
+        )
+        if actual_paths != expected_paths or untracked_paths:
+            raise SourceIntegrityError(
+                "candidate changes differ from the reviewed replacement set: "
+                f"expected={expected_paths}, modified={actual_paths}, untracked={untracked_paths}"
+            )
+
+        self._git(candidate_path, "add", "--", *expected_paths)
+        commit_environment = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "hcu-auto-opt",
+            "GIT_AUTHOR_EMAIL": "hcu-auto-opt@localhost",
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+            "GIT_COMMITTER_NAME": "hcu-auto-opt",
+            "GIT_COMMITTER_EMAIL": "hcu-auto-opt@localhost",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+        }
+        self._run(
+            [
+                "git",
+                "-C",
+                str(candidate_path),
+                "commit",
+                "--no-gpg-sign",
+                "-m",
+                f"hcu-auto-opt candidate {candidate_id}",
+            ],
+            env=commit_environment,
+        )
+        finalized = self._snapshot(
+            kind="candidate",
+            repository=baseline.repository,
+            path=candidate_path,
+            parent_snapshot_id=baseline.snapshot_id,
+        )
+        if not finalized.clean:
+            raise SourceIntegrityError("finalized Candidate SourceSnapshot is not clean")
+        if finalized.source_hash != expected_source_hash:
+            raise SourceIntegrityError(
+                "candidate source does not match the reviewed source hash: "
+                f"expected {expected_source_hash}, got {finalized.source_hash}"
+            )
+        if finalized.source_hash == baseline.source_hash:
+            raise SourceIntegrityError("M1 candidate cannot be a No-op Candidate")
+        self._assert_snapshot_unchanged(baseline, baseline_path)
+        return finalized
 
     def recover_candidates(self, baseline: SourceSnapshot, output_dir: Path) -> tuple[str, ...]:
         """Remove UUID-named worktrees left below the managed candidate root."""
@@ -264,9 +356,11 @@ class GitSourceManager:
 
     @staticmethod
     def _run(
-        argv: list[str], *, check: bool = True
+        argv: list[str], *, check: bool = True, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            argv, capture_output=True, text=True, check=False, env=env
+        )
         if check and result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
             raise SourceArtifactError(f"command failed ({' '.join(argv[:3])}): {detail}")

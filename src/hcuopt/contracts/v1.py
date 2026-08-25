@@ -282,7 +282,52 @@ class ManualBaselineView(BaselineView):
     adapter_profile: str
 
 
+class ManualHotspotIntakeCreate(ContractModel):
+    baseline_epoch_id: UUID
+    symbol: str = Field(min_length=1, max_length=1000)
+    operation_name: str = Field(min_length=1, max_length=500)
+    shape: list[int | str] = Field(min_length=1, max_length=32)
+    dtype: str = Field(min_length=1, max_length=100)
+    meta: dict[str, Any] = Field(default_factory=dict)
+    implementation_location: str = Field(min_length=1, max_length=2000)
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    call_path: list[str] = Field(min_length=1, max_length=64)
+    profiler_raw_output_uri: str = Field(min_length=1)
+    profiler_raw_output_hash: str = Field(pattern=SHA256_PATTERN)
+    share_ratio: float = Field(ge=0.0, le=1.0)
+    opportunity_score: float = Field(ge=0.0, le=1.0)
+    upstream_dedup_status: Literal["no_match", "match", "unknown"]
+    upstream_reference: str | None = Field(default=None, max_length=2000)
+    patchability: Literal["patchable", "unpatchable", "requires_native_change"]
+    selection_reason: str = Field(min_length=1, max_length=4000)
+    candidate_kind: ManualCandidateKind
+    actor: str = Field(min_length=1, max_length=200)
+    adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
+    synthetic: Literal[False] = False
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+    @model_validator(mode="after")
+    def require_real_profiler_provenance(self) -> ManualHotspotIntakeCreate:
+        if any(
+            item.implementation_kind == "fake" for item in self.adapter_provenance
+        ):
+            raise ValueError("M1 Hotspot Intake cannot use fake Profiler provenance")
+        if self.upstream_dedup_status == "match" and not self.upstream_reference:
+            raise ValueError("an upstream match requires its reference")
+        if self.patchability != "patchable":
+            raise ValueError("M1 Candidate intake requires a patchable Python/Triton hotspot")
+        return self
+
+
+class ManualHotspotIntakeView(ManualHotspotIntakeCreate):
+    hotspot_id: UUID
+    task_id: UUID
+    intake_hash: str = Field(pattern=SHA256_PATTERN)
+    created_at: datetime
+
+
 class ManualCandidateCreate(ContractModel):
+    hotspot_id: UUID | None = None
     baseline_epoch_id: UUID
     source_hash: str = Field(pattern=SHA256_PATTERN)
     optimization_intent: str = Field(min_length=1, max_length=2000)
@@ -307,6 +352,7 @@ class ManualCandidateView(ReadModel):
     task_id: UUID
     round_id: UUID
     baseline_epoch_id: UUID
+    hotspot_id: UUID | None = None
     source_hash: str
     variant: str
     state: CandidateState
@@ -333,18 +379,43 @@ class ManualCandidateBuildResult(ContractModel):
 
     @model_validator(mode="after")
     def bind_candidate_artifact(self) -> ManualCandidateBuildResult:
+        required_capabilities = {
+            "source_manager",
+            "candidate_source_intake",
+            "candidate_builder",
+            "artifact_store",
+        }
         if any(
             item.implementation_kind == "fake" for item in self.adapter_provenance
         ):
             raise ValueError("M1 build cannot use fake Adapter provenance")
+        if len({item.profile for item in self.adapter_provenance}) != 1:
+            raise ValueError("M1 build Adapter provenance must use one Profile")
+        capabilities = {item.capability for item in self.adapter_provenance}
+        if not required_capabilities.issubset(capabilities):
+            raise ValueError("M1 build result omits required C Adapter provenance")
         if self.source.kind != "candidate" or not self.source.clean:
             raise ValueError("M1 build requires a clean Candidate SourceSnapshot")
         if self.artifact.candidate_id != self.candidate_id:
             raise ValueError("Artifact candidate_id does not match the M1 Candidate")
         if self.artifact.source_snapshot_id != self.source.snapshot_id:
             raise ValueError("Artifact must bind the exact Candidate SourceSnapshot")
-        if self.artifact.synthetic:
-            raise ValueError("M1 cannot persist a synthetic Candidate Artifact")
+        if self.artifact.kind != "python_overlay" or self.artifact.synthetic:
+            raise ValueError("M1 requires a real Python/Triton Overlay Artifact")
+        if (
+            self.artifact.metadata.get("source_hash") != self.source.source_hash
+            or self.artifact.metadata.get("read_only") is not True
+            or self.artifact.metadata.get("immutable") is not True
+        ):
+            raise ValueError("M1 Artifact metadata does not bind its immutable source")
+        overlay_files = self.artifact.metadata.get("overlay_files")
+        if (
+            not isinstance(overlay_files, list)
+            or len(overlay_files) != 1
+            or not isinstance(overlay_files[0], dict)
+            or overlay_files[0].get("content_hash") != self.artifact.content_hash
+        ):
+            raise ValueError("M1 Overlay Artifact content differs from its file manifest")
         return self
 
 
@@ -451,6 +522,7 @@ class ManualCandidateSignoffView(ReadModel):
 class ManualCandidateSummary(ContractModel):
     task: ManualCandidateTaskView
     baseline: ManualBaselineView
+    hotspots: list[ManualHotspotIntakeView] = Field(default_factory=list)
     candidate: ManualCandidateView | None
     jobs: list[dict[str, Any]]
     artifacts: list[dict[str, Any]]

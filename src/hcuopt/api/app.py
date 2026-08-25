@@ -34,6 +34,8 @@ from hcuopt.contracts.v1 import (
     ManualCandidateTaskCreate,
     ManualCandidateTaskView,
     ManualCandidateView,
+    ManualHotspotIntakeCreate,
+    ManualHotspotIntakeView,
     ReapResult,
     ResourceCleanupReport,
     Stage0EvidenceRequest,
@@ -324,6 +326,28 @@ def create_app(
         task_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).manual_candidate_summary(task_id)
+
+    @application.post(
+        "/v1/manual-candidate/tasks/{task_id}/hotspots",
+        response_model=ManualHotspotIntakeView,
+        status_code=201,
+    )
+    def create_manual_hotspot_intake(
+        task_id: UUID,
+        payload: ManualHotspotIntakeCreate,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).create_manual_hotspot_intake(task_id, payload)
+
+    @application.get(
+        "/v1/manual-candidate/tasks/{task_id}/hotspots",
+        response_model=list[ManualHotspotIntakeView],
+    )
+    def list_manual_hotspot_intakes(
+        task_id: UUID,
+        request: Request,
+    ) -> list[dict[str, Any]]:
+        return repo(request).list_manual_hotspot_intakes(task_id)
 
     @application.post(
         "/v1/manual-candidate/tasks/{task_id}/candidates",

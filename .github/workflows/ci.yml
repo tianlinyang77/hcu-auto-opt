@@ -44,6 +44,8 @@ jobs:
       - run: >-
           pytest tests/integration/test_sglang_smoke_scripted.py
           tests/integration/test_m1_d_scripted.py -v
+      - if: runner.os == 'Linux'
+        run: pytest tests/integration/test_m1_c_scripted.py -v
 
   postgres:
     runs-on: ubuntu-latest

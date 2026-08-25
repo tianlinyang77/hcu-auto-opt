@@ -5,6 +5,10 @@ from hcuopt.runtime_probes.evidence import (
     DeploymentContentAddressedEvidencePublisher,
     EvidencePublisher,
 )
+from hcuopt.runtime_probes.m1_overlay import (
+    ManualCandidateOverlayRuntime,
+    ManualOverlayRuntimeProfile,
+)
 from hcuopt.runtime_probes.overlay import OverlayCapabilityProbe
 from hcuopt.runtime_probes.profile import RuntimeProbeProfile
 from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
@@ -12,6 +16,8 @@ from hcuopt.runtime_probes.profiler import ProfilerCapabilityProbe
 __all__ = [
     "OverlayCapabilityProbe",
     "EvidencePublisher",
+    "ManualCandidateOverlayRuntime",
+    "ManualOverlayRuntimeProfile",
     "DeploymentContentAddressedEvidencePublisher",
     "ProfilerCapabilityProbe",
     "RuntimeProbeProfile",

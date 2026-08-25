@@ -9,6 +9,7 @@ M1-A 把一份人工提供的 Triton/Python Overlay 候选，放进一条可恢�
 ```text
 Formal Stage 0（DEGRADED_MANUAL_INTAKE）
   → Immutable Baseline Epoch
+  → Manual Hotspot Intake（真实 Profiler 证据 + 人工补充信息）
   → Manual Candidate Intake
   → Build（C）
   → Correctness（D 协议；共享 HCU 租约）
@@ -124,13 +125,25 @@ Adapter Profile 私有配置。
 GET /v1/manual-candidate/tasks/<task-id>/summary
 ```
 
-### 3. 注册唯一 Candidate
+### 3. 登记人工热点
+
+```http
+POST /v1/manual-candidate/tasks/<task-id>/hotspots
+```
+
+该接口保存真实 Profiler 原始输出的 URI/Hash，以及人工核对的 shape、dtype、meta、实现位置、
+调用路径、Amdahl 占比、上游查重、可补丁性、选择理由和操作人。记录是不可变且幂等的；
+`fixture` 与 `business` 必须显式区分。完整字段和可信源码包格式见
+[M1-C 人工热点与 Overlay 制品链](m1-hotspot-overlay.md)。
+
+### 4. 注册唯一 Candidate
 
 ```http
 POST /v1/manual-candidate/tasks/<task-id>/candidates
 Content-Type: application/json
 
 {
+  "hotspot_id": "<已登记热点的 UUID>",
   "baseline_epoch_id": "<summary 中的 baseline_epoch_id>",
   "source_hash": "sha256:<64-hex>",
   "optimization_intent": "replace the manually located LayerNorm hotspot",
@@ -145,7 +158,10 @@ Content-Type: application/json
 注册成功会原子写入 Candidate 并排队 `manual_build`。同一幂等键和完全相同输入返回同一
 Candidate；同一 Task 不允许注册第二个逻辑 Candidate。
 
-### 4. 查看证据并签核
+实际 M1-C Builder 要求 `hotspot_id`；保留为空只用于尚未接入 C 侧的旧控制面契约测试，不能
+产生真实 Overlay 制品。
+
+### 5. 查看证据并签核
 
 ```http
 GET /v1/manual-candidate/tasks/<task-id>/summary

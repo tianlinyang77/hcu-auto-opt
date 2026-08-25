@@ -32,6 +32,7 @@ from hcuopt.contracts.v1 import (
     ManualCandidateCreate,
     ManualCandidateSignoffRequest,
     ManualCandidateTaskCreate,
+    ManualHotspotIntakeCreate,
     Stage0EvidenceRequest,
     Stage0ProbeResult,
     Stage0RunCreate,
@@ -2259,6 +2260,124 @@ class PostgresRepository:
         assert row is not None
         return row
 
+    def create_manual_hotspot_intake(
+        self,
+        task_id: UUID,
+        request: ManualHotspotIntakeCreate,
+    ) -> dict[str, Any]:
+        """Persist one immutable, provenance-bearing manual Profiler interpretation."""
+
+        payload = request.model_dump(mode="json", exclude={"idempotency_key"})
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        intake_hash = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+        hotspot_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:m1-hotspot:{request.idempotency_key}"
+        )
+        with self.connection() as connection:
+            task = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise NotFound(f"task not found: {task_id}")
+            if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+                raise Conflict("Hotspot Intake requires an M1 Manual Candidate task")
+            if task["state"] != TaskState.MANUAL_CANDIDATE_PENDING.value:
+                raise Conflict("Hotspot Intake must finish before Candidate registration")
+            baseline = connection.execute(
+                "SELECT * FROM baseline_epochs WHERE task_id = %s FOR SHARE",
+                (task_id,),
+            ).fetchone()
+            if baseline is None or baseline["baseline_epoch_id"] != request.baseline_epoch_id:
+                raise Conflict("Hotspot Intake must bind the task's immutable Baseline Epoch")
+
+            existing = connection.execute(
+                """
+                SELECT * FROM hotspots
+                WHERE idempotency_key = %s OR (task_id = %s AND symbol = %s)
+                FOR UPDATE
+                """,
+                (request.idempotency_key, task_id, request.symbol),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["hotspot_id"] != hotspot_id
+                    or existing["task_id"] != task_id
+                    or existing["intake_hash"] != intake_hash
+                ):
+                    raise Conflict(
+                        "Hotspot Intake identity or symbol belongs to different evidence"
+                    )
+                return self._manual_hotspot_view(existing)
+
+            row = connection.execute(
+                """
+                INSERT INTO hotspots (
+                    hotspot_id, task_id, baseline_epoch_id, symbol, share_ratio,
+                    opportunity_score, patchability, evidence, candidate_kind,
+                    actor, intake_hash, idempotency_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    hotspot_id,
+                    task_id,
+                    request.baseline_epoch_id,
+                    request.symbol,
+                    request.share_ratio,
+                    request.opportunity_score,
+                    request.patchability,
+                    Jsonb(payload),
+                    request.candidate_kind.value,
+                    request.actor,
+                    intake_hash,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            assert row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'manual_hotspot_intake_recorded', %s)
+                """,
+                (
+                    task_id,
+                    Jsonb(
+                        {
+                            "hotspot_id": str(hotspot_id),
+                            "baseline_epoch_id": str(request.baseline_epoch_id),
+                            "symbol": request.symbol,
+                            "replacement_point": request.replacement_point,
+                            "candidate_kind": request.candidate_kind.value,
+                            "profiler_raw_output_hash": request.profiler_raw_output_hash,
+                            "intake_hash": intake_hash,
+                        }
+                    ),
+                ),
+            )
+        return self._manual_hotspot_view(row)
+
+    def list_manual_hotspot_intakes(self, task_id: UUID) -> list[dict[str, Any]]:
+        task = self.get_task(task_id)
+        if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
+            raise Conflict("task is not an M1 Manual Candidate workflow")
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM hotspots WHERE task_id = %s ORDER BY created_at, hotspot_id",
+                (task_id,),
+            ).fetchall()
+        return [self._manual_hotspot_view(row) for row in rows]
+
+    @staticmethod
+    def _manual_hotspot_view(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            **dict(row["evidence"]),
+            "hotspot_id": row["hotspot_id"],
+            "task_id": row["task_id"],
+            "idempotency_key": row["idempotency_key"],
+            "intake_hash": row["intake_hash"],
+            "created_at": row["created_at"],
+        }
+
     def create_manual_candidate(
         self,
         task_id: UUID,
@@ -2287,6 +2406,7 @@ class PostgresRepository:
                 expected = {
                     "candidate_id": candidate_id,
                     "baseline_epoch_id": request.baseline_epoch_id,
+                    "hotspot_id": request.hotspot_id,
                     "source_hash": request.source_hash,
                     "optimization_intent": request.optimization_intent,
                     "replacement_point": request.replacement_point,
@@ -2352,6 +2472,26 @@ class PostgresRepository:
             ):
                 raise Conflict("M1 Candidate requires a hashed Formal Stage 0 machine report")
 
+            hotspot = None
+            if request.hotspot_id is not None:
+                hotspot = connection.execute(
+                    "SELECT * FROM hotspots WHERE hotspot_id = %s FOR SHARE",
+                    (request.hotspot_id,),
+                ).fetchone()
+                if hotspot is None:
+                    raise NotFound(f"M1 Hotspot Intake not found: {request.hotspot_id}")
+                hotspot_evidence = dict(hotspot["evidence"])
+                if (
+                    hotspot["task_id"] != task_id
+                    or hotspot["baseline_epoch_id"] != baseline["baseline_epoch_id"]
+                    or hotspot_evidence.get("replacement_point")
+                    != request.replacement_point
+                    or hotspot["candidate_kind"] != request.candidate_kind.value
+                ):
+                    raise Conflict(
+                        "M1 Candidate does not match its Hotspot Intake bindings"
+                    )
+
             metadata = {
                 "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
                 "adapter_profile": task["adapter_profile"],
@@ -2363,6 +2503,7 @@ class PostgresRepository:
                 "baseline_source_snapshot_id": str(source["snapshot_id"]),
                 "workload_hash": baseline["workload_hash"],
                 "candidate_kind": request.candidate_kind.value,
+                "hotspot_id": str(request.hotspot_id) if request.hotspot_id else None,
             }
             candidate = connection.execute(
                 """
@@ -2370,10 +2511,10 @@ class PostgresRepository:
                     candidate_id, task_id, round_id, baseline_epoch_id,
                     source_hash, variant, state, ordinal, metadata,
                     parent_candidate_id, track, release_mode, candidate_kind,
-                    optimization_intent, replacement_point, idempotency_key
+                    optimization_intent, replacement_point, idempotency_key, hotspot_id
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, 0, %s,
-                    %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING *
@@ -2394,6 +2535,7 @@ class PostgresRepository:
                     request.optimization_intent,
                     request.replacement_point,
                     request.idempotency_key,
+                    request.hotspot_id,
                 ),
             ).fetchone()
             if candidate is None:
@@ -2411,6 +2553,7 @@ class PostgresRepository:
                     "candidate_id": candidate_id,
                     "task_id": task_id,
                     "baseline_epoch_id": request.baseline_epoch_id,
+                    "hotspot_id": request.hotspot_id,
                     "source_hash": request.source_hash,
                     "optimization_intent": request.optimization_intent,
                     "replacement_point": request.replacement_point,
@@ -2463,6 +2606,10 @@ class PostgresRepository:
                 "candidate_kind": request.candidate_kind.value,
                 "budget": task["budget"],
             }
+            if hotspot is not None:
+                payload["hotspot_id"] = str(hotspot["hotspot_id"])
+                payload["hotspot_intake_hash"] = hotspot["intake_hash"]
+                payload["hotspot"] = dict(hotspot["evidence"])
             connection.execute(
                 """
                 INSERT INTO jobs (
@@ -3240,6 +3387,10 @@ class PostgresRepository:
                 "SELECT * FROM candidates WHERE task_id = %s",
                 (task_id,),
             ).fetchone()
+            hotspots = connection.execute(
+                "SELECT * FROM hotspots WHERE task_id = %s ORDER BY created_at, hotspot_id",
+                (task_id,),
+            ).fetchall()
             jobs = connection.execute(
                 "SELECT * FROM jobs WHERE task_id = %s ORDER BY created_at",
                 (task_id,),
@@ -3272,6 +3423,7 @@ class PostgresRepository:
         return {
             "task": task,
             "baseline": baseline,
+            "hotspots": [self._manual_hotspot_view(row) for row in hotspots],
             "candidate": candidate,
             "jobs": jobs,
             "artifacts": artifacts,

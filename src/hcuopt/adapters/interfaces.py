@@ -14,6 +14,7 @@ from hcuopt.contracts.platform_v1 import (
     SourceSnapshot,
     TargetSpec,
 )
+from hcuopt.contracts.v1 import ManualCandidateBuildResult
 from hcuopt.domain.models import OptimizationCandidate
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
 
@@ -38,6 +39,22 @@ class BuilderAdapter(Protocol):
     provenance: AdapterProvenance
 
     def build(self, candidate: Mapping[str, Any], output_dir: Path) -> ArtifactManifest: ...
+
+
+class CandidateBuilderAdapter(Protocol):
+    provenance: AdapterProvenance
+
+    def build_candidate(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> ManualCandidateBuildResult: ...
+
+
+class CandidateRuntimeAdapter(Protocol):
+    provenance: AdapterProvenance
+
+    def verify(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> Mapping[str, Any]: ...
 
 
 class MeasurementHarness(Protocol):
