@@ -592,7 +592,7 @@ class HySmiTelemetryCollector:
 
     def collect(self) -> Mapping[str, Any]:
         device_index = self.target.execution_host.accelerator.device_index
-        device_output = _run_text(
+        device_output, device_warnings = _run_text_with_retries(
             (
                 "hy-smi",
                 "-d",
@@ -603,7 +603,9 @@ class HySmiTelemetryCollector:
                 "--showpower",
             )
         )
-        process_output = _run_text(("hy-smi", "--showpids"))
+        process_output, process_warnings = _run_text_with_retries(
+            ("hy-smi", "--showpids")
+        )
         return {
             "device": {
                 "device_index": device_index,
@@ -629,6 +631,7 @@ class HySmiTelemetryCollector:
                 "identity_hash": None,
             },
             "background_processes": self._processes(process_output, device_index),
+            "collection_warnings": (*device_warnings, *process_warnings),
         }
 
     def _processes(self, output: str, device_index: int) -> list[dict[str, Any]]:
@@ -694,6 +697,38 @@ def _run_text(argv: Sequence[str]) -> str:
             f"stderr={completed.stderr[:1000]}"
         )
     return completed.stdout
+
+
+def _run_text_with_retries(
+    argv: Sequence[str],
+    *,
+    max_attempts: int = 3,
+) -> tuple[str, tuple[str, ...]]:
+    if max_attempts < 1:
+        raise ValueError("telemetry max_attempts must be positive")
+    warnings: list[str] = []
+    for attempt in range(1, max_attempts + 1):
+        completed = subprocess.run(
+            tuple(argv),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+            shell=False,
+        )
+        if completed.returncode == 0:
+            return completed.stdout, tuple(warnings)
+        warning = (
+            f"attempt {attempt}/{max_attempts} failed ({completed.returncode}): "
+            f"{' '.join(argv)}; stderr={completed.stderr[:1000]}"
+        )
+        warnings.append(warning)
+    raise Nmz36RuntimeError(
+        f"telemetry command failed after {max_attempts} attempts: {' '.join(argv)}; "
+        f"history={' | '.join(warnings)}"
+    )
 
 
 def _extract(value: str, pattern: str) -> float:

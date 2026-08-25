@@ -49,7 +49,7 @@ from hcuopt.contracts.v1 import (
     WorkerRegister,
     WorkerView,
 )
-from hcuopt.domain.enums import Stage0RunMode
+from hcuopt.domain.enums import Stage0RunMode, Stage0RunState
 from hcuopt.domain.errors import (
     AdapterUnavailable,
     Conflict,
@@ -303,7 +303,24 @@ def create_app(
         if profile.implementation_kind != "real":
             raise Conflict("M1 Manual Candidate requires a real Adapter Profile")
         profile.require_manual_candidate()
-        profile.validate_target(target, scope="optimization")
+        run = stage0.get("run")
+        task = stage0.get("task")
+        stage0_resolves_measurement_blocker = (
+            isinstance(run, dict)
+            and isinstance(task, dict)
+            and run.get("mode") == Stage0RunMode.FORMAL.value
+            and run.get("state") == Stage0RunState.FINALIZED.value
+            and task.get("stage0_authority") == "formal"
+        )
+        profile.validate_target(
+            target,
+            scope="optimization",
+            evidence_resolved_blockers=(
+                frozenset({"stage0_not_measured"})
+                if stage0_resolves_measurement_blocker
+                else frozenset()
+            ),
+        )
         return repository.create_manual_candidate_task(payload)
 
     @application.get(

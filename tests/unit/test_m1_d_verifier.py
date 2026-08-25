@@ -149,6 +149,9 @@ class _Suite:
         reference_source_bytes = b"def vector_add(x): return x + 1\n"
         self.hotspot = _hotspot(_hash_bytes(reference_source_bytes))
         self.task_id = uuid4()
+        self.stage0_task_id = uuid4()
+        self.stage0_workload_id = "stage0-micro-fixture-v1"
+        self.stage0_adapter_profile = "stage0-real-fixture"
         self.candidate_id = uuid4()
         self.baseline_epoch_id = uuid4()
         self.target_snapshot_id = uuid4()
@@ -160,12 +163,12 @@ class _Suite:
             root / "stage0-mde.json",
             {
                 "schema_version": "stage0-formal-report-v1",
-                "task_id": str(self.task_id),
+                "task_id": str(self.stage0_task_id),
                 "stage0_run_id": str(self.stage0_run_id),
                 "target_snapshot_id": str(self.target_snapshot_id),
                 "target_id": self.target.target_id,
-                "workload_id": "m1-fixture-v1",
-                "adapter_profile": PROFILE,
+                "workload_id": self.stage0_workload_id,
+                "adapter_profile": self.stage0_adapter_profile,
                 "mode": "degraded_manual_intake",
                 "automatic_release_allowed": False,
                 "verification": {
@@ -448,6 +451,9 @@ def _performance(
             "input_digest": suite.stage0_input_digest,
             "protocol_version": suite.stage0_protocol.protocol.protocol_version,
             "protocol_hash": suite.stage0_protocol.protocol_hash,
+            "stage0_task_id": str(suite.stage0_task_id),
+            "stage0_workload_id": suite.stage0_workload_id,
+            "stage0_adapter_profile": suite.stage0_adapter_profile,
         },
         "budget": {"max_samples": expected_samples, "max_wall_seconds": 60},
         "_job_context": {
@@ -553,6 +559,9 @@ def _performance(
         stage0_input_digest=report.input_digest,
         stage0_protocol_version=report.protocol_version,
         stage0_protocol_hash=report.protocol_hash,
+        stage0_task_id=report.stage0_task_id,
+        stage0_workload_id=report.stage0_workload_id,
+        stage0_adapter_profile=report.stage0_adapter_profile,
         lease_id=performance_lease_id,
         resource_id=suite.context.resource_id,
         fencing_token=performance_fencing_token,

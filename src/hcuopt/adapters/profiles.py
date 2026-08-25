@@ -70,6 +70,7 @@ class AdapterProfile:
         target: TargetSpec,
         *,
         scope: str = "framework_smoke",
+        evidence_resolved_blockers: frozenset[str] = frozenset(),
     ) -> None:
         if scope == "stage0":
             self.require_stage0()
@@ -81,7 +82,11 @@ class AdapterProfile:
             blockers = [
                 item.id
                 for item in target.blockers
-                if item.status == "open" and scope in item.blocks
+                if (
+                    item.status == "open"
+                    and scope in item.blocks
+                    and item.id not in evidence_resolved_blockers
+                )
             ]
             if blockers:
                 raise TargetNotReady(

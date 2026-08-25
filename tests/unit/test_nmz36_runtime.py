@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.measurement.nmz36_runtime import (
@@ -8,6 +11,7 @@ from hcuopt.measurement.nmz36_runtime import (
     ManagedProcessRegistry,
     Nmz36Stage0MeasurementProbeAdapter,
     _proc_start_token,
+    _run_text_with_retries,
 )
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
 from hcuopt.targets import load_target
@@ -63,6 +67,43 @@ PID: 42
     monkeypatch.setattr("hcuopt.measurement.nmz36_runtime._read_text", lambda _path: "worker")
 
     assert collector._processes(output, 7)[0]["managed_by_stage0"] is True
+
+
+def test_hysmi_command_retry_preserves_transient_failure(monkeypatch) -> None:
+    results = iter(
+        (
+            subprocess.CompletedProcess(
+                ("hy-smi", "--showpids"), -6, "", "free(): invalid pointer"
+            ),
+            subprocess.CompletedProcess(("hy-smi", "--showpids"), 0, "PIDs\n", ""),
+        )
+    )
+    monkeypatch.setattr(
+        "hcuopt.measurement.nmz36_runtime.subprocess.run",
+        lambda *args, **kwargs: next(results),
+    )
+
+    output, warnings = _run_text_with_retries(("hy-smi", "--showpids"))
+
+    assert output == "PIDs\n"
+    assert len(warnings) == 1
+    assert "free(): invalid pointer" in warnings[0]
+
+
+def test_hysmi_command_retry_fails_closed_after_bound(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "hcuopt.measurement.nmz36_runtime.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ("hy-smi", "--showpids"), -6, "", "free(): invalid pointer"
+        ),
+    )
+
+    with pytest.raises(Exception, match="failed after 3 attempts") as captured:
+        _run_text_with_retries(("hy-smi", "--showpids"))
+
+    assert "attempt 1/3" in str(captured.value)
+    assert "attempt 2/3" in str(captured.value)
+    assert "attempt 3/3" in str(captured.value)
 
 
 def test_nmz36_deployment_adapter_uses_job_fence_and_preserves_raw_producer(

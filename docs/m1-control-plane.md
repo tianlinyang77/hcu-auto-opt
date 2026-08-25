@@ -102,6 +102,13 @@ Build 的终态失败把 Candidate 收敛为 `build_failed`；其他 Job 终态�
 Worker 心跳过期且重试预算已耗尽时使用同一套收敛逻辑。旧 Claim/Fencing Token 不能再次
 写回。
 
+Formal Target 上若发生已独立确认的宿主管理工具崩溃，可以由部署代码提供一次性、
+fail-closed 的人工基础设施重试。该入口必须同时绑定精确 Task、Candidate 和 Job，要求
+Build/Correctness 已成功、尚无 verdict/EvidenceBundle/Signoff，并保留既有 attempts、
+last_error、失败证据和事件历史。授权只能把该 Job 的上限增加一次并写入审计事件，不能
+修改 `automatic_release_allowed=false`，也不能把部分采样转换成性能结论。普通 Candidate
+失败或无法证明为基础设施故障时仍保持终态拒绝。
+
 ## API 使用顺序
 
 ### 1. 创建绑定 Formal Stage 0 的任务
@@ -115,6 +122,7 @@ Content-Type: application/json
   "stage0_run_id": "<formal-stage0-run-uuid>",
   "adapter_profile": "<registered-real-m1-profile>",
   "baseline_source_snapshot_id": "<clean-baseline-source-uuid>",
+  "workload_id": "m1-qwen2.5-0.5b-prefill-4090-1-c1",
   "workload_hash": "sha256:<64-hex>",
   "configuration_hash": "sha256:<64-hex>",
   "idempotency_key": "m1-layernorm-20260822",
@@ -124,6 +132,11 @@ Content-Type: application/json
 
 服务端不接受命令行、挂载或任意可执行参数作为公开 Budget。具体执行命令属于已审核的
 Adapter Profile 私有配置。
+
+M1 的 `workload_id/workload_hash` 描述业务测量，不能沿用 Stage 0 微型测量
+Workload 的名字。系统会在 Job 内同时保留 Stage 0 原始 Task、Workload 和 Adapter
+Profile，并由 B/D 重新核对；两套身份必须显式区分，但仍绑定同一 Stage0Run、Target
+Snapshot、协议和机器报告 Hash。
 
 ### 2. 读取系统生成的 Baseline Epoch
 

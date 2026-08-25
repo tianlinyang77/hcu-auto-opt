@@ -29,6 +29,9 @@ class M1Stage0ReportReference(StrictMeasurementModel):
     input_digest: str = Field(pattern=SHA256_PATTERN)
     protocol_version: str = Field(min_length=1, max_length=200)
     protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_task_id: UUID
+    stage0_workload_id: str = Field(min_length=1, max_length=200)
+    stage0_adapter_profile: str = Field(min_length=1, max_length=200)
 
 
 class M1SampleBudget(StrictMeasurementModel):

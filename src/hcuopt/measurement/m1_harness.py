@@ -89,6 +89,13 @@ class M1WorkloadFactory(Protocol):
     ) -> M1PairedWorkload: ...
 
 
+@runtime_checkable
+class M1DeviceTimerFactory(Protocol):
+    """Deployment-owned timer constructor bound to the active exclusive Job."""
+
+    def __call__(self, payload: Mapping[str, Any], output_dir: Path) -> DeviceTimer: ...
+
+
 M1PlanFactory = Callable[[Mapping[str, Any], Any], M1MeasurementPlan]
 
 
@@ -103,9 +110,10 @@ class M1TrustedMeasurementHarness:
         evidence_reader: Stage0EvidenceReader | None = None,
         workload_factory: M1WorkloadFactory,
         telemetry: TelemetryCollector,
-        device_timer: DeviceTimer,
         lifecycle_recorder: ProcessLifecycleRecorder,
         cleaner: CleanupController,
+        device_timer: DeviceTimer | None = None,
+        device_timer_factory: M1DeviceTimerFactory | None = None,
         synchronize: Callable[[], None] | None = None,
         clock: HostClock | None = None,
         plan_factory: M1PlanFactory | None = None,
@@ -114,11 +122,16 @@ class M1TrustedMeasurementHarness:
             "measurement_harness"
         ):
             raise ValueError("M1 trusted measurement requires real Harness provenance")
+        if (device_timer is None) == (device_timer_factory is None):
+            raise ValueError(
+                "M1 trusted measurement requires exactly one fixed or Job-bound device timer"
+            )
         self.provenance = provenance
         self.reader = evidence_reader or Stage0EvidenceReader(evidence_root)
         self.workload_factory = workload_factory
         self.telemetry = telemetry
         self.device_timer = device_timer
+        self.device_timer_factory = device_timer_factory
         self.lifecycle_recorder = lifecycle_recorder
         self.cleaner = cleaner
         self.synchronize = synchronize
@@ -143,7 +156,11 @@ class M1TrustedMeasurementHarness:
         candidate_id = UUID(str(payload["candidate_id"]))
         if artifact.candidate_id != candidate_id or artifact.synthetic:
             raise MeasurementSafetyError("M1 performance Artifact is not the real Candidate")
-        reference = M1Stage0ReportReference.model_validate(payload["stage0_report"])
+        reference_payload = dict(payload["stage0_report"])
+        reference_payload["stage0_task_id"] = UUID(
+            str(reference_payload["stage0_task_id"])
+        )
+        reference = M1Stage0ReportReference.model_validate(reference_payload)
         authority = load_m1_stage0_authority(self.reader, reference, task_payload=payload)
         plan = self.plan_factory(payload, authority)
         _enforce_budget(payload, plan)
@@ -180,14 +197,22 @@ class M1TrustedMeasurementHarness:
         cleanup: dict[str, Any]
         acquisitions: list[M1AcquisitionEvidence] = []
         calibration = None
+        device_timer: DeviceTimer | None = None
+        owns_device_timer = False
         collection_error: BaseException | None = None
         try:
             _require_within_wall_budget(deadline_ns, self.clock)
+            if self.device_timer_factory is not None:
+                device_timer = self.device_timer_factory(payload, measurement_root)
+                owns_device_timer = True
+            else:
+                device_timer = self.device_timer
+            assert device_timer is not None
             calibration = calibrate_device_timer_v2(
                 self.clock,
-                self.device_timer,
+                device_timer,
                 device_index=target.execution_host.accelerator.device_index,
-                synchronize=self.synchronize,
+                synchronize=getattr(device_timer, "synchronize", self.synchronize),
                 device_name="hcu-device-event",
             )
             for acquisition_ordinal, arm in enumerate(plan.acquisition_order):
@@ -208,6 +233,14 @@ class M1TrustedMeasurementHarness:
         except BaseException as exc:
             collection_error = exc
         finally:
+            if owns_device_timer and device_timer is not None:
+                close = getattr(device_timer, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except BaseException as exc:
+                        if collection_error is None:
+                            collection_error = exc
             cleanup = _cleanup_resource(self.cleaner, context)
 
         failure = collection_error
