@@ -13,7 +13,9 @@
   Performance exclusive Lease；
 - 重新打开每个 ABBA acquisition 的 lifecycle、空缓存证明、Overlay import attestation 和
   HCU Event，复算 calibration、单样本 `kernel_elapsed/ns`、完整采样预算及 Stage 0 MDE；
-- 对已验证的 ABBA restart effect 执行确定性 bootstrap，输出 `faster`、`slower`、
+- 对已验证的 ABBA restart effect 执行确定性 bootstrap，并从当前 Workload 的独立
+  Baseline restart 均值复算 MDE；裁决门限固定为
+  `max(Formal Stage 0 MDE, 当前 Workload Baseline MDE)`，再输出 `faster`、`slower`、
   `inconclusive` 或 `invalid`；
 - 原子发布 `correctness.json`、`performance.json`、`evidence-bundle.json`、`signoff.md`
   和 `sha256sums.json`。

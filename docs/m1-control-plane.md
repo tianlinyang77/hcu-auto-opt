@@ -32,7 +32,9 @@ B 从持久化 Job 取得 Formal Stage 0 machine report 的 URI、SHA256、输�
 Hash，并在可信证据根下重新读取、重新哈希。只有 Stage 0 测量闸门为 `pass`，且
 Stage0Run、TargetSnapshot、Target、Workload 和注册协议全部一致时，才允许生成 M1 计划。
 计划内的 MDE、噪声、alpha、power 和 bootstrap 参数来自这一次 Formal 报告及其注册协议，
-不会写成 nmz36 的永久常量。
+不会写成 nmz36 的永久常量。D 还会使用相同 alpha、power 和 restart 预算，从当前 M1
+Workload 的 Baseline restart 均值复算一份 MDE，并以两份 MDE 的较大值作为可信门限，
+避免把 Stage 0 微型负载的可检测能力直接冒充业务 Workload 的可检测能力。
 
 测量按 `Baseline-Candidate-Candidate-Baseline` 分组执行。每个 acquisition 都必须使用新的
 外部进程，并记录进程身份、启动/回收原始记录、设备 Event、host interval、warmup、样本

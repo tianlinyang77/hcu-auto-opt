@@ -297,6 +297,8 @@ def build_m1_adjudication_result(
             if performance.confidence_interval is not None
             else None
         ),
+        "stage0_mde_ratio": performance.stage0_mde_ratio,
+        "workload_mde_ratio": performance.workload_mde_ratio,
         "credible_threshold": performance.credible_threshold,
         "automatic_release_allowed": False,
     }
@@ -627,7 +629,9 @@ def _render_signoff(
             f"- 性能判决：`{performance.verdict.value}`",
             f"- 性能变化：`{performance.effect_ratio}`",
             f"- 置信区间：`{confidence}`",
-            f"- 可信门限（Stage 0 MDE）：`{performance.credible_threshold}`",
+            f"- Stage 0 MDE：`{performance.stage0_mde_ratio}`",
+            f"- 当前 Workload Baseline MDE：`{performance.workload_mde_ratio}`",
+            f"- 可信门限（两者取较大值）：`{performance.credible_threshold}`",
             f"- 输入证据摘要：`{summary.adjudication_input_digest}`",
             "- 自动发布：`false`",
             "",
