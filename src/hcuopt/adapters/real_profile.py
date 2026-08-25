@@ -29,15 +29,22 @@ from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
 from hcuopt.adapters.sglang_evaluator import SGLangSmokeEvaluator
 from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
-from hcuopt.contracts.platform_v1 import TargetSpec
+from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.evaluation.m1_protocol import LoadedM1Protocol
+from hcuopt.evaluation.stage0_verifier import Stage0EvidenceReader
 from hcuopt.measurement.harness import (
+    CleanupController,
     EvidenceMeasurementHarness,
     FormalStage0Workload,
     ProcessLifecycleRecorder,
     TelemetryCollector,
+)
+from hcuopt.measurement.m1_harness import (
+    M1DeviceTimerFactory,
+    M1TrustedMeasurementHarness,
+    M1WorkloadFactory,
 )
 from hcuopt.measurement.nmz36_runtime import (
     HySmiTelemetryCollector,
@@ -128,6 +135,52 @@ def build_m1_correctness_registry(
             producer=producer,
             evidence_root=evidence_root,
         ),
+    )
+
+
+def build_m1_measurement_registry(
+    *,
+    profile: str,
+    evidence_root: Path,
+    workload_factory: M1WorkloadFactory,
+    telemetry: TelemetryCollector,
+    lifecycle_recorder: ProcessLifecycleRecorder,
+    cleaner: CleanupController,
+    device_timer: DeviceTimer | None = None,
+    device_timer_factory: M1DeviceTimerFactory | None = None,
+    evidence_reader: Stage0EvidenceReader | None = None,
+    synchronize: Callable[[], None] | None = None,
+    clock: HostClock | None = None,
+) -> AdapterRegistry:
+    """Build B's unique raw-evidence producer for one real M1 process factory."""
+
+    provenance = AdapterProvenance(
+        profile=profile,
+        capability="measurement_harness",
+        adapter_name="M1TrustedMeasurementHarness",
+        adapter_version="1",
+        implementation_kind="real",
+    )
+    cleaner_provenance = getattr(cleaner, "provenance", None)
+    if cleaner_provenance is not None and cleaner_provenance.profile != profile:
+        raise ValueError("M1 Measurement Harness and Resource Cleaner use another profile")
+    harness = M1TrustedMeasurementHarness(
+        provenance=provenance,
+        evidence_root=evidence_root,
+        evidence_reader=evidence_reader,
+        workload_factory=workload_factory,
+        telemetry=telemetry,
+        lifecycle_recorder=lifecycle_recorder,
+        cleaner=cleaner,
+        device_timer=device_timer,
+        device_timer_factory=device_timer_factory,
+        synchronize=synchronize,
+        clock=clock,
+    )
+    return AdapterRegistry(
+        profile=profile,
+        measurement_harness=harness,
+        resource_cleaner=cleaner,
     )
 
 

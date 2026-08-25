@@ -105,6 +105,9 @@ class M1PerformanceVerificationContext(_M1Model):
     stage0_input_digest: str = Field(pattern=SHA256_PATTERN)
     stage0_protocol_version: str = Field(min_length=1, max_length=200)
     stage0_protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    stage0_task_id: UUID
+    stage0_workload_id: str = Field(min_length=1, max_length=200)
+    stage0_adapter_profile: str = Field(min_length=1, max_length=200)
     lease_id: UUID
     lease_scope: Literal[LeaseScope.EXCLUSIVE] = LeaseScope.EXCLUSIVE
     resource_id: str = Field(min_length=1, max_length=200)
@@ -865,6 +868,9 @@ class M1PerformanceVerifier:
             "input_digest": context.stage0_input_digest,
             "protocol_version": context.stage0_protocol_version,
             "protocol_hash": context.stage0_protocol_hash,
+            "stage0_task_id": context.stage0_task_id,
+            "stage0_workload_id": context.stage0_workload_id,
+            "stage0_adapter_profile": context.stage0_adapter_profile,
         }
         if report.model_dump(mode="python") != expected_report:
             raise M1EvidenceError(
@@ -873,8 +879,9 @@ class M1PerformanceVerifier:
             )
         formal_report = self.reader.read(report.uri, report.sha256)
         if (
-            formal_report.get("task_id") != str(context.task_id)
-            or formal_report.get("adapter_profile") != context.adapter_profile
+            formal_report.get("task_id") != str(context.stage0_task_id)
+            or formal_report.get("workload_id") != context.stage0_workload_id
+            or formal_report.get("adapter_profile") != context.stage0_adapter_profile
             or formal_report.get("automatic_release_allowed") is not False
         ):
             raise M1EvidenceError(
@@ -888,7 +895,6 @@ class M1PerformanceVerifier:
                 "stage0_run_id": str(context.stage0_run_id),
                 "target_snapshot_id": str(context.target_snapshot_id),
                 "target": {"target_id": context.target_id},
-                "workload_id": context.workload_id,
             },
         )
         if verified_authority != embedded_authority:

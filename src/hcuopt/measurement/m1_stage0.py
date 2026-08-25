@@ -30,10 +30,12 @@ def load_m1_stage0_authority(
     ):
         raise Stage0EvidenceError("m1_stage0_report_invalid", "not a Formal Stage 0 report")
     expected = {
+        "task_id": str(reference.stage0_task_id),
         "stage0_run_id": str(task_payload["stage0_run_id"]),
         "target_snapshot_id": str(task_payload["target_snapshot_id"]),
         "target_id": task_payload["target"]["target_id"],
-        "workload_id": task_payload["workload_id"],
+        "workload_id": reference.stage0_workload_id,
+        "adapter_profile": reference.stage0_adapter_profile,
     }
     for field, value in expected.items():
         if report.get(field) != value:

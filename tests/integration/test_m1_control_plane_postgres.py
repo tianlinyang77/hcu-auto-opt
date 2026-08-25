@@ -126,9 +126,10 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         self.connection.commit()
         return source
 
-    def _seed_formal_stage0(self):
+    def _seed_formal_stage0(self) -> UUID:
         task_id = uuid4()
         run_id = uuid4()
+        self.stage0_task_id = task_id
         evidence = {
             "source": "independently-verified-raw-evidence",
             "stage0_run_id": str(run_id),
@@ -212,6 +213,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             stage0_run_id=self.stage0_run_id,
             adapter_profile=PROFILE,
             baseline_source_snapshot_id=self.baseline_source.snapshot_id,
+            workload_id="m1-qwen2.5-prefill-4090-v1",
             workload_hash="sha256:" + "e" * 64,
             configuration_hash="sha256:" + "f" * 64,
             idempotency_key=key,
@@ -304,6 +306,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         task = self.repository.get_task(task_id)
         self.assertEqual(task["workflow_type"], "manual_candidate")
         self.assertEqual(task["stage0_run_id"], self.stage0_run_id)
+        self.assertEqual(task["workload_id"], "m1-qwen2.5-prefill-4090-v1")
         self.assertFalse(task["automatic_release_allowed"])
         baseline = self.repository.get_baseline(task["task_id"])
         assert baseline is not None
@@ -316,6 +319,7 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         )
         self.assertEqual(baseline["stage0_run_id"], self.stage0_run_id)
         self.assertEqual(baseline["stage0_protocol_hash"], "sha256:" + "c" * 64)
+        self.assertEqual(baseline["workload_id"], "m1-qwen2.5-prefill-4090-v1")
 
         with self.assertRaises(Conflict):
             self.repository.create_manual_candidate(
@@ -360,6 +364,9 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
                 "input_digest": "sha256:" + "d" * 64,
                 "protocol_version": "s0-g0-v2",
                 "protocol_hash": "sha256:" + "c" * 64,
+                "stage0_task_id": str(self.stage0_task_id),
+                "stage0_workload_id": "nmz36-sglang-smoke-v1",
+                "stage0_adapter_profile": "nmz36-stage0-v2",
             },
         )
 
@@ -400,7 +407,12 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         candidate = self.repository.create_manual_candidate(
             task["task_id"], candidate_request
         )
+        replay_after_candidate = self.repository.create_manual_hotspot_intake(
+            task["task_id"], request
+        )
         summary = self.repository.manual_candidate_summary(task["task_id"])
+        self.assertEqual(first["hotspot_id"], replay_after_candidate["hotspot_id"])
+        self.assertEqual(first["intake_hash"], replay_after_candidate["intake_hash"])
         self.assertEqual(candidate["hotspot_id"], first["hotspot_id"])
         self.assertEqual(len(summary["hotspots"]), 1)
         self.assertEqual(summary["hotspots"][0]["candidate_kind"], "business")

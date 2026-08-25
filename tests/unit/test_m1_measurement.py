@@ -288,18 +288,22 @@ def _authority(reference: M1Stage0ReportReference) -> M1Stage0Authority:
 def _fixture(tmp_path: Path, candidate_ticks: int = 100):
     target = load_target(TARGET_PATH)
     protocol = load_registered_stage0_protocol("s0-g0-v2")
+    stage0_task_id = uuid4()
     stage0_run_id = uuid4()
     target_snapshot_id = uuid4()
+    stage0_workload_id = "stage0-micro-fixture-v1"
+    stage0_adapter_profile = "stage0-real-fixture"
     input_digest = "sha256:" + "4" * 64
     report_file = write_evidence(
         tmp_path / "reports" / "stage0.json",
         {
             "schema_version": "stage0-formal-report-v1",
-            "task_id": str(uuid4()),
+            "task_id": str(stage0_task_id),
             "stage0_run_id": str(stage0_run_id),
             "target_snapshot_id": str(target_snapshot_id),
             "target_id": target.target_id,
-            "workload_id": "m1-fixture-workload",
+            "workload_id": stage0_workload_id,
+            "adapter_profile": stage0_adapter_profile,
             "verification": {
                 "measurement": "pass",
                 "protocol_version": protocol.protocol.protocol_version,
@@ -353,6 +357,9 @@ def _fixture(tmp_path: Path, candidate_ticks: int = 100):
             "input_digest": input_digest,
             "protocol_version": protocol.protocol.protocol_version,
             "protocol_hash": protocol.protocol_hash,
+            "stage0_task_id": str(stage0_task_id),
+            "stage0_workload_id": stage0_workload_id,
+            "stage0_adapter_profile": stage0_adapter_profile,
         },
         "budget": {"max_samples": expected_samples, "max_wall_seconds": 60},
         "_job_context": {
@@ -527,6 +534,9 @@ def test_m1_plan_and_activation_fail_closed() -> None:
         input_digest="sha256:" + "2" * 64,
         protocol_version="s0-g0-v2",
         protocol_hash="sha256:" + "3" * 64,
+        stage0_task_id=uuid4(),
+        stage0_workload_id="stage0-micro-fixture-v1",
+        stage0_adapter_profile="stage0-real-fixture",
     )
     with pytest.raises(ValidationError, match="ABBA"):
         M1MeasurementPlan(

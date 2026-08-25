@@ -366,14 +366,28 @@ def test_openapi_exposes_m1_without_allowing_executable_public_budget() -> None:
             return None
 
         def stage0_run_summary(self, _stage0_run_id):
-            return {"target": target.model_dump(mode="json")}
+            old_target = target.model_copy(
+                update={
+                    "blockers": [
+                        item.model_copy(update={"status": "open"})
+                        if item.id == "stage0_not_measured"
+                        else item
+                        for item in target.blockers
+                    ]
+                }
+            )
+            return {
+                "run": {"mode": "formal", "state": "finalized"},
+                "task": {"stage0_authority": "formal"},
+                "target": old_target.model_dump(mode="json"),
+            }
 
         def create_manual_candidate_task(self, payload):
             now = datetime.now(timezone.utc)
             return {
                 "task_id": task_id,
                 "name": payload.name,
-                "workload_id": "nmz36-sglang-smoke-v1",
+                "workload_id": payload.workload_id,
                 "state": "manual_candidate_pending",
                 "project_mode": "degraded_manual_intake",
                 "budget": payload.budget.model_dump(mode="json", exclude_none=True),
@@ -403,6 +417,7 @@ def test_openapi_exposes_m1_without_allowing_executable_public_budget() -> None:
         "stage0_run_id": str(stage0_run_id),
         "adapter_profile": PROFILE,
         "baseline_source_snapshot_id": str(uuid4()),
+        "workload_id": "m1-qwen2.5-prefill-4090-v1",
         "workload_hash": "sha256:" + "1" * 64,
         "configuration_hash": "sha256:" + "2" * 64,
         "idempotency_key": "m1-openapi-fixture",

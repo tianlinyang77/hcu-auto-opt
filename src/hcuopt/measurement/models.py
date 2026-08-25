@@ -316,12 +316,27 @@ class TelemetrySnapshotV2(StrictMeasurementModel):
     device: DeviceTelemetryV2
     cache: CacheTelemetryV2
     background_processes: tuple[BackgroundProcessV2, ...] = ()
+    collection_warnings: tuple[str, ...] = Field(default=(), max_length=16)
 
     @field_validator("background_processes", mode="before")
     @classmethod
     def freeze_background_processes(cls, value: object) -> object:
         if isinstance(value, list):
             return tuple(value)
+        return value
+
+    @field_validator("collection_warnings", mode="before")
+    @classmethod
+    def freeze_collection_warnings(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("collection_warnings")
+    @classmethod
+    def validate_collection_warnings(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not warning or len(warning) > 2000 for warning in value):
+            raise ValueError("telemetry collection warnings must be bounded non-empty text")
         return value
 
     @model_validator(mode="after")

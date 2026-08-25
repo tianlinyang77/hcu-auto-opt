@@ -391,7 +391,8 @@ class PostgresRepository:
                     run.state AS run_state,
                     run.protocol_version,
                     run.target_snapshot_id,
-                    task.workload_id,
+                    task.task_id AS stage0_task_id,
+                    task.workload_id AS stage0_workload_id,
                     task.stage0_authority,
                     task.project_mode,
                     task.automatic_release_allowed,
@@ -508,7 +509,7 @@ class PostgresRepository:
                 (
                     task_id,
                     request.name,
-                    stage0["workload_id"],
+                    request.workload_id,
                     request.idempotency_key,
                     TaskState.MANUAL_CANDIDATE_PENDING.value,
                     Jsonb(budget),
@@ -528,7 +529,7 @@ class PostgresRepository:
                 assert task is not None
             expected_task = {
                 "name": request.name,
-                "workload_id": stage0["workload_id"],
+                "workload_id": request.workload_id,
                 "budget": budget,
                 "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
                 "target_id": stage0["target_id"],
@@ -559,7 +560,7 @@ class PostgresRepository:
                     task["task_id"],
                     hardware_fingerprint,
                     software_fingerprint,
-                    stage0["workload_id"],
+                    request.workload_id,
                     request.configuration_hash,
                     WorkflowType.MANUAL_CANDIDATE.value,
                     stage0["target_snapshot_id"],
@@ -579,6 +580,7 @@ class PostgresRepository:
                 assert baseline is not None
             expected_baseline = {
                 "baseline_epoch_id": baseline_epoch_id,
+                "workload_id": request.workload_id,
                 "target_snapshot_id": stage0["target_snapshot_id"],
                 "stage0_run_id": request.stage0_run_id,
                 "stage0_protocol_hash": stage0_protocol_hash,
@@ -614,6 +616,9 @@ class PostgresRepository:
                                 request.baseline_source_snapshot_id
                             ),
                             "target_snapshot_id": str(stage0["target_snapshot_id"]),
+                            "stage0_task_id": str(stage0["stage0_task_id"]),
+                            "stage0_workload_id": stage0["stage0_workload_id"],
+                            "workload_id": request.workload_id,
                             "project_mode": stage0["project_mode"],
                             "automatic_release_allowed": False,
                         }
@@ -2284,15 +2289,6 @@ class PostgresRepository:
                 raise NotFound(f"task not found: {task_id}")
             if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
                 raise Conflict("Hotspot Intake requires an M1 Manual Candidate task")
-            if task["state"] != TaskState.MANUAL_CANDIDATE_PENDING.value:
-                raise Conflict("Hotspot Intake must finish before Candidate registration")
-            baseline = connection.execute(
-                "SELECT * FROM baseline_epochs WHERE task_id = %s FOR SHARE",
-                (task_id,),
-            ).fetchone()
-            if baseline is None or baseline["baseline_epoch_id"] != request.baseline_epoch_id:
-                raise Conflict("Hotspot Intake must bind the task's immutable Baseline Epoch")
-
             existing = connection.execute(
                 """
                 SELECT * FROM hotspots
@@ -2311,6 +2307,15 @@ class PostgresRepository:
                         "Hotspot Intake identity or symbol belongs to different evidence"
                     )
                 return self._manual_hotspot_view(existing)
+
+            if task["state"] != TaskState.MANUAL_CANDIDATE_PENDING.value:
+                raise Conflict("Hotspot Intake must finish before Candidate registration")
+            baseline = connection.execute(
+                "SELECT * FROM baseline_epochs WHERE task_id = %s FOR SHARE",
+                (task_id,),
+            ).fetchone()
+            if baseline is None or baseline["baseline_epoch_id"] != request.baseline_epoch_id:
+                raise Conflict("Hotspot Intake must bind the task's immutable Baseline Epoch")
 
             row = connection.execute(
                 """
@@ -2449,8 +2454,18 @@ class PostgresRepository:
                 raise NotFound("M1 Target Snapshot no longer exists")
             stage0_authority = connection.execute(
                 """
-                SELECT evidence, report FROM stage0_evidence
-                WHERE stage0_run_id = %s
+                SELECT
+                    evidence.evidence,
+                    evidence.report,
+                    stage0_task.task_id AS stage0_task_id,
+                    stage0_task.workload_id AS stage0_workload_id,
+                    run.adapter_profile AS stage0_adapter_profile
+                FROM stage0_evidence AS evidence
+                JOIN stage0_runs AS run
+                  ON run.stage0_run_id = evidence.stage0_run_id
+                JOIN tasks AS stage0_task
+                  ON stage0_task.task_id = run.task_id
+                WHERE evidence.stage0_run_id = %s
                 FOR SHARE
                 """,
                 (task["stage0_run_id"],),
@@ -2465,6 +2480,9 @@ class PostgresRepository:
                 "input_digest": formal_evidence.get("input_digest"),
                 "protocol_version": formal_evidence.get("protocol_version"),
                 "protocol_hash": formal_evidence.get("protocol_hash"),
+                "stage0_task_id": str(stage0_authority["stage0_task_id"]),
+                "stage0_workload_id": stage0_authority["stage0_workload_id"],
+                "stage0_adapter_profile": stage0_authority["stage0_adapter_profile"],
             }
             if (
                 any(not isinstance(value, str) for value in stage0_report.values())

@@ -257,6 +257,7 @@ class ManualCandidateTaskCreate(ContractModel):
     stage0_run_id: UUID
     adapter_profile: str = Field(min_length=1, max_length=200)
     baseline_source_snapshot_id: UUID
+    workload_id: str = Field(min_length=1, max_length=200)
     workload_hash: str = Field(pattern=SHA256_PATTERN)
     configuration_hash: str = Field(pattern=SHA256_PATTERN)
     idempotency_key: str = Field(min_length=8, max_length=300)
