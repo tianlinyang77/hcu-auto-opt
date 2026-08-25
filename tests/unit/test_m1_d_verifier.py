@@ -413,6 +413,7 @@ def _performance(
     summary=None,
     cleanup=True,
     bindings=True,
+    baseline_ticks_by_restart: list[int] | None = None,
 ):
     provenance = _provenance("measurement_harness")
     round_id = uuid4()
@@ -459,15 +460,27 @@ def _performance(
     clock = FixtureClock()
 
     def factory(arm, ordinal, _payload, output_dir):
+        restart_ordinal = ordinal // 4
+        baseline_ticks = (
+            baseline_ticks_by_restart[restart_ordinal]
+            if baseline_ticks_by_restart is not None
+            else 100
+        )
+        per_restart_candidate_ticks = (
+            max(1, round(baseline_ticks * (1.0 - effects[restart_ordinal])))
+            if baseline_ticks_by_restart is not None
+            else candidate_ticks
+        )
         return FixtureWorkload(
             arm,
             ordinal,
             clock,
             suite.target.inference_image.registry_digest,
             suite.artifact.content_hash,
-            candidate_ticks,
+            per_restart_candidate_ticks,
             output_dir,
             provenance,
+            baseline_ticks,
         )
 
     harness = M1TrustedMeasurementHarness(
@@ -816,6 +829,29 @@ def test_performance_verdicts_use_restart_ci_and_stage0_mde(
     _, result = _performance(suite, correctness, effects)
     assert result.verdict is expected
     assert result.confidence_interval is not None
+    assert result.stage0_mde_ratio == pytest.approx(0.03)
+    assert result.workload_mde_ratio == pytest.approx(0.0)
+    assert result.credible_threshold == pytest.approx(0.03)
+
+
+def test_performance_uses_current_workload_mde_when_it_is_more_conservative(
+    tmp_path: Path,
+) -> None:
+    suite = _Suite(tmp_path / "workload-mde")
+    correctness = suite.verify()
+
+    _, result = _performance(
+        suite,
+        correctness,
+        [0.15] * 10,
+        baseline_ticks_by_restart=[50, 60, 70, 80, 90, 110, 120, 130, 140, 150],
+    )
+
+    assert result.verdict is ManualCandidateVerdict.INCONCLUSIVE
+    assert result.stage0_mde_ratio == pytest.approx(0.03)
+    assert result.workload_mde_ratio is not None
+    assert result.workload_mde_ratio > 0.3
+    assert result.credible_threshold == result.workload_mde_ratio
 
 
 def test_performance_ignores_producer_summary_and_fails_closed(tmp_path: Path) -> None:

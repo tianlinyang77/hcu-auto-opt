@@ -152,6 +152,7 @@ class FixtureWorkload:
         candidate_ticks: int,
         output_dir: Path,
         provenance: AdapterProvenance,
+        baseline_ticks: int = 100,
     ) -> None:
         self.arm = arm
         self.ordinal = ordinal
@@ -163,6 +164,7 @@ class FixtureWorkload:
         self.image_digest = image_digest
         self.artifact_hash = artifact_hash
         self.candidate_ticks = candidate_ticks
+        self.baseline_ticks = baseline_ticks
         self.output_dir = output_dir
         self.provenance = provenance
         self.sample_ordinal = 0
@@ -228,7 +230,7 @@ class FixtureWorkload:
         started_host = self.clock.now_ns()
         finished_host = self.clock.now_ns()
         base = started_host * 10
-        elapsed = self.candidate_ticks if self.arm == "candidate" else 100
+        elapsed = self.candidate_ticks if self.arm == "candidate" else self.baseline_ticks
         record = M1DeviceEventRecord(
             process_id=self.identity.pid,
             process_start_token=self.identity.start_token,

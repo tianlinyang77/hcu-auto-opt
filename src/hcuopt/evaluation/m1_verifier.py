@@ -6,7 +6,7 @@ import hashlib
 import math
 import random
 from enum import Enum
-from statistics import fmean
+from statistics import NormalDist, fmean, stdev
 from typing import Any, Literal
 from uuid import UUID
 
@@ -314,6 +314,7 @@ class _VerifiedPerformanceInput(_M1Model):
     evidence_hash: str = Field(pattern=SHA256_PATTERN)
     stage0_mde_ratio: float = Field(gt=0, lt=1)
     stage0_alpha: float = Field(gt=0, lt=1)
+    stage0_power: float = Field(gt=0.5, lt=1)
     bootstrap_resamples: int = Field(ge=1000)
     restarts: tuple[M1RestartSamples, ...] = Field(min_length=2, max_length=1000)
     metric_name: Literal["kernel_elapsed"]
@@ -383,6 +384,8 @@ class M1PerformanceVerificationResult(_M1Model):
     cleanup_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     effect_ratio: float | None = None
     confidence_interval: tuple[float, float] | None = None
+    stage0_mde_ratio: float | None = Field(default=None, gt=0, lt=1)
+    workload_mde_ratio: float | None = Field(default=None, ge=0)
     credible_threshold: float
     restart_effects: tuple[float, ...] = ()
     failure_codes: tuple[str, ...] = ()
@@ -1055,6 +1058,7 @@ class M1PerformanceVerifier:
             evidence_hash=reference.sha256,
             stage0_mde_ratio=verified_authority.mde_ratio,
             stage0_alpha=verified_authority.alpha,
+            stage0_power=verified_authority.power,
             bootstrap_resamples=verified_authority.bootstrap_resamples,
             restarts=tuple(restarts),
             metric_name=evidence.plan.metric_name,
@@ -1167,6 +1171,7 @@ def _adjudicate_verified_performance(
             "evidence_hash": evidence.evidence_hash,
             "stage0_mde_ratio": evidence.stage0_mde_ratio,
             "stage0_alpha": evidence.stage0_alpha,
+            "stage0_power": evidence.stage0_power,
             "bootstrap_resamples": evidence.bootstrap_resamples,
             "restarts": evidence.restarts,
             "plan_hash": evidence.plan_hash,
@@ -1208,7 +1213,12 @@ def _adjudicate_verified_performance(
         evidence.bootstrap_resamples,
         confidence,
     )
-    threshold = evidence.stage0_mde_ratio
+    workload_mde = _workload_baseline_mde(
+        evidence.restarts,
+        alpha=evidence.stage0_alpha,
+        power=evidence.stage0_power,
+    )
+    threshold = max(evidence.stage0_mde_ratio, workload_mde)
     if lower > threshold:
         verdict = ManualCandidateVerdict.FASTER
     elif upper < -threshold:
@@ -1240,12 +1250,14 @@ def _adjudicate_verified_performance(
         cleanup_hash=evidence.cleanup_hash,
         effect_ratio=effect,
         confidence_interval=(lower, upper),
+        stage0_mde_ratio=evidence.stage0_mde_ratio,
+        workload_mde_ratio=workload_mde,
         credible_threshold=threshold,
         restart_effects=effects,
         reasons=(
-            "effect confidence interval exceeds the Stage 0 MDE"
+            "effect confidence interval exceeds the conservative detectability threshold"
             if verdict in {ManualCandidateVerdict.FASTER, ManualCandidateVerdict.SLOWER}
-            else "effect is not distinguishable from the Stage 0 MDE",
+            else "effect is not distinguishable from the conservative detectability threshold",
         ),
     )
 
@@ -1256,6 +1268,11 @@ def _invalid_performance(
     code: str,
     reason: str,
 ) -> M1PerformanceVerificationResult:
+    workload_mde = _workload_baseline_mde(
+        evidence.restarts,
+        alpha=evidence.stage0_alpha,
+        power=evidence.stage0_power,
+    )
     return M1PerformanceVerificationResult(
         verdict=ManualCandidateVerdict.INVALID,
         input_digest=input_digest,
@@ -1279,7 +1296,9 @@ def _invalid_performance(
         cache_namespaces=evidence.cache_namespaces,
         environment_fingerprint=evidence.environment_fingerprint,
         cleanup_hash=evidence.cleanup_hash,
-        credible_threshold=evidence.stage0_mde_ratio,
+        stage0_mde_ratio=evidence.stage0_mde_ratio,
+        workload_mde_ratio=workload_mde,
+        credible_threshold=max(evidence.stage0_mde_ratio, workload_mde),
         failure_codes=(code,),
         reasons=(reason,),
     )
@@ -1301,6 +1320,31 @@ def _invalid_performance_reference(
         failure_codes=(code,),
         reasons=(reason,),
     )
+
+
+def _workload_baseline_mde(
+    restarts: tuple[M1RestartSamples, ...],
+    *,
+    alpha: float,
+    power: float,
+) -> float:
+    """Recompute detectability from the current workload's independent Baseline restarts."""
+
+    baseline_means = tuple(fmean(item.baseline_ns) for item in restarts)
+    overall_mean = fmean(baseline_means)
+    sigma = stdev(baseline_means)
+    mde = (
+        (NormalDist().inv_cdf(1 - alpha / 2) + NormalDist().inv_cdf(power))
+        * sigma
+        * math.sqrt(2 / len(baseline_means))
+        / overall_mean
+    )
+    if not math.isfinite(mde) or mde < 0:
+        raise M1EvidenceError(
+            "performance_workload_mde_invalid",
+            "current workload Baseline restarts produced an invalid MDE",
+        )
+    return mde
 
 
 def _compare_outputs(
