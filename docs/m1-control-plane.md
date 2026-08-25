@@ -1,4 +1,4 @@
-# M1-A 手工 Candidate 控制面
+# M1 手工 Candidate 可信评估链
 
 ## 这阶段在做什么
 
@@ -18,9 +18,29 @@ Formal Stage 0（DEGRADED_MANUAL_INTAKE）
   → Human Signoff
 ```
 
-当前代码完成的是 A 侧控制面、状态机、数据库、API 和公共契约。默认 Adapter Catalog
-故意没有注册 M1 Real Profile，因此尚不能把 Fake Adapter 当真实 M1 跑通。B/C/D 的实现
-接齐并注册同名 Profile 后，这条链才会开始领取真实 Job。
+当前代码已完成 A 侧控制面，并接入 B 侧 `manual_performance` Worker 和可信成对测量核心。
+默认 Adapter Catalog 仍故意没有注册 M1 Real Profile，因此尚不能把 Fake Adapter 当真实
+M1 跑通。C 的启动 Overlay 进程工厂和 D 的最终 adjudicator 接齐并注册同名 Profile 后，
+才能领取真实闭环 Job。
+
+## B 测量链当前能力
+
+B 从持久化 Job 取得 Formal Stage 0 machine report 的 URI、SHA256、输入证据 Hash 和协议
+Hash，并在可信证据根下重新读取、重新哈希。只有 Stage 0 测量闸门为 `pass`，且
+Stage0Run、TargetSnapshot、Target、Workload 和注册协议全部一致时，才允许生成 M1 计划。
+计划内的 MDE、噪声、alpha、power 和 bootstrap 参数来自这一次 Formal 报告及其注册协议，
+不会写成 nmz36 的永久常量。
+
+测量按 `Baseline-Candidate-Candidate-Baseline` 分组执行。每个 acquisition 都必须使用新的
+外部进程，并记录进程身份、启动/回收原始记录、设备 Event、host interval、warmup、样本
+顺序、镜像、缓存 namespace、Overlay import attestation 和运行前后遥测。采集结束后再执行
+Fence/Health；只有资源和 fencing token 与本次 Lease 一致时，才把清理结果写进最终证据。
+Candidate 必须证明加载的是 Job 绑定的 Artifact Hash；Baseline 必须证明未加载 Candidate。
+
+B 最终只返回一个指向 `m1-kernel-performance-evidence-v1` 原始文件的 `MeasurementSeries`。
+主文件 Hash 同时覆盖计划、样本和清理结果，且模型明确禁止 producer verdict。
+`faster/slower/inconclusive/invalid`
+只能由 D 重新读取原始样本后给出。
 
 ## 不可变绑定
 
@@ -151,5 +171,16 @@ export HCUOPT_DATABASE_URL=postgresql://hcuopt:hcuopt@127.0.0.1:5432/hcuopt
 pytest tests/integration/test_m1_control_plane_postgres.py -q
 ```
 
-这两组测试通过只能验收 A 侧控制面；只有 B/C/D Real Adapter 接齐后，才运行 nmz36 上的
-M1 Target Lock 实机闭环。
+B 的可移植契约、no-op、已知信号、Stage 0 报告篡改和 Worker fail-closed 测试：
+
+```bash
+pytest tests/unit/test_m1_measurement.py tests/unit/test_m1_control_plane.py -q
+```
+
+nmz36 Target Lock 测试还需要 C 提供真实的 `M1WorkloadFactory`：它负责在锁定镜像中分别
+启动干净 Baseline 和只读 startup Overlay Candidate，并返回 Artifact import attestation、
+哈希化缓存证明和实现 B Event Record 协议的进程入口。
+B 不接受 Job payload 传入命令、mount 或任意 Python 入口。
+
+本地测试能验收 A 控制面和 B 证据生产逻辑；只有 C/D Real Adapter 接齐后，才运行 nmz36
+上的 M1 Target Lock 实机闭环。
