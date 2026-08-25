@@ -27,7 +27,7 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: >-
           pytest tests/unit/test_stage0_protocol.py tests/unit/test_stage0_statistics.py
-          tests/unit/test_stage0_verifier.py -v
+          tests/unit/test_stage0_verifier.py tests/unit/test_m1_measurement.py -v
 
   scripted-smoke:
     strategy:
@@ -41,6 +41,8 @@ jobs:
           python-version: "3.10"
       - run: python -m pip install -e ".[dev]"
       - run: pytest tests/integration/test_sglang_smoke_scripted.py -v
+      - if: runner.os == 'Linux'
+        run: pytest tests/integration/test_m1_c_scripted.py -v
 
   postgres:
     runs-on: ubuntu-latest

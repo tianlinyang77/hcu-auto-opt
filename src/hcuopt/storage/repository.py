@@ -2444,6 +2444,33 @@ class PostgresRepository:
             ).fetchone()
             if target is None:
                 raise NotFound("M1 Target Snapshot no longer exists")
+            stage0_authority = connection.execute(
+                """
+                SELECT evidence, report FROM stage0_evidence
+                WHERE stage0_run_id = %s
+                FOR SHARE
+                """,
+                (task["stage0_run_id"],),
+            ).fetchone()
+            if stage0_authority is None:
+                raise Conflict("M1 Candidate cannot find its Formal Stage 0 authority")
+            formal_evidence = stage0_authority["evidence"]
+            formal_report = stage0_authority["report"]
+            stage0_report = {
+                "uri": formal_report.get("machine_report_uri"),
+                "sha256": formal_report.get("machine_report_hash"),
+                "input_digest": formal_evidence.get("input_digest"),
+                "protocol_version": formal_evidence.get("protocol_version"),
+                "protocol_hash": formal_evidence.get("protocol_hash"),
+            }
+            if (
+                any(not isinstance(value, str) for value in stage0_report.values())
+                or stage0_report["protocol_hash"] != baseline["stage0_protocol_hash"]
+                or stage0_report["protocol_version"] != formal_report.get("protocol_version")
+                or re.fullmatch(SHA256_PATTERN, stage0_report["sha256"]) is None
+                or re.fullmatch(SHA256_PATTERN, stage0_report["input_digest"]) is None
+            ):
+                raise Conflict("M1 Candidate requires a hashed Formal Stage 0 machine report")
 
             hotspot = None
             if request.hotspot_id is not None:
@@ -2467,8 +2494,10 @@ class PostgresRepository:
 
             metadata = {
                 "workflow_type": WorkflowType.MANUAL_CANDIDATE.value,
+                "adapter_profile": task["adapter_profile"],
                 "stage0_run_id": str(task["stage0_run_id"]),
                 "stage0_protocol_hash": baseline["stage0_protocol_hash"],
+                "stage0_report": stage0_report,
                 "target_snapshot_id": str(task["target_snapshot_id"]),
                 "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
                 "baseline_source_snapshot_id": str(source["snapshot_id"]),
@@ -2556,6 +2585,7 @@ class PostgresRepository:
             payload = {
                 "task_id": str(task_id),
                 "candidate_id": str(candidate_id),
+                "adapter_profile": task["adapter_profile"],
                 "round_id": str(round_id),
                 "baseline_epoch_id": str(baseline["baseline_epoch_id"]),
                 "baseline_source": baseline_source.model_dump(mode="json"),
@@ -2564,6 +2594,7 @@ class PostgresRepository:
                 "target": target["specification"],
                 "stage0_run_id": str(task["stage0_run_id"]),
                 "stage0_protocol_hash": baseline["stage0_protocol_hash"],
+                "stage0_report": stage0_report,
                 "workload_id": task["workload_id"],
                 "workload_hash": baseline["workload_hash"],
                 "configuration_hash": baseline["configuration_hash"],

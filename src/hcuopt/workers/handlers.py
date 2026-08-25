@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from hcuopt.adapters.interfaces import PairedFrameworkSmokeEvaluator
+from hcuopt.adapters.interfaces import (
+    ManualPerformanceMeasurementHarness,
+    PairedFrameworkSmokeEvaluator,
+)
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.platform_v1 import (
@@ -20,6 +23,7 @@ from hcuopt.contracts.v1 import (
     FrameworkSmokeResult,
     FrameworkSmokeVariantExecution,
     ManualCandidateBuildResult,
+    ManualPerformanceEvidenceResult,
     NoopBuildResult,
     PairedFrameworkSmokeResult,
     SourcePreparationResult,
@@ -132,6 +136,17 @@ class JobHandlers:
             "adapter_provenance": [harness.provenance.model_dump(mode="json")],
             "synthetic": measurement.synthetic,
         }
+
+    def handle_manual_performance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        harness = self.adapters.require("measurement_harness")
+        if not isinstance(harness, ManualPerformanceMeasurementHarness):
+            raise AdapterUnavailable(
+                "M1 manual_performance requires the trusted paired measurement interface"
+            )
+        result = ManualPerformanceEvidenceResult.model_validate(
+            harness.run_manual_performance(payload, self.output_dir)
+        )
+        return result.model_dump(mode="json")
 
     def handle_e2e(self, payload: dict[str, Any]) -> dict[str, Any]:
         evaluator = self.adapters.require("evaluator")
