@@ -253,6 +253,8 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             call_path=["model.forward", "decoder.forward", "layer_norm"],
             profiler_raw_output_uri="file:///evidence/profiler.json",
             profiler_raw_output_hash="sha256:" + "2" * 64,
+            correctness_spec_uri="file:///evidence/correctness-spec.json",
+            correctness_spec_hash="sha256:" + "3" * 64,
             share_ratio=0.18,
             opportunity_score=0.72,
             upstream_dedup_status="no_match",
@@ -637,16 +639,29 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
         assert correctness_job is not None
         self.assertEqual(correctness_job["job_type"], JobType.MANUAL_CORRECTNESS.value)
         correctness_uri = "file:///m1/correctness.json"
+        correctness_verification_uri = "file:///m1/correctness-verification.json"
+        correctness_provenance = self.provenance.model_copy(
+            update={"capability": "kernel_correctness"}
+        )
         correctness_result = ManualCorrectnessResult(
             candidate_id=candidate["candidate_id"],
             verdict="correct",
             protocol_version="m1-correctness-v1",
             raw_evidence_uri=correctness_uri,
             raw_evidence_hash="sha256:" + "5" * 64,
-            adapter_provenance=[self.provenance],
+            verification_artifact_uri=correctness_verification_uri,
+            verification_artifact_hash="sha256:" + "4" * 64,
+            adapter_provenance=[correctness_provenance],
             cleanup_evidence={
-                "fence": {"fenced": True},
-                "health": {"healthy": True},
+                "fence": {
+                    "fenced": True,
+                    "resource_id": correctness_job["resource_id"],
+                    "fencing_token": correctness_job["fencing_token"],
+                },
+                "health": {
+                    "healthy": True,
+                    "resource_id": correctness_job["resource_id"],
+                },
             },
         ).model_dump(mode="json")
         completed_correctness = self.repository.complete_job(
@@ -713,7 +728,11 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             passed=True,
             metrics={"verdict": "faster"},
             measurement=measurement,
-            evidence_uris=[correctness_uri, measurement.raw_samples_uri],
+            evidence_uris=[
+                correctness_uri,
+                correctness_verification_uri,
+                measurement.raw_samples_uri,
+            ],
             adapter_provenance=[self.provenance],
         )
         evidence = EvidenceBundle(
@@ -726,7 +745,11 @@ class M1ControlPlanePostgresTests(unittest.TestCase):
             artifact_ids=[artifact.artifact_id],
             measurement_ids=[measurement.measurement_id],
             summary={"verdict": "faster", "automatic_release_allowed": False},
-            raw_uris=[correctness_uri, measurement.raw_samples_uri],
+            raw_uris=[
+                correctness_uri,
+                correctness_verification_uri,
+                measurement.raw_samples_uri,
+            ],
             adapter_provenance=[self.provenance],
         )
         adjudication_result = ManualCandidateAdjudicationResult(

@@ -294,6 +294,8 @@ class ManualHotspotIntakeCreate(ContractModel):
     call_path: list[str] = Field(min_length=1, max_length=64)
     profiler_raw_output_uri: str = Field(min_length=1)
     profiler_raw_output_hash: str = Field(pattern=SHA256_PATTERN)
+    correctness_spec_uri: str = Field(min_length=1)
+    correctness_spec_hash: str = Field(pattern=SHA256_PATTERN)
     share_ratio: float = Field(ge=0.0, le=1.0)
     opportunity_score: float = Field(ge=0.0, le=1.0)
     upstream_dedup_status: Literal["no_match", "match", "unknown"]
@@ -425,6 +427,8 @@ class ManualCorrectnessResult(ContractModel):
     protocol_version: str = Field(min_length=1, max_length=200)
     raw_evidence_uri: str = Field(min_length=1)
     raw_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    verification_artifact_uri: str = Field(min_length=1)
+    verification_artifact_hash: str = Field(pattern=SHA256_PATTERN)
     adapter_provenance: list[AdapterProvenance] = Field(min_length=1)
     cleanup_evidence: dict[str, Any]
     synthetic: Literal[False] = False
@@ -435,6 +439,12 @@ class ManualCorrectnessResult(ContractModel):
             item.implementation_kind == "fake" for item in self.adapter_provenance
         ):
             raise ValueError("M1 correctness cannot use fake Adapter provenance")
+        if len({item.profile for item in self.adapter_provenance}) != 1:
+            raise ValueError("M1 correctness Adapter provenance must use one Profile")
+        if "kernel_correctness" not in {
+            item.capability for item in self.adapter_provenance
+        }:
+            raise ValueError("M1 correctness result omits the D verifier provenance")
         fence = self.cleanup_evidence.get("fence")
         health = self.cleanup_evidence.get("health")
         if not isinstance(fence, dict) or fence.get("fenced") is not True:

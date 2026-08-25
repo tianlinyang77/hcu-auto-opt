@@ -19,10 +19,12 @@ Formal Stage 0（DEGRADED_MANUAL_INTAKE）
   → Human Signoff
 ```
 
-当前代码已完成 A 侧控制面，并接入 B 侧 `manual_performance` Worker 和可信成对测量核心。
-默认 Adapter Catalog 仍故意没有注册 M1 Real Profile，因此尚不能把 Fake Adapter 当真实
-M1 跑通。C 的启动 Overlay 进程工厂和 D 的最终 adjudicator 接齐并注册同名 Profile 后，
-才能领取真实闭环 Job。
+当前代码已完成 A/B/C/D 的公共接线：C 构建不可变 Overlay，D Correctness Worker 重读
+原始数值证据并发布 Verification Artifact，B 通过唯一 Harness 产生 MeasurementSeries，
+D Adjudicator 再次重读正确性和性能证据。四段能力必须组合成同一个 opt-in Real Profile。
+默认 Adapter Catalog 仍故意不注册 M1，因此测试夹具或不完整 Worker 不能开放真实任务。
+业务 Hotspot 冻结后，还需提供对应的 `M1WorkloadFactory` 和 Correctness Evidence Producer，
+再进行 nmz36 Target Lock 实机闭环。
 
 ## B 测量链当前能力
 
@@ -72,7 +74,9 @@ B 最终只返回一个指向 `m1-kernel-performance-evidence-v1` 原始文件�
 所有真实结果都必须带 Real Adapter provenance；Fake provenance、Synthetic Artifact 或
 Synthetic Measurement 会在 Contract 层失败。正确性和性能 Job 都必须提交 fenced、healthy
 的清理证据。D 的最终 EvidenceBundle 还必须只绑定本轮 Measurement ID，并包含 Candidate
-Artifact、正确性原始证据 URI 和性能 Raw Samples URI；漏掉任一项都不能写入 verdict。
+Artifact、正确性原始证据、正确性 Verification Artifact 和性能 Raw Samples URI；漏掉任一项
+都不能写入 verdict。两次 HCU Job 的 Lease ID、Resource ID 和 Fencing Token 由控制面传给
+Adjudicator，D 不接受 Producer 自报的租约身份。
 
 ## 状态机
 
@@ -131,9 +135,10 @@ GET /v1/manual-candidate/tasks/<task-id>/summary
 POST /v1/manual-candidate/tasks/<task-id>/hotspots
 ```
 
-该接口保存真实 Profiler 原始输出的 URI/Hash，以及人工核对的 shape、dtype、meta、实现位置、
-调用路径、Amdahl 占比、上游查重、可补丁性、选择理由和操作人。记录是不可变且幂等的；
-`fixture` 与 `business` 必须显式区分。完整字段和可信源码包格式见
+该接口保存真实 Profiler 原始输出的 URI/Hash、内容寻址的 Correctness Spec URI/Hash，以及
+人工核对的 shape、dtype、meta、实现位置、调用路径、Amdahl 占比、上游查重、可补丁性、
+选择理由和操作人。记录是不可变且幂等的；`fixture` 与 `business` 必须显式区分。完整字段
+和可信源码包格式见
 [M1-C 人工热点与 Overlay 制品链](m1-hotspot-overlay.md)。
 
 ### 4. 注册唯一 Candidate

@@ -215,23 +215,6 @@ class M1FailureEvidenceSummaryV1(_ReportModel):
         return tuple(value) if isinstance(value, list) else value
 
 
-class M1FailedCandidateAdjudicationResult(_ReportModel):
-    candidate_id: UUID
-    verdict: Literal[ManualCandidateVerdict.INVALID] = ManualCandidateVerdict.INVALID
-    evidence: EvidenceBundle
-    synthetic: Literal[False] = False
-
-    @model_validator(mode="after")
-    def bind_failure_evidence(self) -> M1FailedCandidateAdjudicationResult:
-        if self.evidence.candidate_id != self.candidate_id:
-            raise ValueError("failure EvidenceBundle is bound to another Candidate")
-        if self.evidence.summary.get("automatic_release_allowed") is not False:
-            raise ValueError("failure EvidenceBundle must deny automatic release")
-        if self.evidence.synthetic:
-            raise ValueError("failure EvidenceBundle cannot be synthetic")
-        return self
-
-
 class M1ReportArtifacts(_ReportModel):
     correctness: dict[str, Any]
     performance: dict[str, Any]
@@ -244,7 +227,7 @@ def build_m1_adjudication_result(
     context: M1AdjudicationContext,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
-) -> ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult:
+) -> ManualCandidateAdjudicationResult:
     _verify_measurement_series(context, performance)
     if correctness.verdict != "correct" or performance.verdict is ManualCandidateVerdict.INVALID:
         return _build_failure_adjudication_result(context, correctness, performance)
@@ -461,7 +444,7 @@ def _build_failure_adjudication_result(
     context: M1AdjudicationContext,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
-) -> M1FailedCandidateAdjudicationResult:
+) -> ManualCandidateAdjudicationResult:
     measurement = context.measurement
     if measurement.raw_samples_uri is None or measurement.raw_samples_hash is None:
         raise ValueError("failure adjudication requires the available raw measurement reference")
@@ -481,6 +464,10 @@ def _build_failure_adjudication_result(
     evidence_id = uuid5(
         NAMESPACE_URL,
         f"hcuopt:m1:{context.job_id}:{binding.candidate_id}:{input_digest}:failure-evidence",
+    )
+    evaluation_id = uuid5(
+        NAMESPACE_URL,
+        f"hcuopt:m1:{context.job_id}:{binding.candidate_id}:{input_digest}:failure-evaluation",
     )
     raw_uris = sorted(
         {
@@ -537,15 +524,42 @@ def _build_failure_adjudication_result(
         synthetic=False,
         created_at=context.created_at,
     )
-    return M1FailedCandidateAdjudicationResult(
+    evaluation = EvaluationRun(
+        evaluation_run_id=evaluation_id,
+        task_id=binding.task_id,
         candidate_id=binding.candidate_id,
+        round_id=context.round_id,
+        baseline_epoch_id=binding.baseline_epoch_id,
+        phase="performance",
+        protocol_version=correctness.protocol_version,
+        target_fingerprint=binding.target_fingerprint,
+        idempotency_key=f"m1:{binding.candidate_id}:{input_digest}:failure-evaluation",
+        passed=None,
+        metrics={
+            "verdict": ManualCandidateVerdict.INVALID.value,
+            "correctness_verdict": correctness.verdict,
+            "correctness_failure_codes": list(correctness.failure_codes),
+            "performance_failure_codes": list(performance.failure_codes),
+            "automatic_release_allowed": False,
+        },
+        measurement=measurement,
+        evidence_uris=raw_uris,
+        adapter_provenance=list(context.adapter_provenance),
+        synthetic=False,
+        created_at=context.created_at,
+    )
+    return ManualCandidateAdjudicationResult(
+        candidate_id=binding.candidate_id,
+        verdict=ManualCandidateVerdict.INVALID,
+        evaluation=evaluation,
         evidence=evidence,
+        synthetic=False,
     )
 
 
 def write_m1_signoff_report(
     root: Path,
-    result: ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult,
+    result: ManualCandidateAdjudicationResult,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
 ) -> M1ReportArtifacts:
@@ -581,11 +595,11 @@ def write_m1_signoff_report(
 
 
 def _render_signoff(
-    result: ManualCandidateAdjudicationResult | M1FailedCandidateAdjudicationResult,
+    result: ManualCandidateAdjudicationResult,
     correctness: M1CorrectnessVerificationResult,
     performance: M1PerformanceVerificationResult,
 ) -> str:
-    if isinstance(result, M1FailedCandidateAdjudicationResult):
+    if result.evidence.evidence_type == "m1_candidate_failure":
         summary = M1FailureEvidenceSummaryV1.model_validate_json(
             canonical_json_bytes(result.evidence.summary)
         )

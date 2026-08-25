@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
 from hcuopt.contracts.platform_v1 import (
@@ -76,7 +76,19 @@ class M1PairedWorkload(Protocol):
     def is_alive(self) -> bool: ...
 
 
-M1WorkloadFactory = Callable[[M1Arm, int, Mapping[str, Any], Path], M1PairedWorkload]
+@runtime_checkable
+class M1WorkloadFactory(Protocol):
+    """C-owned constructor consumed by B's only formal Measurement Harness."""
+
+    def __call__(
+        self,
+        arm: M1Arm,
+        acquisition_ordinal: int,
+        payload: Mapping[str, Any],
+        output_dir: Path,
+    ) -> M1PairedWorkload: ...
+
+
 M1PlanFactory = Callable[[Mapping[str, Any], Any], M1MeasurementPlan]
 
 

@@ -8,6 +8,11 @@ from hcuopt.adapters.build_cache import LocalBuildCache
 from hcuopt.adapters.execution import CommandRunner, ContainerExecutionAdapter
 from hcuopt.adapters.git_source import GitSourceManager
 from hcuopt.adapters.local_artifact_store import LocalArtifactStore
+from hcuopt.adapters.m1_verification import (
+    M1CandidateAdjudicatorWorkerAdapter,
+    M1CorrectnessEvidenceProducer,
+    M1KernelCorrectnessWorkerAdapter,
+)
 from hcuopt.adapters.manual_candidate import (
     CandidateSourcePackageStore,
     ManualOverlayCandidateBuilder,
@@ -15,8 +20,10 @@ from hcuopt.adapters.manual_candidate import (
 from hcuopt.adapters.noop_builder import NoopBuilder
 from hcuopt.adapters.profiles import (
     REAL_FRAMEWORK_SMOKE_PROFILE,
+    REAL_MANUAL_CANDIDATE_PROFILE,
     REAL_STAGE0_MEASUREMENT_PROFILE,
     REAL_STAGE0_PROFILE,
+    real_manual_candidate_profile,
 )
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
@@ -24,6 +31,8 @@ from hcuopt.adapters.sglang_evaluator import SGLangSmokeEvaluator
 from hcuopt.adapters.stage0_router import RoutedStage0ProbeAdapter
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.domain.enums import Stage0ProbeType
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
+from hcuopt.evaluation.m1_protocol import LoadedM1Protocol
 from hcuopt.measurement.harness import (
     EvidenceMeasurementHarness,
     FormalStage0Workload,
@@ -98,6 +107,106 @@ def build_m1_source_artifact_registry(
         source_manager=source_manager,
         artifact_store=artifact_store,
     )
+
+
+def build_m1_correctness_registry(
+    *,
+    profile: str,
+    protocol: LoadedM1Protocol,
+    reader: HashedEvidenceReader,
+    producer: M1CorrectnessEvidenceProducer,
+    evidence_root: Path,
+) -> AdapterRegistry:
+    """Build the D-owned shared-lease correctness Worker boundary."""
+
+    return AdapterRegistry(
+        profile=profile,
+        kernel_correctness=M1KernelCorrectnessWorkerAdapter(
+            profile=profile,
+            protocol=protocol,
+            reader=reader,
+            producer=producer,
+            evidence_root=evidence_root,
+        ),
+    )
+
+
+def build_m1_adjudication_registry(
+    *,
+    profile: str,
+    protocol: LoadedM1Protocol,
+    reader: HashedEvidenceReader,
+    evidence_root: Path,
+) -> AdapterRegistry:
+    """Build the HCU-free D adjudication Worker boundary."""
+
+    return AdapterRegistry(
+        profile=profile,
+        candidate_adjudicator=M1CandidateAdjudicatorWorkerAdapter(
+            profile=profile,
+            protocol=protocol,
+            reader=reader,
+            evidence_root=evidence_root,
+        ),
+    )
+
+
+def compose_nmz36_m1_registry(
+    source_registry: AdapterRegistry,
+    correctness_registry: AdapterRegistry,
+    measurement_registry: AdapterRegistry,
+    adjudication_registry: AdapterRegistry,
+) -> AdapterRegistry:
+    """Compose the five formal M1 boundaries under one opt-in profile.
+
+    Each worker may still run only its own partial registry. This composition
+    gate proves that the deployment has one compatible real implementation for
+    every capability before the API catalog is allowed to expose M1 task
+    creation.
+    """
+
+    registries = (
+        source_registry,
+        correctness_registry,
+        measurement_registry,
+        adjudication_registry,
+    )
+    if any(item.profile != REAL_MANUAL_CANDIDATE_PROFILE for item in registries):
+        raise ValueError(f"all M1 registries must use profile {REAL_MANUAL_CANDIDATE_PROFILE}")
+    components = {
+        "candidate_builder": source_registry.require("candidate_builder"),
+        "kernel_correctness": correctness_registry.require("kernel_correctness"),
+        "measurement_harness": measurement_registry.require("measurement_harness"),
+        "candidate_adjudicator": adjudication_registry.require("candidate_adjudicator"),
+        "resource_cleaner": measurement_registry.require("resource_cleaner"),
+    }
+    for capability, adapter in components.items():
+        provenance = adapter.provenance
+        if provenance.implementation_kind != "real":
+            raise ValueError(f"M1 capability {capability} must use a real Adapter")
+        if provenance.capability != capability:
+            raise ValueError(
+                f"M1 boundary {capability} has provenance capability {provenance.capability}"
+            )
+
+    registry = AdapterRegistry(
+        profile=REAL_MANUAL_CANDIDATE_PROFILE,
+        candidate_builder=components["candidate_builder"],
+        candidate_runtime=source_registry.candidate_runtime,
+        kernel_correctness=components["kernel_correctness"],
+        measurement_harness=components["measurement_harness"],
+        candidate_adjudicator=components["candidate_adjudicator"],
+        resource_cleaner=components["resource_cleaner"],
+        executor=source_registry.executor,
+        source_manager=source_registry.source_manager,
+        artifact_store=source_registry.artifact_store,
+    )
+    profile = real_manual_candidate_profile()
+    profile.require_manual_candidate()
+    missing = sorted(profile.capabilities - set(registry.available()))
+    if missing:
+        raise ValueError(f"composed M1 registry is incomplete: {', '.join(missing)}")
+    return registry
 
 
 def build_nmz36_framework_smoke_registry(

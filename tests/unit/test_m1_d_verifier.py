@@ -19,6 +19,7 @@ from hcuopt.contracts.platform_v1 import (
     ArtifactManifest,
     SourceSnapshot,
 )
+from hcuopt.contracts.v1 import ManualCandidateAdjudicationResult
 from hcuopt.domain.enums import ManualCandidateVerdict
 from hcuopt.evaluation.evidence_reader import EvidenceReadError, HashedEvidenceReader
 from hcuopt.evaluation.m1_protocol import (
@@ -35,7 +36,6 @@ from hcuopt.evaluation.m1_protocol import (
 from hcuopt.evaluation.m1_reporting import (
     M1_SIGNOFF_WARNING,
     M1AdjudicationContext,
-    M1FailedCandidateAdjudicationResult,
     build_m1_adjudication_result,
     write_m1_signoff_report,
 )
@@ -954,8 +954,9 @@ def test_invalid_evidence_still_produces_immutable_failure_bundle(
         ),
     )
     result = build_m1_adjudication_result(context, correctness, performance)
-    assert isinstance(result, M1FailedCandidateAdjudicationResult)
+    assert isinstance(result, ManualCandidateAdjudicationResult)
     assert result.verdict is ManualCandidateVerdict.INVALID
+    assert result.evaluation.passed is None
     assert result.evidence.summary["automatic_release_allowed"] is False
     assert result.evidence.summary["correctness_failure_codes"] == list(correctness.failure_codes)
     detached_measurement = measurement.model_copy(
