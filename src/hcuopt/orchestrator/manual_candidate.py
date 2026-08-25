@@ -142,6 +142,7 @@ class ManualCandidateCoordinator:
         candidate_id = UUID(str(job["payload"]["candidate_id"]))
         if result.candidate_id != candidate_id:
             raise Conflict("M1 correctness result is bound to another Candidate")
+        correctness_authority = self._job_lease_authority(job, LeaseScope.SHARED)
         self.repository.record_task_event(
             job["task_id"],
             "manual_candidate_correctness_evaluated",
@@ -152,6 +153,9 @@ class ManualCandidateCoordinator:
                 "protocol_version": result.protocol_version,
                 "raw_evidence_uri": result.raw_evidence_uri,
                 "raw_evidence_hash": result.raw_evidence_hash,
+                "verification_artifact_uri": result.verification_artifact_uri,
+                "verification_artifact_hash": result.verification_artifact_hash,
+                "lease": correctness_authority,
             },
         )
         if result.verdict != "correct":
@@ -174,6 +178,16 @@ class ManualCandidateCoordinator:
                     "correctness_job_id": str(job["job_id"]),
                     "correctness_evidence_uri": result.raw_evidence_uri,
                     "correctness_evidence_hash": result.raw_evidence_hash,
+                    "correctness_verification_artifact_uri": (
+                        result.verification_artifact_uri
+                    ),
+                    "correctness_verification_artifact_hash": (
+                        result.verification_artifact_hash
+                    ),
+                    "correctness_adapter_provenance": [
+                        item.model_dump(mode="json") for item in result.adapter_provenance
+                    ],
+                    "correctness_authority": correctness_authority,
                 },
                 lease_scope=LeaseScope.EXCLUSIVE,
             )
@@ -184,6 +198,7 @@ class ManualCandidateCoordinator:
         candidate_id = UUID(str(job["payload"]["candidate_id"]))
         if result.candidate_id != candidate_id:
             raise Conflict("M1 performance evidence is bound to another Candidate")
+        performance_authority = self._job_lease_authority(job, LeaseScope.EXCLUSIVE)
         self._ensure_candidate_state(candidate_id, CandidateState.ADJUDICATING)
         self._ensure_task_state(job["task_id"], TaskState.MANUAL_ADJUDICATING)
         task = self.repository.get_task(job["task_id"])
@@ -198,6 +213,8 @@ class ManualCandidateCoordinator:
                     **job["payload"],
                     "performance_job_id": str(job["job_id"]),
                     "performance_evidence": result.model_dump(mode="json"),
+                    "performance_authority": performance_authority,
+                    "evidence_created_at": job["finished_at"].isoformat(),
                 },
                 lease_scope=LeaseScope.NONE,
             )
@@ -227,6 +244,7 @@ class ManualCandidateCoordinator:
             )
         required_raw_uris = {
             str(job["payload"]["correctness_evidence_uri"]),
+            str(job["payload"]["correctness_verification_artifact_uri"]),
             str(performance.measurement.raw_samples_uri),
         }
         artifact_id = UUID(str(job["payload"]["artifact"]["artifact_id"]))
@@ -263,6 +281,25 @@ class ManualCandidateCoordinator:
             return
         self._ensure_candidate_state(candidate_id, CandidateState.AWAITING_SIGNOFF)
         self._ensure_task_state(job["task_id"], TaskState.AWAITING_SIGNOFF)
+
+    @staticmethod
+    def _job_lease_authority(
+        job: dict[str, Any], expected_scope: LeaseScope
+    ) -> dict[str, Any]:
+        required = ("lease_id", "resource_id", "fencing_token")
+        if job.get("lease_scope") != expected_scope.value or any(
+            job.get(name) is None for name in required
+        ):
+            raise Conflict(
+                f"M1 {expected_scope.value} Job lacks authoritative lease bindings"
+            )
+        return {
+            "job_id": str(job["job_id"]),
+            "lease_id": str(job["lease_id"]),
+            "lease_scope": expected_scope.value,
+            "resource_id": str(job["resource_id"]),
+            "fencing_token": int(job["fencing_token"]),
+        }
 
     def _ensure_task_state(self, task_id: UUID, target: TaskState) -> None:
         current = TaskState(self.repository.get_task(task_id)["state"])

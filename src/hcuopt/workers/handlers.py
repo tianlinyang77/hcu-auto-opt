@@ -5,6 +5,8 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.interfaces import (
+    ManualCandidateAdjudicatorAdapter,
+    ManualKernelCorrectnessAdapter,
     ManualPerformanceMeasurementHarness,
     PairedFrameworkSmokeEvaluator,
 )
@@ -22,7 +24,9 @@ from hcuopt.contracts.platform_v1 import (
 from hcuopt.contracts.v1 import (
     FrameworkSmokeResult,
     FrameworkSmokeVariantExecution,
+    ManualCandidateAdjudicationResult,
     ManualCandidateBuildResult,
+    ManualCorrectnessResult,
     ManualPerformanceEvidenceResult,
     NoopBuildResult,
     PairedFrameworkSmokeResult,
@@ -121,6 +125,22 @@ class JobHandlers:
             )
         return validated.model_dump(mode="json")
 
+    def handle_manual_correctness(self, payload: dict[str, Any]) -> dict[str, Any]:
+        verifier = self.adapters.require("kernel_correctness")
+        if not isinstance(verifier, ManualKernelCorrectnessAdapter):
+            raise AdapterUnavailable(
+                "M1 manual_correctness requires the independent verifier interface"
+            )
+        result = ManualCorrectnessResult.model_validate(
+            verifier.run_manual_correctness(payload, self.output_dir)
+        )
+        self._require_active_provenance(
+            verifier.provenance,
+            result.adapter_provenance,
+            "M1 correctness result",
+        )
+        return result.model_dump(mode="json")
+
     def handle_correctness(self, payload: dict[str, Any]) -> dict[str, Any]:
         evaluator = self.adapters.require("evaluator")
         result = dict(evaluator.correctness(payload, self.output_dir))
@@ -145,6 +165,32 @@ class JobHandlers:
             )
         result = ManualPerformanceEvidenceResult.model_validate(
             harness.run_manual_performance(payload, self.output_dir)
+        )
+        self._require_active_provenance(
+            harness.provenance,
+            [result.measurement.adapter_provenance],
+            "M1 performance result",
+        )
+        return result.model_dump(mode="json")
+
+    def handle_manual_adjudicate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        adjudicator = self.adapters.require("candidate_adjudicator")
+        if not isinstance(adjudicator, ManualCandidateAdjudicatorAdapter):
+            raise AdapterUnavailable(
+                "M1 manual_adjudicate requires the independent adjudicator interface"
+            )
+        result = ManualCandidateAdjudicationResult.model_validate(
+            adjudicator.adjudicate_manual_candidate(payload, self.output_dir)
+        )
+        self._require_active_provenance(
+            adjudicator.provenance,
+            result.evaluation.adapter_provenance,
+            "M1 EvaluationRun",
+        )
+        self._require_active_provenance(
+            adjudicator.provenance,
+            result.evidence.adapter_provenance,
+            "M1 EvidenceBundle",
         )
         return result.model_dump(mode="json")
 
@@ -547,6 +593,15 @@ class JobHandlers:
         lease_lost = context.get("lease_lost_event")
         if lease_lost is not None and lease_lost.is_set():
             raise ExecutionSafetyError("job lease was lost before the next container launch")
+
+    @staticmethod
+    def _require_active_provenance(
+        active: Any,
+        recorded: Any,
+        label: str,
+    ) -> None:
+        if active not in recorded:
+            raise ExecutionSafetyError(f"{label} omits the active Adapter provenance")
 
 
 class FakeJobHandlers(JobHandlers):

@@ -1678,7 +1678,10 @@ class PostgresRepository:
             lease_id: UUID | None = None
             resource_id: str | None = None
             fencing_token: int | None = None
-            if worker_type is WorkerType.GPU and job["lease_scope"] == LeaseScope.EXCLUSIVE.value:
+            if worker_type is WorkerType.GPU and job["lease_scope"] in {
+                LeaseScope.SHARED.value,
+                LeaseScope.EXCLUSIVE.value,
+            }:
                 requested_resource = worker["capabilities"].get("resource_id")
                 if requested_resource:
                     resource = connection.execute(
@@ -2487,6 +2490,14 @@ class PostgresRepository:
                     or hotspot_evidence.get("replacement_point")
                     != request.replacement_point
                     or hotspot["candidate_kind"] != request.candidate_kind.value
+                    or not isinstance(
+                        hotspot_evidence.get("correctness_spec_uri"), str
+                    )
+                    or re.fullmatch(
+                        SHA256_PATTERN,
+                        str(hotspot_evidence.get("correctness_spec_hash")),
+                    )
+                    is None
                 ):
                     raise Conflict(
                         "M1 Candidate does not match its Hotspot Intake bindings"

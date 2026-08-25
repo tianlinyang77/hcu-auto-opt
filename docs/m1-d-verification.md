@@ -21,6 +21,11 @@
 正确性不是 `correct` 时，性能裁决固定为 `invalid` 且不产生快慢结论。所有报告都固定
 `automatic_release_allowed=false`，人工批准也只表示接受证据。
 
-本模块仍不注册真实 M1 Adapter Profile。B 只生产不可变的原始 MeasurementSeries，D 只读
-复算并写 verdict；C 的真实 startup Overlay 和 D 的 Worker Adapter 接入完成后，才运行
-nmz36 Target Lock 闭环。
+本模块已经提供 `kernel_correctness` 与 `candidate_adjudicator` Worker Adapter。前者消费
+部署方注入的正确性 Evidence Producer，发布可重读 Verification Artifact；后者从控制面
+取得 shared/exclusive 两次租约权威信息，重新读取正确性、Verification Artifact 和 B 的
+MeasurementSeries 后才写 verdict。`invalid` 同样生成完整 EvaluationRun 和 EvidenceBundle。
+
+默认 Catalog 仍不注册真实 M1 Profile。业务 Hotspot 冻结后，必须补齐对应的 Correctness
+Evidence Producer 和 C→B `M1WorkloadFactory`，再运行 nmz36 Target Lock 闭环；Scripted
+夹具不能作为真实候选结论。

@@ -11,6 +11,8 @@ from hcuopt.adapters.interfaces import (
     CandidateRuntimeAdapter,
     EvaluatorAdapter,
     ExecutionAdapter,
+    ManualCandidateAdjudicatorAdapter,
+    ManualKernelCorrectnessAdapter,
     MeasurementHarness,
     ProfilerAdapter,
     ResourceCleaner,
@@ -31,7 +33,9 @@ class AdapterRegistry:
     builder: BuilderAdapter | None = None
     candidate_builder: CandidateBuilderAdapter | None = None
     candidate_runtime: CandidateRuntimeAdapter | None = None
+    kernel_correctness: ManualKernelCorrectnessAdapter | None = None
     measurement_harness: MeasurementHarness | None = None
+    candidate_adjudicator: ManualCandidateAdjudicatorAdapter | None = None
     stage0_probe: Stage0ProbeAdapter | None = None
     evaluator: EvaluatorAdapter | None = None
     resource_cleaner: ResourceCleaner | None = None
@@ -75,7 +79,9 @@ class AdapterRegistry:
             "builder",
             "candidate_builder",
             "candidate_runtime",
+            "kernel_correctness",
             "measurement_harness",
+            "candidate_adjudicator",
             "stage0_probe",
             "evaluator",
             "resource_cleaner",

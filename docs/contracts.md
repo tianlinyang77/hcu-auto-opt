@@ -11,11 +11,12 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | Stage0ProbeRecord | B/C Job | A/D | completed Job、租约、原始证据和 Adapter 来源一致 |
 | OptimizationTask | A | 所有 Worker | 固定目标、预算和自动发布权限 |
 | BaselineEpoch | A/B | C/D | 硬件、软件、配置、Workload 指纹完整 |
-| Hotspot | B | C | 包含调用路径、占比、机会评分与可补丁性 |
+| Hotspot | B | C/D | 包含调用路径、占比、机会评分、可补丁性及正确性规格 URI/Hash |
 | OptimizationCandidate | C | B/D/A | 绑定 round、parent、epoch、source_hash |
 | BuildArtifact | C | D/A | 内容不可变，包含 build recipe、Hash、SBOM |
 | MeasurementSeries | B | D/A | 原始样本 URI/Hash、协议、环境指纹和 Adapter 来源完整 |
 | M1PerformanceEvidence | B | D | ADR-0006 唯一 Schema；独立进程/缓存/Event、Stage 0 预算和 Lease-bound 清理可重算 |
+| M1CorrectnessResult | D | A/D | 同时绑定原始数值证据与 Verification Artifact URI/Hash |
 | EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
 | ResourceLease | A/B | Worker | 携带 fencing_token；过期后不能写回 |

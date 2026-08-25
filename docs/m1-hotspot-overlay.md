@@ -17,6 +17,7 @@ POST /v1/manual-candidate/tasks/<task-id>/hotspots
 必须提供：
 
 - 真实 Profiler 原始输出 URI、SHA256 和 Real Adapter provenance；
+- 内容寻址的正确性规格 URI、SHA256；规格冻结独立参考、用例、种子和显式容差；
 - Kernel/算子名称、shape、dtype、meta、Python 实现位置和调用路径；
 - Amdahl 时间占比、机会评分、上游查重结果、可补丁性和选择理由；
 - 操作人，以及 `fixture`（管线夹具）或 `business`（业务候选）分类。
@@ -64,7 +65,9 @@ SGLang Python/Triton 路径和容器内挂载目标，且只替换 Baseline 中�
 
 ## 运行与恢复边界
 
-构建结果交给后续正确性 Worker。实机验收必须复用 S0-C 已证明的三段生命周期：
+构建结果交给后续正确性 Worker。正确性 Worker 不接受临时参数中的测试代码，而是根据
+Hotspot Intake 的 `correctness_spec_uri/hash` 重读冻结规格。实机验收必须复用 S0-C 已证明
+的三段生命周期：
 
 ```text
 独立 Baseline 服务进程

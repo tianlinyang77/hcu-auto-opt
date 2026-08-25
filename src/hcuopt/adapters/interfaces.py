@@ -14,7 +14,11 @@ from hcuopt.contracts.platform_v1 import (
     SourceSnapshot,
     TargetSpec,
 )
-from hcuopt.contracts.v1 import ManualCandidateBuildResult
+from hcuopt.contracts.v1 import (
+    ManualCandidateAdjudicationResult,
+    ManualCandidateBuildResult,
+    ManualCorrectnessResult,
+)
 from hcuopt.domain.models import OptimizationCandidate
 from hcuopt.measurement.stage0 import Stage0ProbeOutput
 
@@ -55,6 +59,24 @@ class CandidateRuntimeAdapter(Protocol):
     def verify(
         self, payload: Mapping[str, Any], output_dir: Path
     ) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class ManualKernelCorrectnessAdapter(Protocol):
+    provenance: AdapterProvenance
+
+    def run_manual_correctness(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> ManualCorrectnessResult: ...
+
+
+@runtime_checkable
+class ManualCandidateAdjudicatorAdapter(Protocol):
+    provenance: AdapterProvenance
+
+    def adjudicate_manual_candidate(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> ManualCandidateAdjudicationResult: ...
 
 
 class MeasurementHarness(Protocol):

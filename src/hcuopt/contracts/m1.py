@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
 from __future__ import annotations
 
 from datetime import datetime

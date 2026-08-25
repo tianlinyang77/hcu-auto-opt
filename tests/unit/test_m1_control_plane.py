@@ -129,6 +129,8 @@ def test_manual_hotspot_intake_requires_real_traceable_profiler_evidence() -> No
         "call_path": ["model.forward", "sglang.kernel"],
         "profiler_raw_output_uri": "file:///evidence/profiler.json",
         "profiler_raw_output_hash": "sha256:" + "9" * 64,
+        "correctness_spec_uri": "file:///evidence/correctness-spec.json",
+        "correctness_spec_hash": "sha256:" + "8" * 64,
         "share_ratio": 0.2,
         "opportunity_score": 0.8,
         "upstream_dedup_status": "no_match",
@@ -216,7 +218,13 @@ def test_correctness_contract_requires_real_provenance_and_healthy_cleanup() -> 
         "protocol_version": "m1-correctness-v1",
         "raw_evidence_uri": "file:///evidence/correctness.json",
         "raw_evidence_hash": "sha256:" + "e" * 64,
-        "adapter_provenance": [_provenance().model_dump(mode="json")],
+        "verification_artifact_uri": "file:///evidence/correctness-verification.json",
+        "verification_artifact_hash": "sha256:" + "f" * 64,
+        "adapter_provenance": [
+            _provenance()
+            .model_copy(update={"capability": "kernel_correctness"})
+            .model_dump(mode="json")
+        ],
         "cleanup_evidence": {
             "fence": {"fenced": True},
             "health": {"healthy": True},
