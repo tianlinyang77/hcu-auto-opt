@@ -11,6 +11,13 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from hcuopt.adapters.profiles import AdapterProfileCatalog
+from hcuopt.contracts.m2 import (
+    RoundCandidate,
+    RoundCandidateView,
+    SearchRound,
+    SearchRoundSummary,
+    SearchRoundView,
+)
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.contracts.v1 import (
     AdapterProfileView,
@@ -169,6 +176,53 @@ def create_app(
     @application.get("/v1/targets/{target_id}", response_model=TargetSpec)
     def get_target(target_id: str) -> TargetSpec:
         return targets.load(target_id)
+
+    @application.post(
+        "/v1/search-rounds",
+        response_model=SearchRoundView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_search_round(
+        payload: SearchRound, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).create_search_round(payload)
+
+    @application.get(
+        "/v1/search-rounds/{round_id}",
+        response_model=SearchRoundView,
+    )
+    def get_search_round(round_id: UUID, request: Request) -> dict[str, Any]:
+        return repo(request).get_search_round(round_id)
+
+    @application.get(
+        "/v1/search-rounds/{round_id}/summary",
+        response_model=SearchRoundSummary,
+    )
+    def get_search_round_summary(
+        round_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).search_round_summary(round_id)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/candidates",
+        response_model=RoundCandidateView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def add_search_round_candidate(
+        round_id: UUID, payload: RoundCandidate, request: Request
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Candidate round_id")
+        return repo(request).add_round_candidate(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/intake-close",
+        response_model=SearchRoundView,
+    )
+    def close_search_round_intake(
+        round_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).close_search_round_intake(round_id)
 
     @application.post(
         "/v1/framework-smoke/tasks",

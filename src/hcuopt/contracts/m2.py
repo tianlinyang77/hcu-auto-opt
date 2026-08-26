@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from hcuopt.contracts.base import ContractModel
 from hcuopt.contracts.platform_v1 import SHA256_PATTERN
@@ -133,6 +133,12 @@ class SearchRound(ContractModel):
         return self
 
 
+class SearchRoundView(SearchRound):
+    model_config = ConfigDict(extra="ignore")
+
+    updated_at: datetime
+
+
 class RoundCandidate(ContractModel):
     round_candidate_id: UUID
     round_id: UUID
@@ -170,6 +176,13 @@ class RoundCandidate(ContractModel):
         return self
 
 
+class RoundCandidateView(RoundCandidate):
+    model_config = ConfigDict(extra="ignore")
+
+    created_at: datetime
+    updated_at: datetime
+
+
 class RoundBudgetReservation(ContractModel):
     reservation_id: UUID
     round_id: UUID
@@ -180,6 +193,13 @@ class RoundBudgetReservation(ContractModel):
     planned: BudgetUsage
     state: RoundBudgetReservationState
     idempotency_key: str = Field(min_length=8, max_length=300)
+
+
+class RoundBudgetReservationView(RoundBudgetReservation):
+    model_config = ConfigDict(extra="ignore")
+
+    created_at: datetime
+    updated_at: datetime
 
 
 class RoundBudgetLedgerEntry(ContractModel):
@@ -215,3 +235,11 @@ class RoundBudgetLedgerEntry(ContractModel):
         ):
             raise ValueError("reserve/release entries cannot report runtime seconds")
         return self
+
+
+class SearchRoundSummary(ContractModel):
+    round: SearchRoundView
+    candidates: list[RoundCandidateView]
+    budget_reservations: list[RoundBudgetReservationView]
+    budget_ledger: list[RoundBudgetLedgerEntry]
+    automatic_release_allowed: Literal[False] = False
