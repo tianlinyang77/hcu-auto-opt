@@ -7,6 +7,8 @@
 结论。字段、表、API 和稳定错误码见 [M2a SearchRound Contract 草案](m2-contract-draft.md)；
 草案合入不等于 Contract Accepted。面向操作者的 Profile、Plan、CLI、通知、报告和 Web 分阶段
 要求见 [M2 操作面与易用性建设计划](m2-operability-plan.md)。
+OX-0 字段、幂等、Preflight、Read Model 和 CLI/API 映射见
+[M2 Operator Contract 草案](m2-operator-contract-draft.md)。
 
 ## 建设目标
 

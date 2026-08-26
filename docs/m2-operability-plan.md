@@ -4,6 +4,7 @@
 - 跟踪：GitHub Issue #46
 - 依赖：[M2 搜索轮次建设计划](m2-round-plan.md)和
   [M2a SearchRound Contract 草案](m2-contract-draft.md)
+- OX-0 接口：[M2 Operator Contract 草案](m2-operator-contract-draft.md)
 - 当前授权：文档、接口草案和无 HCU 的 Scripted 交互设计
 
 ## 1. 定位
@@ -95,13 +96,15 @@ Lease 秒数上限。系统依据 Stage 0 MDE 与 Workload MDE 推荐采样预�
 
 `PlanCompiler` 在不占用 HCU 的情况下完成 Preflight，并输出规范化 `RoundPlanPreview`：
 
-- 解析后的 Target、Workload、Baseline、Hotspot、Candidate Family 和 Profile 版本；
-- Search Plan Hash、Holdout commitment、Budget 和预计资源上限；
+- 解析后的 Target、Workload、Baseline、Hotspot、Candidate Input Set 和 Profile 版本；
+- Search/Holdout 协议、Candidate Input Set Hash、Budget 和预计资源上限；
 - `scripted|formal`、Evidence/Signoff 边界和 `automatic_release_allowed=false`；
 - 阻塞项、警告、修复动作和计划摘要 Hash。
 
-存在阻塞项时不得创建 Round。用户确认 Preview 后，以其 Hash 和幂等键创建 Round；重复启动
-返回同一个逻辑对象，不重复占用预算。
+存在阻塞项时不得创建 Round。用户确认 Preview 后，以其 Hash 和幂等键创建 durable
+StartIntent；服务端创建 Round 后再由 D 冻结 Search Plan/Holdout commitment、批量 Intake 并
+关闭 Candidate Family。Intent finalized 前不排 Job；重复启动返回同一个逻辑对象，不重复占用
+预算。
 
 ### 2.6 等待、通知与取消
 
@@ -160,7 +163,8 @@ GET  /v1/operator/profiles
 GET  /v1/operator/workloads
 GET  /v1/operator/hotspots
 POST /v1/operator/round-plans:preview
-POST /v1/operator/round-plans/{plan_hash}:start
+POST /v1/operator/round-plans/{preview_id}:start
+GET  /v1/operator/start-intents/{intent_id}
 GET  /v1/operator/search-rounds/{round_id}/summary
 GET  /v1/operator/search-rounds/{round_id}/report
 POST /v1/operator/search-rounds/{round_id}/cancel
