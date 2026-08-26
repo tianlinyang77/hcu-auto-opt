@@ -38,7 +38,9 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         self.repository.migrate()
         self.connection = psycopg.connect(DATABASE_URL)
         with self.connection.cursor() as cursor:
-            cursor.execute("TRUNCATE tasks RESTART IDENTITY CASCADE")
+            cursor.execute(
+                "TRUNCATE tasks, target_snapshots RESTART IDENTITY CASCADE"
+            )
         self.connection.commit()
         self.authority = self._create_scripted_authority()
 
