@@ -25,6 +25,19 @@ from hcuopt.domain.enums import (
 M2_SEARCH_ROUND_SCHEMA_VERSION = "m2a-search-round-v1"
 
 
+class CandidateSourcePackageRef(ContractModel):
+    candidate_source_hash: str = Field(pattern=SHA256_PATTERN)
+    source_package_hash: str = Field(pattern=SHA256_PATTERN)
+    manifest_hash: str = Field(pattern=SHA256_PATTERN)
+    manifest_schema_version: Literal["m1-candidate-source-v1"]
+
+
+class ScriptedCandidatePackageInput(ContractModel):
+    ordinal: int = Field(ge=0, le=3)
+    source_package_ref: CandidateSourcePackageRef
+    optimization_intent: str = Field(min_length=1, max_length=2000)
+
+
 class RoundBudget(ContractModel):
     max_candidates: int = Field(ge=2, le=4)
     max_build_attempts: int = Field(ge=1, le=100)
