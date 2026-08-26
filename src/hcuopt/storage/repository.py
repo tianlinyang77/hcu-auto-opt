@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
+from hcuopt.contracts.m2 import RoundCandidate, SearchRound
 from hcuopt.contracts.platform_v1 import (
     SHA256_PATTERN,
     ArtifactManifest,
@@ -46,8 +47,12 @@ from hcuopt.domain.enums import (
     JobType,
     LeaseScope,
     ManualCandidateDecision,
+    ManualCandidateKind,
     ManualCandidateVerdict,
     ProjectMode,
+    RoundCandidateState,
+    SearchRoundRunMode,
+    SearchRoundState,
     Stage0ProbeType,
     Stage0RunMode,
     Stage0RunState,
@@ -151,6 +156,562 @@ class PostgresRepository:
     def _digest_json(value: Mapping[str, Any]) -> str:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    def create_search_round(self, request: SearchRound) -> dict[str, Any]:
+        """Create or replay one non-executable M2a Scripted Round authority."""
+
+        if request.run_mode is not SearchRoundRunMode.SCRIPTED:
+            raise Conflict("M2a Formal Round creation is not approved")
+        if (
+            request.state is not SearchRoundState.INTAKE_OPEN
+            or request.version != 1
+            or request.candidate_family_hash is not None
+            or request.artifact_family_hash is not None
+            or request.holdout_family_hash is not None
+            or request.holdout_plan_hash is not None
+            or request.intake_closed_at is not None
+        ):
+            raise Conflict("new M2a Round must be an unfrozen intake_open authority")
+
+        budget = request.budget.model_dump(mode="json")
+        with self.connection() as connection:
+            authority = connection.execute(
+                """
+                SELECT
+                    run.mode AS stage0_mode,
+                    run.state AS stage0_state,
+                    run.target_snapshot_id AS stage0_target_snapshot_id,
+                    stage0_task.stage0_authority,
+                    snapshot.target_id,
+                    baseline.target_snapshot_id AS baseline_target_snapshot_id,
+                    baseline.stage0_run_id AS baseline_stage0_run_id,
+                    baseline.stage0_protocol_hash,
+                    baseline.workload_id AS baseline_workload_id,
+                    baseline.workload_hash AS baseline_workload_hash,
+                    baseline.configuration_hash AS baseline_configuration_hash,
+                    baseline.image_digest AS baseline_image_digest,
+                    baseline.adapter_profile AS baseline_adapter_profile,
+                    hotspot.baseline_epoch_id AS hotspot_baseline_epoch_id,
+                    hotspot.candidate_kind AS hotspot_candidate_kind,
+                    hotspot.evidence AS hotspot_evidence
+                FROM stage0_runs AS run
+                JOIN tasks AS stage0_task ON stage0_task.task_id = run.task_id
+                JOIN target_snapshots AS snapshot
+                  ON snapshot.target_snapshot_id = run.target_snapshot_id
+                JOIN baseline_epochs AS baseline ON baseline.baseline_epoch_id = %s
+                JOIN hotspots AS hotspot ON hotspot.hotspot_id = %s
+                WHERE run.stage0_run_id = %s
+                FOR SHARE OF run, stage0_task, snapshot, baseline, hotspot
+                """,
+                (request.baseline_epoch_id, request.hotspot_id, request.stage0_run_id),
+            ).fetchone()
+            if authority is None:
+                raise NotFound("M2a Scripted Stage 0, Baseline, or Hotspot authority not found")
+            expected = {
+                "stage0_mode": Stage0RunMode.DRY_RUN.value,
+                "stage0_state": Stage0RunState.FINALIZED.value,
+                "stage0_authority": "synthetic",
+                "stage0_target_snapshot_id": request.target_snapshot_id,
+                "baseline_target_snapshot_id": request.target_snapshot_id,
+                "baseline_stage0_run_id": request.stage0_run_id,
+                "stage0_protocol_hash": request.stage0_protocol_hash,
+                "baseline_workload_id": request.workload_id,
+                "baseline_workload_hash": request.workload_hash,
+                "baseline_configuration_hash": request.configuration_hash,
+                "baseline_image_digest": request.image_digest,
+                "baseline_adapter_profile": request.adapter_profile,
+                "hotspot_baseline_epoch_id": request.baseline_epoch_id,
+                "hotspot_candidate_kind": ManualCandidateKind.FIXTURE.value,
+            }
+            hotspot_evidence = dict(authority["hotspot_evidence"])
+            if any(authority[name] != value for name, value in expected.items()) or (
+                hotspot_evidence.get("replacement_point") != request.replacement_point
+            ):
+                raise Conflict("M2a Scripted Round authority bindings do not match")
+
+            task = connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, name, workload_id, idempotency_key, state, budget,
+                    automatic_release_allowed, workflow_type, target_id,
+                    target_snapshot_id, adapter_profile, stage0_run_id,
+                    stage0_authority, project_mode
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, FALSE, %s, %s, %s, %s, %s,
+                    'synthetic', NULL
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    request.task_id,
+                    f"M2a SearchRound {request.round_id}",
+                    request.workload_id,
+                    request.idempotency_key,
+                    TaskState.CREATED.value,
+                    Jsonb(budget),
+                    WorkflowType.SEARCH_ROUND.value,
+                    authority["target_id"],
+                    request.target_snapshot_id,
+                    request.adapter_profile,
+                    request.stage0_run_id,
+                ),
+            ).fetchone()
+            if task is None:
+                task = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE task_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (request.task_id, request.idempotency_key),
+                ).fetchone()
+                if task is None:
+                    raise Conflict("M2a task identity conflict could not be resolved")
+            expected_task = {
+                "task_id": request.task_id,
+                "workload_id": request.workload_id,
+                "idempotency_key": request.idempotency_key,
+                "workflow_type": WorkflowType.SEARCH_ROUND.value,
+                "target_id": authority["target_id"],
+                "target_snapshot_id": request.target_snapshot_id,
+                "adapter_profile": request.adapter_profile,
+                "stage0_run_id": request.stage0_run_id,
+                "stage0_authority": "synthetic",
+                "project_mode": None,
+                "automatic_release_allowed": False,
+                "budget": budget,
+            }
+            if any(task[name] != value for name, value in expected_task.items()):
+                raise Conflict("M2a Round idempotency_key was reused with different task inputs")
+
+            payload = request.model_dump(mode="python")
+            payload["budget"] = Jsonb(budget)
+            round_row = connection.execute(
+                """
+                INSERT INTO search_rounds (
+                    round_id, task_id, idempotency_key, schema_version, state,
+                    run_mode, project_mode, target_snapshot_id, stage0_run_id,
+                    stage0_protocol_hash, baseline_epoch_id, hotspot_id,
+                    replacement_point, workload_id, workload_hash,
+                    configuration_hash, image_digest, adapter_profile,
+                    declared_candidate_count, max_promoted, family_alpha,
+                    search_plan_hash, holdout_plan_commitment,
+                    holdout_commitment_scheme, holdout_plan_authority_id,
+                    holdout_plan_authority_hash, holdout_plan_hash,
+                    holdout_reveal_lease_id, holdout_reveal_evidence_hash,
+                    selection_rule_hash, budget, candidate_family_hash,
+                    artifact_family_hash, holdout_family_hash,
+                    automatic_release_allowed, version, created_at, intake_closed_at
+                ) VALUES (
+                    %(round_id)s, %(task_id)s, %(idempotency_key)s,
+                    %(schema_version)s, %(state)s, %(run_mode)s, %(project_mode)s,
+                    %(target_snapshot_id)s, %(stage0_run_id)s,
+                    %(stage0_protocol_hash)s, %(baseline_epoch_id)s, %(hotspot_id)s,
+                    %(replacement_point)s, %(workload_id)s, %(workload_hash)s,
+                    %(configuration_hash)s, %(image_digest)s, %(adapter_profile)s,
+                    %(declared_candidate_count)s, %(max_promoted)s, %(family_alpha)s,
+                    %(search_plan_hash)s, %(holdout_plan_commitment)s,
+                    %(holdout_commitment_scheme)s, %(holdout_plan_authority_id)s,
+                    %(holdout_plan_authority_hash)s, %(holdout_plan_hash)s,
+                    %(holdout_reveal_lease_id)s, %(holdout_reveal_evidence_hash)s,
+                    %(selection_rule_hash)s, %(budget)s, %(candidate_family_hash)s,
+                    %(artifact_family_hash)s, %(holdout_family_hash)s, FALSE,
+                    %(version)s, %(created_at)s, %(intake_closed_at)s
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                payload,
+            ).fetchone()
+            if round_row is None:
+                round_row = connection.execute(
+                    """
+                    SELECT * FROM search_rounds
+                    WHERE round_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (request.round_id, request.idempotency_key),
+                ).fetchone()
+                if round_row is None:
+                    raise Conflict("M2a Round identity conflict could not be resolved")
+            creation_fields = (
+                "round_id",
+                "task_id",
+                "idempotency_key",
+                "schema_version",
+                "run_mode",
+                "project_mode",
+                "target_snapshot_id",
+                "stage0_run_id",
+                "stage0_protocol_hash",
+                "baseline_epoch_id",
+                "hotspot_id",
+                "replacement_point",
+                "workload_id",
+                "workload_hash",
+                "configuration_hash",
+                "image_digest",
+                "adapter_profile",
+                "declared_candidate_count",
+                "max_promoted",
+                "family_alpha",
+                "search_plan_hash",
+                "holdout_plan_commitment",
+                "holdout_commitment_scheme",
+                "holdout_plan_authority_id",
+                "holdout_plan_authority_hash",
+                "selection_rule_hash",
+                "budget",
+                "automatic_release_allowed",
+                "created_at",
+            )
+            expected_round = request.model_dump(mode="python")
+            if any(round_row[name] != expected_round[name] for name in creation_fields):
+                raise Conflict("M2a Round idempotency_key was reused with different inputs")
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                SELECT %s, 'm2_round_created', %s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM task_events
+                    WHERE task_id = %s AND event_type = 'm2_round_created'
+                )
+                """,
+                (
+                    request.task_id,
+                    Jsonb({"round_id": str(request.round_id), "run_mode": "scripted"}),
+                    request.task_id,
+                ),
+            )
+        return round_row
+
+    def add_round_candidate(self, request: RoundCandidate) -> dict[str, Any]:
+        """Atomically create/replay one generic Candidate and its Round membership."""
+
+        if (
+            request.state is not RoundCandidateState.INTAKE_ACCEPTED
+            or request.artifact_id is not None
+            or request.terminal_failure_code is not None
+        ):
+            raise Conflict("M2a intake accepts only unfrozen intake_accepted Candidates")
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (request.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {request.round_id}")
+
+            existing = connection.execute(
+                """
+                SELECT * FROM round_candidates
+                WHERE round_candidate_id = %s OR idempotency_key = %s
+                   OR (round_id = %s AND candidate_id = %s)
+                   OR (round_id = %s AND ordinal = %s)
+                   OR (round_id = %s AND candidate_source_hash = %s)
+                   OR (round_id = %s AND source_package_hash = %s)
+                   OR (round_id = %s AND source_manifest_hash = %s)
+                FOR UPDATE
+                """,
+                (
+                    request.round_candidate_id,
+                    request.idempotency_key,
+                    request.round_id,
+                    request.candidate_id,
+                    request.round_id,
+                    request.ordinal,
+                    request.round_id,
+                    request.candidate_source_hash,
+                    request.round_id,
+                    request.source_package_hash,
+                    request.round_id,
+                    request.source_manifest_hash,
+                ),
+            ).fetchone()
+            if existing is not None:
+                identity_fields = (
+                    "round_candidate_id",
+                    "round_id",
+                    "candidate_id",
+                    "ordinal",
+                    "source_package_store_id",
+                    "source_package_store_hash",
+                    "source_package_hash",
+                    "source_manifest_version",
+                    "source_manifest_hash",
+                    "baseline_source_hash",
+                    "candidate_source_hash",
+                    "optimization_intent",
+                    "replacement_point",
+                    "track",
+                    "release_mode",
+                    "candidate_kind",
+                    "idempotency_key",
+                )
+                expected_member = request.model_dump(mode="python")
+                if any(existing[name] != expected_member[name] for name in identity_fields):
+                    raise Conflict("M2a Candidate identity was reused with different inputs")
+                return existing
+
+            if round_row["state"] != SearchRoundState.INTAKE_OPEN.value:
+                raise Conflict("M2a Candidate intake is closed")
+            if request.ordinal >= round_row["declared_candidate_count"]:
+                raise Conflict("M2a Candidate ordinal exceeds the declared family")
+            if (
+                request.replacement_point != round_row["replacement_point"]
+                or request.candidate_kind is not ManualCandidateKind.FIXTURE
+            ):
+                raise Conflict("M2a Scripted Candidate does not match its Round bindings")
+
+            baseline = connection.execute(
+                """
+                SELECT baseline.*, source.source_hash AS baseline_source_hash
+                FROM baseline_epochs AS baseline
+                JOIN source_snapshots AS source
+                  ON source.snapshot_id = baseline.source_snapshot_id
+                WHERE baseline.baseline_epoch_id = %s
+                FOR SHARE OF baseline, source
+                """,
+                (round_row["baseline_epoch_id"],),
+            ).fetchone()
+            if (
+                baseline is None
+                or baseline["baseline_source_hash"] != request.baseline_source_hash
+            ):
+                raise Conflict("M2a Candidate Baseline source binding does not match")
+
+            metadata = {
+                "workflow_type": WorkflowType.SEARCH_ROUND.value,
+                "round_candidate_id": str(request.round_candidate_id),
+                "source_package_store_id": request.source_package_store_id,
+                "source_package_store_hash": request.source_package_store_hash,
+                "source_package_hash": request.source_package_hash,
+                "source_manifest_version": request.source_manifest_version,
+                "source_manifest_hash": request.source_manifest_hash,
+                "baseline_source_hash": request.baseline_source_hash,
+            }
+            candidate = connection.execute(
+                """
+                INSERT INTO candidates (
+                    candidate_id, task_id, round_id, baseline_epoch_id,
+                    source_hash, variant, state, ordinal, metadata,
+                    track, release_mode, candidate_kind, optimization_intent,
+                    replacement_point, idempotency_key, hotspot_id
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    request.candidate_id,
+                    round_row["task_id"],
+                    request.round_id,
+                    round_row["baseline_epoch_id"],
+                    request.candidate_source_hash,
+                    "m2-scripted-fixture",
+                    CandidateState.PROPOSED.value,
+                    request.ordinal,
+                    Jsonb(metadata),
+                    request.track,
+                    request.release_mode,
+                    request.candidate_kind.value,
+                    request.optimization_intent,
+                    request.replacement_point,
+                    request.idempotency_key,
+                    round_row["hotspot_id"],
+                ),
+            ).fetchone()
+            if candidate is None:
+                candidate = connection.execute(
+                    """
+                    SELECT * FROM candidates
+                    WHERE candidate_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (request.candidate_id, request.idempotency_key),
+                ).fetchone()
+                if candidate is None:
+                    raise Conflict("M2a generic Candidate identity conflict could not be resolved")
+                expected_candidate = {
+                    "candidate_id": request.candidate_id,
+                    "task_id": round_row["task_id"],
+                    "round_id": request.round_id,
+                    "baseline_epoch_id": round_row["baseline_epoch_id"],
+                    "source_hash": request.candidate_source_hash,
+                    "ordinal": request.ordinal,
+                    "track": request.track,
+                    "release_mode": request.release_mode,
+                    "candidate_kind": request.candidate_kind.value,
+                    "optimization_intent": request.optimization_intent,
+                    "replacement_point": request.replacement_point,
+                    "idempotency_key": request.idempotency_key,
+                    "hotspot_id": round_row["hotspot_id"],
+                }
+                if any(candidate[name] != value for name, value in expected_candidate.items()):
+                    raise Conflict("M2a generic Candidate identity belongs to different inputs")
+
+            payload = request.model_dump(mode="python")
+            member = connection.execute(
+                """
+                INSERT INTO round_candidates (
+                    round_candidate_id, round_id, candidate_id, ordinal,
+                    source_package_store_id, source_package_store_hash,
+                    source_package_hash, source_manifest_version,
+                    source_manifest_hash, baseline_source_hash,
+                    candidate_source_hash, optimization_intent,
+                    replacement_point, track, release_mode, candidate_kind,
+                    artifact_id, artifact_hash, terminal_failure_code,
+                    failure_evidence_hash, state, idempotency_key
+                ) VALUES (
+                    %(round_candidate_id)s, %(round_id)s, %(candidate_id)s,
+                    %(ordinal)s, %(source_package_store_id)s,
+                    %(source_package_store_hash)s, %(source_package_hash)s,
+                    %(source_manifest_version)s, %(source_manifest_hash)s,
+                    %(baseline_source_hash)s, %(candidate_source_hash)s,
+                    %(optimization_intent)s, %(replacement_point)s, %(track)s,
+                    %(release_mode)s, %(candidate_kind)s, %(artifact_id)s,
+                    %(artifact_hash)s, %(terminal_failure_code)s,
+                    %(failure_evidence_hash)s, %(state)s, %(idempotency_key)s
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                payload,
+            ).fetchone()
+            if member is None:
+                raise Conflict("M2a Candidate unique identity conflicts with another member")
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_round_candidate_registered', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(request.round_id),
+                            "round_candidate_id": str(request.round_candidate_id),
+                            "candidate_id": str(request.candidate_id),
+                            "ordinal": request.ordinal,
+                        }
+                    ),
+                ),
+            )
+        assert member is not None
+        return member
+
+    def close_search_round_intake(self, round_id: UUID) -> dict[str, Any]:
+        """Freeze the exact M2a Candidate family under the Round row lock."""
+
+        from hcuopt.orchestrator.search_round import candidate_family_hash
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {round_id}")
+            members = connection.execute(
+                """
+                SELECT * FROM round_candidates
+                WHERE round_id = %s ORDER BY ordinal
+                """,
+                (round_id,),
+            ).fetchall()
+            if len(members) != round_row["declared_candidate_count"]:
+                raise Conflict("M2a Intake Close requires the declared Candidate count")
+            if any(
+                member["state"] != RoundCandidateState.INTAKE_ACCEPTED.value
+                for member in members
+            ):
+                raise Conflict("M2a Intake Close requires all Candidates intake_accepted")
+            family_hash = candidate_family_hash(round_row, members)
+            if round_row["state"] != SearchRoundState.INTAKE_OPEN.value:
+                if (
+                    round_row["candidate_family_hash"] == family_hash
+                    and round_row["intake_closed_at"] is not None
+                ):
+                    return round_row
+                raise Conflict("M2a Candidate Intake is already closed with different inputs")
+
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = %s, candidate_family_hash = %s,
+                    intake_closed_at = now(), version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (SearchRoundState.INTAKE_CLOSED.value, family_hash, round_id),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_round_intake_closed', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(round_id),
+                            "candidate_family_hash": family_hash,
+                            "candidate_count": len(members),
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def get_search_round(self, round_id: UUID) -> dict[str, Any]:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s", (round_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"M2a SearchRound not found: {round_id}")
+        return row
+
+    def search_round_summary(self, round_id: UUID) -> dict[str, Any]:
+        round_row = self.get_search_round(round_id)
+        with self.connection() as connection:
+            members = connection.execute(
+                """
+                SELECT member.*, candidate.state AS candidate_state,
+                       candidate.metadata AS candidate_metadata
+                FROM round_candidates AS member
+                JOIN candidates AS candidate
+                  ON candidate.candidate_id = member.candidate_id
+                WHERE member.round_id = %s
+                ORDER BY member.ordinal
+                """,
+                (round_id,),
+            ).fetchall()
+            reservations = connection.execute(
+                """
+                SELECT * FROM round_budget_reservations
+                WHERE round_id = %s ORDER BY created_at, reservation_id
+                """,
+                (round_id,),
+            ).fetchall()
+            ledger = connection.execute(
+                """
+                SELECT * FROM round_budget_ledger
+                WHERE round_id = %s ORDER BY created_at, ledger_entry_id
+                """,
+                (round_id,),
+            ).fetchall()
+        return {
+            "round": round_row,
+            "candidates": members,
+            "budget_reservations": reservations,
+            "budget_ledger": ledger,
+            "automatic_release_allowed": False,
+        }
 
     def _upsert_target_snapshot(
         self,
