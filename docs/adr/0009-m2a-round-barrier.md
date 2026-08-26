@@ -53,7 +53,7 @@ B 的唯一 Harness 产生这份可复算原始证据，并由新的 `RoundMeasu
 - `phase=search|holdout`；
 - `measurement_id`、原始 URI/Hash 和 Measurement Plan Hash；
 - 该 Candidate 自己的同时期 Baseline 样本身份；
-- Search/Holdout Plan Hash 和本次 Lease/Fencing 权威。
+- Search Plan Hash、Holdout commitment/揭示后 Plan Hash 和本次 Lease/Fencing 权威。
 
 M2 不重写或迁移已有 M1 Evidence。D 先复用单次比较验证器重读每份原始证据，再执行轮次级
 选择和多重比较。
@@ -63,8 +63,11 @@ M2 不重写或迁移已有 M1 Evidence。D 先复用单次比较验证器重读
 D 在 Candidate Intake Close 前生成两份独立计划：
 
 - Search Plan：允许 C 和开发人员知道，用于候选初筛；
-- Holdout Plan：只发布内容 Hash，具体 Shape/输入由 D 控制的存储和 Worker 权限保护，直到
-  Search Barrier 完成后才交给测量 Worker。
+- Holdout Plan：Search 前只发布带 256-bit 随机 nonce 的 commitment
+  `SHA256(nonce || canonical_plan)`；具体 Shape/输入和 nonce 由 D 控制的存储和 Worker 权限
+  保护。Search Barrier 完成后才把计划与 nonce 交给获授权的测量 Worker，Worker 必须先验证
+  commitment，再记录揭示后的 Plan Hash 和 reveal evidence。普通无盐 Hash 不能作为保密
+  承诺，避免小 Shape 空间被枚举。
 
 Search 和 Holdout 使用不同输入、Measurement ID、进程、缓存 Namespace 和原始文件。
 Candidate 进入 Search 后，源码、SourceSnapshot 和 Artifact Hash 永久冻结；不得根据 Search
@@ -83,6 +86,12 @@ Search Barrier 只有在本轮全部 Candidate 到达 Build/Correctness/Search �
 快 Candidate 必须等待慢 Candidate；失败、`invalid` 和预算耗尽也是终态证据，不能从候选族中
 删除。D 使用 Search 数据和预注册规则最多提升 2 个 Candidate，Search 排名只是选择证据，
 不是最终 `faster` 结论。
+
+若没有 Candidate 可晋级，Search Barrier 以 `no_promotable_candidate` 关闭，Round 跳过
+Holdout 和多重比较，直接生成包含全部失败/淘汰证据的 Round EvidenceBundle。Formal Round
+等待人工签核，Scripted Round 经 synthetic 验证后进入独立终态。此路径不创建空 Holdout
+Family，不计算 `m=0`，Holdout Barrier 和
+MultipleComparison 引用必须为空。
 
 Holdout 候选族在开始第一份 Holdout Measurement 前冻结。Holdout Barrier 等待该族全部终态，
 随后一次性执行多重比较；单个 Candidate 不能绕过 Barrier 提前进入签核。进入冻结 Holdout
@@ -105,8 +114,10 @@ Holdout 候选数 `m` 在 Holdout 开始前冻结，D 对每个候选使用
    `max(Formal Stage 0 MDE, 当前 Holdout Workload MDE)`；
 4. Artifact、Baseline、Target、Round、Phase 和计划绑定完整。
 
-`slower`、`inconclusive` 和 `invalid` 都是完整结果。若以后候选族显著增大并考虑 BH-FDR，
-必须新增协议版本和 ADR，不能在同一结果族中临时切换算法。
+对绑定和清理均有效的 Holdout 证据，记调整后置信区间为 `[lower, upper]`，可信门限为上述
+两个 MDE 的较大值：`lower > threshold` 为 `faster`，`upper < -threshold` 为 `slower`，
+其余为 `inconclusive`。正确性、绑定、原始证据或清理无效时才是 `invalid`。若以后候选族
+显著增大并考虑 BH-FDR，必须新增协议版本和 ADR，不能在同一结果族中临时切换算法。
 
 ### 8. 预算由声明上限和实际消耗共同约束
 
@@ -115,18 +126,37 @@ Round Budget 至少包含 Candidate、Build、Correctness、Search Sample、Hold
 排队下一 Job 前再次检查。超预算使剩余 Candidate 进入有证据的 `budget_exhausted` 终态，不得
 悄悄缩减正式采样计划或复用部分样本。
 
+Budget Ledger 使用不可变事件：每个 Job Attempt 先生成唯一 `reservation_id` 和一条
+`reserve`，正常终态追加一条 `settle`，启动前取消或 Reconcile 回收则追加一条 `release`。
+`settle` 与 `release` 互斥，均引用原 reservation；不同事件使用不同幂等键。控制面排队前在
+Round 行锁内计算 reserved + consumed 并原子 reserve，Job 终态后写实际消耗，避免重试重复
+收费。
+
 M2a 仍只有 Overlay Build 队列，不开放 REBUILD/HIP 队列。Correctness 使用当前串行 shared
 资源语义，Performance/Holdout 使用 exclusive Lease；Barrier 和 D 裁决不占 HCU。
 
 ### 9. 轮次 EvidenceBundle 保存全家族，不只保存赢家
 
-`RoundEvidenceBundle` 绑定 Round、Candidate Family Hash、Artifact Family Hash、两份计划、
-全部 Candidate/Artifact、所有正确性和 Measurement 引用、两次 Barrier、FWER 结果、Budget
-Ledger、失败证据和清理证明。赢家、淘汰、失败、`inconclusive` 与 `invalid` 均不可删除。
+`RoundEvidenceBundle` 绑定 Round、Candidate Family Hash、Artifact Family Hash、Search Plan、
+Holdout commitment/reveal、全部 Candidate/Artifact、所有正确性和 Measurement 引用、适用的
+Barrier/FWER 结果、Budget Ledger、失败证据和清理证明。赢家、淘汰、失败、`inconclusive`
+与 `invalid` 均不可删除。
 
-人工 Signoff 接受或拒绝整份 Round Evidence。批准不会自动安装 Overlay、改变 Baseline Epoch、
+Formal 人工 Signoff 接受或拒绝整份 Round Evidence。批准不会自动安装 Overlay、改变 Baseline Epoch、
 触发 M3 E2E、开启生产灰度或把 `automatic_release_allowed` 改成 `true`。签核决定本身必须发布
 内容寻址的 `signoff-decision.json`，同时保留 PostgreSQL 审计行。
+
+签核采用 durable intent/outbox：控制面先在事务内锁定 Round、写入确定性 Signoff Intent 和
+outbox；Publisher 幂等、原子地发布 Artifact；Finalizer 重新读取并校验 URI/Hash 后，才在
+第二个事务内写最终 Signoff、审计事件并推进 Round 终态。任一崩溃点由 Reconcile 从 Intent
+状态恢复；数据库未确认可读 Artifact 前不得把 Round 标记为 `completed/rejected`。
+
+Scripted Round 与 Formal Round 共用控制流，但 Evidence 必须显式区分。Scripted Fixture 的
+Round Evidence 固定 `synthetic=true`，只能验证状态、统计和故障路径，禁止调用 Formal
+Signoff；Formal Finalize/Signoff 则强制 `synthetic=false`、真实 Authority 和 Real Adapter
+provenance。Scripted Bundle 经递归校验后进入独立的 `scripted_completed` 终态，不创建 Signoff
+Intent/Artifact，也不能进入 Formal 的 `awaiting_signoff/completed/rejected`。两种模式都强制
+`automatic_release_allowed=false`。
 
 ## 拟议状态机
 
@@ -135,7 +165,11 @@ Round:
 intake_open → intake_closed → building → correctness
   → search_measuring → search_barrier
   → holdout_measuring → holdout_barrier
-  → awaiting_signoff → completed | rejected
+  → formal: awaiting_signoff → completed | rejected
+  → scripted: scripted_completed
+
+search_barrier → formal: awaiting_signoff: no_promotable_candidate
+search_barrier → scripted: scripted_completed: no_promotable_candidate
 
 Candidate:
 proposed → building → built → correctness_running
@@ -152,12 +186,12 @@ Barrier 关闭、FWER 和签核均由各自权威组件执行。
 
 | 对象 | 关键字段 |
 | --- | --- |
-| `search_rounds` | Round/Task/Baseline/Hotspot、状态、候选数、Candidate/Artifact Family Hash、两份 Plan Hash、协议、Budget、版本 |
+| `search_rounds` | Round/Task/Baseline/Hotspot、状态、候选数、Family Hash、Search Plan、Holdout commitment/reveal、协议、Budget、版本 |
 | `round_measurements` | Round/Candidate/Phase、Measurement、同时期 Baseline 身份、原始 URI/Hash |
 | `round_barriers` | Phase、Family Hash、成员终态、关闭时间、规则版本、输入摘要 |
 | `multiple_comparison_results` | Holdout Family、FWER 方法、family alpha、m、每候选调整结果 |
-| `round_budget_ledger` | Job、资源、声明预算、实际消耗、幂等键和时间 |
-| `round_signoffs` | Round EvidenceBundle、decision、actor、reason、Signoff Artifact、幂等键 |
+| `round_budget_reservations` / `round_budget_ledger` | Attempt reservation、reserve/settle/release 事件、实际消耗和原始证据 |
+| `round_signoff_intents` / `round_signoffs` | durable intent/outbox、Round Evidence、decision、Signoff Artifact 和最终审计行 |
 
 现有 `candidates.round_id` 和通用 Artifact/Evaluation 表可以引用新 Round，但 M1 的
 `manual_candidate_signoffs` 不复用为 Round Signoff。
@@ -168,6 +202,8 @@ Barrier 关闭、FWER 和签核均由各自权威组件执行。
 
 - 2–4 个 Scripted Candidate 能覆盖 faster/slower/inconclusive/invalid 和预算失败；
 - PostgreSQL 并发测试证明 Intake Close、Barrier Close、Budget 消耗和 Signoff 幂等；
+- 零晋级能跳过 Holdout/FWER 并保存完整证据；Scripted Evidence 不能进入 Formal Signoff；
+- Holdout commitment/reveal、Signoff 崩溃恢复和 Budget reserve/settle/release 故障注入通过；
 - Candidate/Artifact Family Hash 篡改、Search 样本篡改、Holdout 泄漏、跨候选 Baseline 复用和 Barrier 提前关闭均被拒绝；
 - Target Lock 上人工 Candidate Round 完整运行并健康清理；
 - Round Evidence 可递归重哈希，且人工签核后仍保持自动发布关闭；

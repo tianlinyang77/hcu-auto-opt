@@ -18,10 +18,10 @@
 → 独立 Build + Correctness
 → Search Measurement
 → Search Barrier
-→ 独立 Holdout Measurement
-→ Holdout Barrier + Bonferroni FWER
+→ 有晋级时：独立 Holdout Measurement → Holdout Barrier + Bonferroni FWER
+→ 零晋级时：跳过 Holdout/FWER
 → Round EvidenceBundle
-→ Human Signoff
+→ Formal：Human Signoff；Scripted：synthetic 验证终态
 ```
 
 M2a 只回答 Kernel 级候选在冻结 Search/Holdout 下能否可信晋级，不回答模型或服务 E2E 收益。
@@ -36,9 +36,10 @@ Owner：A；B/C/D 必须共同 Review。
 
 - ADR-0009 从 Proposed 评审为 Accepted 或明确拒绝；
 - `SearchRound`、`RoundCandidate`、`RoundMeasurementRef`、`RoundBarrierResult`、
-  `MultipleComparisonResult`、`RoundEvidenceBundle`、`RoundSignoff` 的字段草案；
-- Candidate、Artifact 和 Holdout 三个 Family Hash 的冻结输入、时间点与规范化算法；
-- 状态机、幂等键、错误码、Budget Ledger 和 Contract 版本策略；
+  `MultipleComparisonResult`、`RoundEvidenceBundle`、`RoundSignoffIntent/Signoff` 的字段草案；
+- Candidate、Artifact 和条件性 Holdout Family Hash 的冻结输入、时间点与规范化算法；
+- nonce-sealed Holdout commitment/reveal 和零晋级终态；
+- 状态机、幂等键、错误码、Budget reservation/ledger、Signoff outbox 和 Contract 版本策略；
 - M1 v1 证据回放兼容测试清单。
 
 退出条件：四人签字、项目所有者只批准进入 M2a 代码实现；尚不批准 HCU Formal。
@@ -51,12 +52,13 @@ Owner：A。
 
 - 增量 PostgreSQL 迁移，不修改已签核 M1 表语义；
 - Round 创建、Candidate Intake、Intake Close、状态查询和取消 API；
-- 原子 Barrier Close、Budget Ledger、失败收敛、Signoff 和 Reconcile；
+- 原子 Barrier Close、零晋级收敛、Budget reservation/ledger、Signoff Intent/Outbox 和 Reconcile；
 - `SELECT FOR UPDATE`/幂等/并发 PostgreSQL 集成测试；
 - API 返回 source commit、Contract version 和 Adapter Profile 供写前核对。
 
 退出条件：两个 Worker 同时关闭 Barrier 只能产生一个逻辑对象；关闭后新增 Candidate、迟到
-Worker、旧 Claim/Fencing Token 和超预算 Job 均被拒绝。
+Worker、旧 Claim/Fencing Token 和超预算 Job 均被拒绝；Signoff 任一崩溃点可恢复，且未复核
+Artifact 时 Round 不进入终态。
 
 ### M2-2：C 线有限候选与制品
 
@@ -81,7 +83,7 @@ Owner：B。
 
 - 在不修改 `m1-kernel-performance-evidence-v1` 的前提下执行 Search/Holdout 两类计划；
 - 每个 Candidate/Phase 独立 ABBA、进程、缓存、Measurement ID 和同时期 Baseline；
-- 实际样本、墙钟、Harness 时间和 Lease 持有秒数回写 Budget Ledger；
+- 实际样本、墙钟、Harness 时间和 Lease 持有秒数通过 reserve/settle/release 回写 Budget；
 - 外部 Runner 门禁、Telemetry 有限重试、Fence/Health 和完整失败证据；
 - 拒绝 Search/Holdout URI、Hash、Plan 或 Baseline 身份复用的测试。
 
@@ -94,12 +96,12 @@ Owner：D。
 
 交付：
 
-- Search/Holdout Plan 生成、Hash 和 Holdout 访问边界；
-- Search Barrier 完整性校验和最多提升 2 个 Candidate 的预注册规则；
+- Search Plan、带 nonce 的 Holdout commitment/reveal 和访问边界；
+- Search Barrier 完整性校验、零晋级路径和最多提升 2 个 Candidate 的预注册规则；
 - 重读 B 原始证据，执行单次比较验证和当前 Workload MDE 复算；
 - Holdout Barrier 与 Bonferroni FWER；
-- faster/slower/inconclusive/invalid、正确性失败、候选缺失、Family Hash 篡改和 Barrier 提前
-  关闭的确定性测试；
+- 对称的 faster/slower/inconclusive/invalid、`m=0` 拒绝、正确性失败、候选缺失、Family
+  Hash 篡改和 Barrier 提前关闭的确定性测试；
 - 保存所有候选的 `RoundEvidenceBundle`，不只保存赢家。
 
 退出条件：相同证据重放得到完全相同结果；更换任意 Candidate、Plan、Baseline、Measurement
@@ -113,7 +115,8 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 
 1. 无 HCU Unit/Contract 测试；
 2. PostgreSQL 并发、幂等、stale Worker、Budget 和 Barrier 测试；
-3. Scripted 2–4 Candidate 全链，覆盖成功和失败家族；
+3. Scripted 2–4 Candidate 全链，覆盖成功、零晋级和失败家族，进入 `scripted_completed` 并证明
+   Synthetic 不可签核；
 4. 评审 Evidence Index、Runbook 和 Target Lock；
 5. 项目所有者明确批准一次 M2a HCU 窗口；
 6. nmz36 Formal Round；
@@ -137,10 +140,10 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 | 层级 | 必测场景 |
 | --- | --- |
 | Contract | extra field、跨 Round/Phase/Family/Artifact/Plan 绑定、M1 v1 回放 |
-| State machine | 第二次 Intake Close、提前 Barrier、迟到 Worker、取消、预算耗尽 |
-| PostgreSQL | 并发领取、Barrier 唯一、Budget 原子消耗、Signoff 幂等、迁移升级 |
-| Scripted | known faster/slower/inconclusive/invalid、正确性失败、Build 失败 |
-| Evidence | Search/Holdout 复用、跨候选 Baseline 复用、Hash 篡改、外部引用丢失 |
+| State machine | 第二次 Intake Close、提前 Barrier、零晋级、迟到 Worker、取消、预算耗尽 |
+| PostgreSQL | Barrier 唯一、Budget 事件互斥、Signoff Outbox 崩溃恢复、幂等、迁移升级 |
+| Scripted | known faster/slower/inconclusive/invalid、零晋级、正确性/Build 失败、独立 synthetic 终态、Formal Signoff 拒绝 |
+| Evidence | Holdout commitment 枚举/篡改、Search/Holdout 复用、Baseline 复用、外部引用丢失 |
 | Resource | exclusive 冲突、过期 Lease、Fencing、清理失败、外部 Runner 出现 |
 | Formal | 固定 Target/Workload、2–4 业务 Candidate、完整家族证据和人工接受 |
 
@@ -152,7 +155,8 @@ A 主持评审，B 对测量可信度拥有停止权，D 对统计/证据无效�
 - ADR-0009 Accepted；
 - Contract、迁移和四人 CODEOWNER Review 完成；
 - Unit、PostgreSQL、Linux/Windows Scripted CI 全绿；
-- Holdout 计划在 Search 前冻结且访问边界可证明；
+- Holdout 计划在 Search 前以 nonce commitment 冻结，reveal 与访问边界可证明；
+- 零晋级、Synthetic Evidence、Signoff 崩溃恢复和 Budget 事件互斥测试通过；
 - 轮次预算适配 HCU 时间窗口，且不会临时缩减正式采样计划；
 - Target Snapshot、Stage0Run、Baseline、Image 和 Real Adapter Profile 重新核对；
 - HCU 资源窗口获得明确授权；

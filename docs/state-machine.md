@@ -88,7 +88,11 @@ M2a 拟新增独立 `SearchRound`，而不是修改上面的 M1 链。拟议顺�
 intake_open → intake_closed → building → correctness
 → search_measuring → search_barrier
 → holdout_measuring → holdout_barrier
-→ awaiting_signoff → completed | rejected
+→ formal: awaiting_signoff → completed | rejected
+→ scripted: scripted_completed
+
+search_barrier → formal: awaiting_signoff: no_promotable_candidate
+search_barrier → scripted: scripted_completed: no_promotable_candidate
 ```
 
 这只是设计草案，当前枚举、数据库和 API 尚未提供这些状态。详见
