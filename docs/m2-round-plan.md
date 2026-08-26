@@ -42,6 +42,8 @@ Owner：A；B/C/D 必须共同 Review。
   `MultipleComparisonResult`、`RoundEvidenceBundle`、`RoundSignoffIntent/Signoff` 的字段草案；
 - Candidate、Artifact 和条件性 Holdout Family Hash 的冻结输入、时间点与规范化算法；
 - nonce-sealed Holdout commitment/reveal 和零晋级终态；
+- D `HoldoutPlanAuthority`、Formal 受保护 Store/ACL 和一次性 Reveal Lease；
+- 固定 2–4 个 Candidate、最多提升 2 个、确定性单推荐和 Lease 时间硬预算；
 - 状态机、幂等键、错误码、Budget reservation/ledger、Signoff outbox 和 Contract 版本策略；
 - Profile ID/Version、Plan Preview、Round Summary 和 Operator API 的边界；
 - M1 v1 证据回放兼容测试清单。

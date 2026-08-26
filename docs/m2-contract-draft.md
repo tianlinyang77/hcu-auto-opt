@@ -82,7 +82,9 @@ Holdout Family 后失败的成员仍计入冻结的 `m`。
 | `search_plan_hash` | SHA256 | Search 内容承诺 |
 | `holdout_plan_commitment` | SHA256 | Intake 前提交 `SHA256(nonce || canonical_plan)` |
 | `holdout_commitment_scheme` | literal `sha256-nonce-v1` | 禁止普通无盐 Hash |
+| `holdout_plan_authority_id` / `holdout_plan_authority_hash` | string/SHA256 | D 控制的精确 Store/协议身份 |
 | `holdout_plan_hash` | SHA256/null | Search Barrier 后受控揭示并验证成功才写入 |
+| `holdout_reveal_lease_id` | UUID/null | 有晋级时绑定获授权 Worker/Lease/Fencing 的一次性读取权 |
 | `holdout_reveal_evidence_hash` | SHA256/null | 绑定 commitment、32-byte nonce、Plan URI/Hash、actor 和时间 |
 | `selection_rule_hash` | SHA256 | Search 晋级规则 |
 | `budget` | `RoundBudget` | 声明硬上限 |
@@ -102,6 +104,13 @@ Bundle 递归校验通过后只能由 A 的 Scripted Finalizer 推进到 `script
 若 Search Barrier 没有晋级成员，`holdout_family_hash`、`holdout_plan_hash` 和 reveal evidence
 保持为空，Round 以 `no_promotable_candidate` 跳过 Holdout/FWER；不得构造空 Family 或计算
 `m=0`。
+
+Scripted 的 `holdout_plan_authority_id` 必须指向 synthetic Store。Formal 必须指向部署方 opt-in
+的受保护内容寻址 Store，并由独立 D 服务身份和文件/对象 ACL 保护；通用业务表只保存
+commitment、Authority ID/Hash 和脱敏状态，禁止保存明文计划或 nonce。Search Barrier 关闭后，
+D 才能签发一次性 Reveal Lease，绑定 Round、Holdout Family、Worker、资源 Lease/Fencing 和
+过期时间。Worker 重建 commitment 成功后才写入 Plan/Reveal Evidence Hash；Reveal Lease 缺失、
+过期、跨 Round/Worker 或 Fencing 漂移均拒绝 Holdout 测量。
 
 拟议 `RoundState`：
 
@@ -230,6 +239,10 @@ M2a 固定使用 Bonferroni FWER，不允许同轮临时切换 FDR。
 Holdout Workload MDE、可信门限和 `faster|slower|inconclusive|invalid`。没有有效区间的失败
 成员仍保留，且仍计入 `m`。
 
+若存在 `faster`，`recommended_candidate_id` 必须是 adjusted CI lower 最大的成员；lower 相同按
+Candidate UUID 小写连字符字符串升序破同分。全部 `faster` 仍保留在 `candidate_results` 和
+Round Evidence 中；推荐字段不触发 Baseline 更新、安装或发布。没有 `faster` 时该字段必须为空。
+
 有效证据使用 `confidence = 1 - alpha_candidate` 的确定性 bootstrap。记 adjusted CI 为
 `[lower, upper]`，`threshold=max(Stage 0 MDE, Holdout Workload MDE)`：
 
@@ -338,7 +351,8 @@ Harness 有效时间、原始使用证据 Hash 和事件自己的幂等键。
 超预算保留 `budget_exhausted` 证据，不缩减已冻结的正式采样计划。即使清理使实际 Lease 时间
 超过预留，也如实 settle，并阻止后续 Job；不得截断证据来伪装未超预算。
 
-硬预算使用 Lease 持有时间，Harness 有效时间同时记录供效率分析。该选择仍待 ADR 评审确认。
+硬预算使用 exclusive Lease 实际持有时间，包含失败恢复和释放前清理；Harness 有效时间同时
+记录供利用率与操作成本分析，不替代或放宽硬预算。
 
 ## 5. 持久化草案
 
@@ -349,7 +363,7 @@ Harness 有效时间、原始使用证据 Hash 和事件自己的幂等键。
 | --- | --- |
 | `search_rounds` | `round_id`；一个 Task 一个活动 Round；Candidate/Artifact Hash 只写一次，Holdout Hash 仅晋级时写一次 |
 | `round_candidates` | unique `(round_id,candidate_id)`、`(round_id,round_candidate_id)`、`(round_id,ordinal)`、`(round_id,candidate_source_hash)`、`(round_id,source_package_hash)`、`(round_id,source_manifest_hash)`、`idempotency_key` |
-| `round_plans` | unique `(round_id,phase)`；Holdout 预先只公开 nonce commitment，内容/nonce 对非 D 角色不可读 |
+| `round_plans` | unique `(round_id,phase)`；通用表只保存 commitment 与 D Authority 引用，Holdout 内容/nonce 位于受保护 Store，对非 D 角色不可读 |
 | `round_measurements` | unique `(round_id,candidate_id,phase)`、`measurement_id`、`raw_evidence_hash`、`baseline_sample_set_hash` |
 | `round_barriers` | unique `(round_id,phase)`、`idempotency_key`；关闭后不可修改成员 |
 | `multiple_comparison_results` | unique `round_id`、`holdout_barrier_id`、`result_hash` |
@@ -422,6 +436,8 @@ StartIntent 直接串联这些接口：
 | 409 | `holdout_family_hash_mismatch` | 晋级族或 `m` 漂移 | false |
 | 409 | `holdout_commitment_mismatch` | 揭示的 nonce/Plan 不能重建预先 commitment | false |
 | 409 | `holdout_plan_not_revealed` | Holdout 测量前尚未完成受控揭示 | true |
+| 409 | `holdout_plan_authority_unavailable` | 冻结的 D Store/协议身份不可用或漂移 | true |
+| 403 | `holdout_reveal_lease_invalid` | Reveal Lease 过期、跨 Worker/Round 或 Fencing 不符 | false |
 | 409 | `round_artifact_frozen` | Search 后尝试重建或换 Artifact | false |
 | 409 | `round_barrier_not_ready` | 仍有成员未到终态或证据缺失 | true |
 | 409 | `round_barrier_already_closed` | 不同输入重复关闭 | false |
@@ -451,8 +467,11 @@ StartIntent 直接串联这些接口：
 - Formal 只接受 business Candidate，Scripted 只接受 fixture Candidate；
 - Holdout `RoundMeasurementRef` 缺 `holdout_family_hash` 时失败；Search 带该字段时失败；
 - nonce/Plan 不能重建 commitment、普通无盐 Hash 或未 reveal 的 Holdout Measurement 被拒绝；
+- Formal 明文 Holdout Plan/nonce 进入通用表、环境变量或无 ACL Store 时失败；跨 Worker/Round、
+  过期或 Fencing 漂移的 Reveal Lease 被拒绝；
 - Bonferroni `m=0`、`alpha_candidate != family_alpha/m`、缺少失败成员或缩小 `m` 时失败；
 - 调整后 CI 对称产生 faster/slower/inconclusive，证据无效才产生 invalid；
+- 多个 faster 全部保留且只推荐 adjusted lower 最大者；同分按 Candidate UUID 升序确定性重放；
 - 零晋级 Bundle 必须缺 Holdout/FWER 引用，普通 Bundle 缺任一引用时失败；
 - Scripted Bundle 必须 synthetic，Formal Bundle 必须 non-synthetic；Synthetic Signoff 被拒绝，
   Scripted 只能进入 `scripted_completed`；

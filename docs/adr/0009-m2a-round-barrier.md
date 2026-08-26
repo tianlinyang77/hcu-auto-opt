@@ -19,7 +19,8 @@ M2 需要回答的新问题不是“还能不能再跑一个 Candidate”，而�
 
 ### 1. M2 分为 M2a 和 M2b
 
-M2a 每轮只接受 2–4 个人工提供、内容不可变的业务 Candidate。它们必须属于同一个
+M2a 每轮固定只接受 2–4 个人工提供、内容不可变的业务 Candidate，硬上限为 4，Search 最多
+提升 2 个。它们必须属于同一个
 Hotspot、同一个 Replacement Point、同一个 Baseline Epoch，且继续限定为 Python/Triton
 startup Overlay。M2a 继续运行在 Formal Stage 0 已批准的
 `DEGRADED_MANUAL_INTAKE` 边界内，不把降级的 Profiler 能力伪装成自动发现能力。M2a 不运行
@@ -38,7 +39,9 @@ Round 在接收 Candidate 前固定 Target Snapshot、Stage0Run、Baseline Epoch
 Workload/Configuration Hash、Image Digest、Adapter Profile、统计协议和总预算。候选数达到
 声明值后执行 Intake Close；关闭后禁止新增、替换或重建 Candidate。
 
-Intake Close 对按 Candidate ID 排序后的源码身份计算 `candidate_family_hash`。全部 Build 到达
+Intake Close 对按 ordinal 排序后的 Candidate/RoundCandidate ID、Package Store/Package/Manifest
+Hash、Manifest Version、Baseline/Candidate Source Hash、Hotspot、Replacement Point、Candidate
+Kind 和优化意图计算 `candidate_family_hash`。全部 Build 到达
 终态后，再对每个 Candidate 的 Artifact ID/Hash，或没有 Artifact 时的失败终态与失败证据
 Hash，计算 `artifact_family_hash`。两者职责不同：前者证明“提交了哪些源码候选”，后者证明
 “实际测量或拒绝了哪些不可变制品”。任何后续计划、Barrier 和 Evidence 都必须同时绑定这
@@ -64,10 +67,16 @@ D 在 Candidate Intake Close 前生成两份独立计划：
 
 - Search Plan：允许 C 和开发人员知道，用于候选初筛；
 - Holdout Plan：Search 前只发布带 256-bit 随机 nonce 的 commitment
-  `SHA256(nonce || canonical_plan)`；具体 Shape/输入和 nonce 由 D 控制的存储和 Worker 权限
-  保护。Search Barrier 完成后才把计划与 nonce 交给获授权的测量 Worker，Worker 必须先验证
-  commitment，再记录揭示后的 Plan Hash 和 reveal evidence。普通无盐 Hash 不能作为保密
-  承诺，避免小 Shape 空间被枚举。
+  `SHA256(nonce || canonical_plan)`；具体 Shape/输入和 nonce 由 D 的
+  `HoldoutPlanAuthority` 保存。普通业务表、Operator Facade、C/Agent 和 Search Worker 只保存或
+  读取 commitment、Authority ID/Hash 与脱敏状态，不能读取计划内容或 nonce。
+
+`HoldoutPlanAuthority` 是逻辑权限边界，不要求 MVP 拆成独立微服务。Scripted 使用显式 synthetic
+Store；Formal 必须使用部署方 opt-in 的受保护内容寻址 Store、独立服务身份和文件/对象 ACL，
+不能把明文计划放进通用数据库字段或进程环境变量。Search Barrier 完成后，D 才签发绑定
+Round、Holdout Family、获授权测量 Worker、Lease/Fencing 和过期时间的一次性 Reveal Lease。
+Worker 读取后必须重建 commitment，并记录 Plan Hash、Reveal Lease、actor、时间和访问结果。
+普通无盐 Hash 不能作为保密承诺，避免小 Shape 空间被枚举。
 
 Search 和 Holdout 使用不同输入、Measurement ID、进程、缓存 Namespace 和原始文件。
 Candidate 进入 Search 后，源码、SourceSnapshot 和 Artifact Hash 永久冻结；不得根据 Search
@@ -119,6 +128,10 @@ Holdout 候选数 `m` 在 Holdout 开始前冻结，D 对每个候选使用
 其余为 `inconclusive`。正确性、绑定、原始证据或清理无效时才是 `invalid`。若以后候选族
 显著增大并考虑 BH-FDR，必须新增协议版本和 ADR，不能在同一结果族中临时切换算法。
 
+全部 `faster` 结果都保留在 Round Evidence 和人工签核材料中，但系统最多推荐一个 Candidate：
+选择 adjusted CI lower 最大者；若相同则按 Candidate UUID 小写连字符字符串升序确定性破同分。
+推荐只是展示字段，不删除其他 `faster`，也不自动修改 Baseline 或发布。
+
 ### 8. 预算由声明上限和实际消耗共同约束
 
 Round Budget 至少包含 Candidate、Build、Correctness、Search Sample、Holdout Sample、墙钟和
@@ -134,6 +147,9 @@ Round 行锁内计算 reserved + consumed 并原子 reserve，Job 终态后写�
 
 M2a 仍只有 Overlay Build 队列，不开放 REBUILD/HIP 队列。Correctness 使用当前串行 shared
 资源语义，Performance/Holdout 使用 exclusive Lease；Barrier 和 D 裁决不占 HCU。
+
+HCU 硬预算按 exclusive Lease 实际持有秒数执行，覆盖测量、失败恢复和释放前清理；Harness
+有效测量秒数同时记录，只用于利用率和操作成本分析，不能替代 Lease 时间或放宽硬预算。
 
 ### 9. 轮次 EvidenceBundle 保存全家族，不只保存赢家
 
@@ -223,11 +239,12 @@ Barrier 关闭、FWER 和签核均由各自权威组件执行。
 - Bonferroni 在小候选族上较保守；它优先保护可信度，后续扩展需显式新版本。
 - M1 已签核证据无需迁移，M2 的新对象可以增量实现和独立回滚。
 
-## 待评审问题
+## 拟冻结的评审决策
 
-1. M2a 是否固定最多 4 个 Candidate、最多提升 2 个？本 ADR 建议是。
-2. Holdout Plan 的访问控制由数据库权限、文件 ACL 还是独立 D 服务承担？
-3. Round Winner 是只选调整后下界最大的一个，还是允许多个 `faster` 一并进入人工签核？
-   本 ADR 建议保留全部结果，但只推荐下界最大的一个。
-4. Budget Ledger 的 HCU 秒数以 Lease 持有时间还是 Harness 有效测量时间计费？本 ADR 建议两者
-   都记录，以 Lease 持有时间执行硬预算。
+以下四项作为 A/B/C/D Review 的明确输入，ADR 保持 Proposed，直到四线签署和项目所有者决定：
+
+1. M2a 固定 2–4 个 Candidate，硬上限 4，最多提升 2 个；
+2. Holdout 内容由 D `HoldoutPlanAuthority` 管理；Scripted 可用 synthetic Store，Formal 必须使用
+   opt-in 受保护 Store、独立身份/ACL 和一次性 Reveal Lease，不要求拆微服务；
+3. 保留全部 `faster`，只推荐 adjusted lower 最大的一个，相同则按 Candidate UUID 升序破同分；
+4. HCU 硬预算以 exclusive Lease 实际持有时间执行，同时记录 Harness 有效时间用于效率分析。
