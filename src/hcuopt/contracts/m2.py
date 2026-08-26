@@ -52,6 +52,7 @@ class SearchRound(ContractModel):
     schema_version: Literal["m2a-search-round-v1"] = M2_SEARCH_ROUND_SCHEMA_VERSION
     round_id: UUID
     task_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
     state: SearchRoundState
     run_mode: SearchRoundRunMode
     project_mode: ProjectMode | None = None

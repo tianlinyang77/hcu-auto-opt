@@ -65,6 +65,7 @@ Holdout Family 后失败的成员仍计入冻结的 `m`。
 | `schema_version` | literal `m2a-search-round-v1` | Contract 版本 |
 | `round_id` | UUID | 轮次 ID |
 | `task_id` | UUID | M2a Task；当前一个 Task 只允许一个活动 Round |
+| `idempotency_key` | string | 创建 Round 的全局重放身份；输入完全相同才返回同一 Round |
 | `state` | RoundState | 只由 A 控制面推进 |
 | `run_mode` | `scripted` 或 `formal` | 决定真假证据和 Signoff 边界 |
 | `project_mode` | `degraded_manual_intake` 或 null | Formal 必须为前者；Scripted 必须为空 |
@@ -364,7 +365,7 @@ Harness 有效时间、原始使用证据 Hash 和事件自己的幂等键。
 
 | 表 | 关键唯一/不可变约束 |
 | --- | --- |
-| `search_rounds` | `round_id`；一个 Task 一个活动 Round；Candidate/Artifact Hash 只写一次，Holdout Hash 仅晋级时写一次 |
+| `search_rounds` | `round_id`、`idempotency_key`；一个 Task 一个活动 Round；Candidate/Artifact Hash 只写一次，Holdout Hash 仅晋级时写一次 |
 | `round_candidates` | unique `(round_id,candidate_id)`、`(round_id,round_candidate_id)`、`(round_id,ordinal)`、`(round_id,candidate_source_hash)`、`(round_id,source_package_hash)`、`(round_id,source_manifest_hash)`、`idempotency_key` |
 | `round_plans` | unique `(round_id,phase)`；通用表只保存 commitment 与 D Authority 引用，Holdout 内容/nonce 位于受保护 Store，对非 D 角色不可读 |
 | `round_measurements` | unique `(round_id,candidate_id,phase)`、`measurement_id`、`raw_evidence_hash`、`baseline_sample_set_hash` |
@@ -396,7 +397,7 @@ StartIntent 直接串联这些接口：
 
 | Method | Path | 作用 |
 | --- | --- | --- |
-| POST | `/v1/search-rounds` | 按 `run_mode` 创建 synthetic Scripted 或绑定 Formal Stage 0 的 Round |
+| POST | `/v1/search-rounds` | 使用全局 `idempotency_key` 按 `run_mode` 创建或重放 synthetic Scripted / Formal Round |
 | GET | `/v1/search-rounds/{round_id}` | 读取 Round 权威与服务身份 |
 | GET | `/v1/search-rounds/{round_id}/summary` | 读取成员、Job、Barrier、Budget、Evidence、Signoff |
 | POST | `/v1/search-rounds/{round_id}/candidates` | 仅 StartIntent Reconciler 在 Intake Open 时按冻结成员登记 Candidate |
