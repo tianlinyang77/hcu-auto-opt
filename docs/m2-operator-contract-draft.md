@@ -53,7 +53,7 @@ Profile 发布后不可修改；更新必须生成新 version/hash。Deprecated 
 
 | 类型 | 必填字段 |
 | --- | --- |
-| `TargetOperatorProfileRefs` | `target_id`、TargetSpec Hash、exact Adapter Profile、resource policy ID/Hash、required Stage 0 protocol Hash |
+| `TargetOperatorProfileRefs` | `target_id`、TargetSpec Hash、exact Adapter Profile、resource policy ID/Hash、Candidate Package Store ID/version/hash、required Stage 0 protocol Hash |
 | `WorkloadOperatorProfileRefs` | `workload_id/hash`、`configuration_hash`、数据/模型 URI/Hash、Hotspot 范围、baseline selection policy |
 | `MeasurementOperatorProfileRefs` | Search/Holdout protocol version/hash、selection rule hash、RoundBudget 默认值、`explore|standard|formal` 结论边界 |
 
@@ -77,15 +77,29 @@ URI/Hash、Replacement Point、Workload Hash 和 Shape/dtype 摘要。来源为 
 | 字段 | 类型/约束 | 说明 |
 | --- | --- | --- |
 | `ordinal` | int 0..3 | 稳定排序，不代表排名 |
-| `source_package_uri/hash` | URI/SHA256 | 部署方内容寻址根 |
-| `source_manifest_version` | string | 可读解析器版本 |
-| `candidate_source_hash` | SHA256 | 冻结源码身份 |
+| `source_package_ref` | strict object | Package/Manifest/Source Hash 和 Schema Version 的 expected assertion |
 | `optimization_intent` | string | 单一可审计假设 |
-| `replacement_point` | string | 必须等于 Hotspot/Round |
-| `candidate_kind` | `fixture|business` | 由 run_mode 约束 |
 
-不接受本地相对路径、行内源码、移动分支或 Tag-only 制品。Scripted 只能 fixture，Formal 只能
-business。2–4 个输入的 ordinal、Source Hash 和 Package Hash 必须唯一。
+`source_package_ref` 只包含 `candidate_source_hash`、`source_package_hash`、`manifest_hash` 和 literal
+`manifest_schema_version=m1-candidate-source-v1`，不接受 URI、宿主路径、行内源码、移动分支或
+Tag-only 制品。实际 Package Store 只由 Target Operator Profile 决定，客户端不能覆盖。
+
+为兼容已签核且强制包含 `candidate_id` 的 M1 `CandidateSourcePackageManifest`，部署侧 C Intake
+Publisher 必须在发布 Package 前分配全局唯一 Candidate UUID，并写入 Manifest。该 UUID 不是 UI
+输入；Plan Compiler 从受信 Manifest 解析它，Start 时使用该 UUID 创建通用 Candidate 行。除同一
+StartIntent 的幂等重放外，已经被其他 Task/Round 使用的 UUID 必须阻塞 Preview/Start。
+
+Plan Compiler 必须通过 Profile 绑定的 Package Store Authority 重新读取 Package：拒绝受信根外
+对象、符号链接、可变对象和未注册 scheme；复算 Manifest 与每个文件 Hash；再把 Manifest 中的
+Candidate ID、Hotspot、Baseline Source Hash、Candidate Source Hash、Replacement Point、
+Candidate Kind、Profiler Evidence 和 Mount Target 与已解析 Authority 逐项核对。UI 提交值只是
+expected assertion，不是 Source/Replacement Authority；Artifact 只能由 C Builder/Artifact
+Store 在 Build 后产生。Scripted 只能解析 fixture，Formal 只能解析 business。2–4 个输入的
+ordinal、Candidate ID、Candidate Source Hash 和 Manifest Hash 必须唯一。
+
+M2 外层 `source_package_hash` 不修改 M1 Manifest；它计算为规范化 JSON
+`{manifest_hash, files:[{path,content_hash}]}` 的 SHA256，其中 files 按规范化 POSIX path 排序。
+这样 Package 身份同时绑定原始 Manifest 字节和 Manifest 声明的每个文件内容。
 
 ### 3.3 `RoundPlanPreviewRequest`
 
@@ -117,13 +131,16 @@ Plan Compiler 从 Repository 解析并冻结：
 
 - TargetSpec/Snapshot、Stage0Run/Protocol、BaselineEpoch 和 Adapter Profile；
 - Workload/Configuration/Image/Source Hash；
-- Hotspot、Candidate Source Package 和 `candidate_input_set_hash`；
+- Hotspot、Package Store Authority、已验证 Candidate Source Manifest 和
+  `candidate_input_set_hash`；
 - Search/Holdout 协议 Hash、commitment scheme、选择规则和 RoundBudget；
 - `synthetic`、结论边界和 `automatic_release_allowed=false`。
 
-`candidate_input_set_hash` 绑定 Preview 中的 ordinal、Source Package/Source Hash、优化意图与
-Replacement Point，但不是 SearchRound Intake Close 后的 `candidate_family_hash`。后者包含服务端
-创建的 Candidate ID，只能在 StartIntent 完成 Intake Close 后产生并回绑 Preview。
+`candidate_input_set_hash` 按 ordinal 排序，绑定 Package Store ID/version/hash、Package Hash、
+Manifest Schema/Hash、Manifest 中预分配的 Candidate ID、Baseline/Candidate Source Hash、Hotspot、
+Replacement Point、Candidate Kind、文件清单摘要和优化意图。它不是 SearchRound Intake Close
+后的 `candidate_family_hash`；后者还绑定服务端确定性 `round_candidate_id` 和 Round Authority，
+只能在 StartIntent 完成 Intake Close 后产生并回绑 Preview。
 
 Formal 必须满足：Stage0Run 为 Formal/finalized、Target/Baseline/Adapter 为真实且已授权、Profile
 均允许 Formal、Candidate 全为 business、优化 blocker 已解析。Preview 只冻结 D 的协议和
@@ -160,16 +177,33 @@ codes 和 `expected_service_identity`。客户端不得重传或覆盖 resolved 
 锁定未过期 Preview
 → 创建不可执行的 SearchRound Authority
 → D 冻结 Search Plan 与 nonce-sealed Holdout commitment
-→ 批量 Intake 2–4 个 Candidate
+→ 按冻结成员绑定创建/重放 2–4 个 Candidate 与 RoundCandidate
 → 冻结 Candidate Family / Intake Close
 → 绑定 preview_id 与 round_id
 → Finalize StartIntent，允许控制面排 Job
 ```
 
 StartIntent 至少保存 `intent_id`、Preview/Plan Hash、确定性 Task/Round ID、输入 digest、actor、
-幂等键、实际 Search Plan Hash、Holdout commitment、Candidate Family Hash 和
+幂等键、逐候选 `candidate_members`、实际 Search Plan Hash、Holdout commitment、Candidate Family Hash 和
 `preparing|round_created|plans_frozen|intake_closed|finalized|failed`。每一步都幂等并可重放；任何
 失败不得让 Round 排 Job。CLI/Web 只轮询同一 Intent，不能串联底层写接口或自行补偿。
+
+每个 `OperatorStartCandidateMember` 在 Intent 初始事务内冻结：
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `ordinal` / `candidate_input_digest` | int/SHA256 | 绑定 Preview 成员和规范化输入 |
+| `source_package_hash` / `source_package_manifest_hash` / `candidate_source_hash` | SHA256 | 绑定受信 Package |
+| `candidate_id` | UUID | 从已验证 M1 Manifest 读取，不在 Reconcile 时随机生成 |
+| `round_candidate_id` | UUID | UUIDv5(round ID、ordinal、Candidate ID、input digest) |
+| `intake_idempotency_key` | string | 由 Intent ID、ordinal、input digest 确定性生成 |
+| `state` | `pending|candidate_created|round_member_bound|failed` | 逐成员恢复进度 |
+| `error_code` | string/null | 稳定、脱敏；失败时保留 |
+
+Reconcile 可在创建任意第 1～N 个成员后重启，但只能重放同一组 ID 与幂等键。所有成员达到
+`round_member_bound` 后才可原子 Intake Close；关闭后崩溃只能重放相同 Candidate Family。并发
+Reconcile 依赖数据库唯一约束和行锁收敛，任何部分成功、成员失败或 Hash 冲突都保持
+`executable=false`，不得 Build 或排 Job。
 
 同一 Preview 只能启动一个逻辑 Round；完全相同重放返回相同 Round 并标记 `replayed=true`。
 同一幂等键配不同 Hash、Preview 已由不同输入启动或服务身份漂移均返回冲突。
@@ -229,12 +263,15 @@ CLI 输出默认适合人阅读，并提供 `--json` 输出同一 Contract；脚
 | `operator_profile_not_found` | ID/version 不存在 | false |
 | `operator_profile_revoked` | Profile 禁止新任务 | false |
 | `operator_profile_mode_mismatch` | Profile 不允许当前模式 | false |
+| `operator_candidate_package_invalid` | 受信 Store、Manifest 或文件 Hash/绑定校验失败 | false |
+| `operator_candidate_id_conflict` | Manifest Candidate ID 已被其他输入使用 | false |
 | `operator_preview_blocked` | Preflight 存在 block | 取决于子检查 |
 | `operator_preview_expired` | 必须重新 Preview | true |
 | `operator_plan_hash_mismatch` | 客户端 Hash 漂移 | false |
 | `operator_warning_ack_required` | 缺少预注册 warning 确认 | true |
 | `operator_preview_already_started` | Preview 已绑定其他输入 | false |
 | `operator_start_failed` | StartIntent 暂停，需按子错误 Reconcile/处理 | 取决于子错误 |
+| `operator_candidate_intake_failed` | 某个冻结成员无法按确定性绑定完成 Intake | 取决于子错误 |
 | `operator_read_model_unavailable` | Summary 尚未重建 | true |
 | `operator_cleanup_not_verified` | Cancel/Signoff 前清理未证实 | true |
 
@@ -251,10 +288,16 @@ Outbox。StartIntent 只记录命令进度与权威引用，不保存第二份 R
 OX-0/OX-1 必测：
 
 - Profile version/hash、revoked、mode 和 `extra=forbid`；
+- Package Store Authority 不可由客户端覆盖；根外对象、符号链接、可变对象、Manifest/文件 Hash
+  漂移以及 Candidate/Hotspot/Baseline/Replacement/Kind 绑定漂移全部被拒绝；
+- `candidate_input_set_hash` 对 Manifest Schema/Hash、Candidate Kind 或 Package Store Authority
+  任一变化敏感；
 - Preview request/plan 两类 digest、过期、权威漂移，且实际 commitment/nonce 不在 Preview 泄漏；
 - Formal/Scripted Candidate、Authority、Adapter 和 synthetic 判别联合；
 - 两个并发 Start 只能创建一个 Intent/Round/Candidate Family；各崩溃点可 Reconcile，未 finalized
   Round 不能排 Job；
+- 在第 1～N 个 Candidate 创建后、RoundCandidate 绑定后、Intake Close 前后分别注入崩溃并并发
+  Reconcile；重放必须返回同一组 Candidate ID、RoundCandidate ID 和 Candidate Family；
 - 相同输入重放和不同输入冲突；
 - Read Model 删除后从事件重建完全一致；
 - Lease expired 与 Cleanup verified 不混淆；
