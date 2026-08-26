@@ -215,6 +215,11 @@ def test_search_round_api_is_declared_in_openapi() -> None:
     assert "/v1/search-rounds/{round_id}/summary" in paths
     assert "/v1/search-rounds/{round_id}/candidates" in paths
     assert "/v1/search-rounds/{round_id}/intake-close" in paths
+    assert (
+        "/v1/search-rounds/{round_id}/candidates/"
+        "{round_candidate_id}/build-terminal"
+    ) in paths
+    assert "/v1/search-rounds/{round_id}/artifact-family:freeze" in paths
     assert "/v1/search-rounds/{round_id}/budget-reservations" in paths
     assert (
         "/v1/search-rounds/{round_id}/budget-reservations/"
@@ -287,3 +292,86 @@ def test_search_round_budget_api_rejects_mismatched_reserve_pair() -> None:
 
     assert response.status_code == 422
     repository.reserve_round_budget.assert_not_called()
+
+
+def test_search_round_artifact_api_records_and_freezes_build_family() -> None:
+    repository = _repository()
+    round_payload = _round_payload()
+    candidate = _candidate_payload(round_payload["round_id"])
+    artifact_id = str(uuid4())
+    artifact_hash = _hash("1")
+    built = {
+        "round_id": round_payload["round_id"],
+        "round_candidate_id": candidate["round_candidate_id"],
+        "candidate_id": candidate["candidate_id"],
+        "state": "built",
+        "artifact_id": artifact_id,
+        "artifact_hash": artifact_hash,
+        "terminal_failure_code": None,
+        "failure_evidence_hash": None,
+    }
+    persisted_candidate = _persisted(
+        {
+            **candidate,
+            "state": "built",
+            "artifact_id": artifact_id,
+            "artifact_hash": artifact_hash,
+        }
+    )
+    candidate_family_hash = _hash("2")
+    artifact_family_hash = _hash("3")
+    freeze = {
+        "round_id": round_payload["round_id"],
+        "candidate_family_hash": candidate_family_hash,
+        "expected_artifact_family_hash": artifact_family_hash,
+    }
+    repository.record_round_candidate_build.return_value = persisted_candidate
+    repository.freeze_search_round_artifact_family.return_value = {
+        **_persisted(round_payload),
+        "state": "correctness",
+        "candidate_family_hash": candidate_family_hash,
+        "artifact_family_hash": artifact_family_hash,
+        "version": 5,
+    }
+
+    with TestClient(create_app(repository=repository)) as client:
+        recorded = client.post(
+            f"/v1/search-rounds/{round_payload['round_id']}/candidates/"
+            f"{candidate['round_candidate_id']}/build-terminal",
+            json=built,
+        )
+        frozen = client.post(
+            f"/v1/search-rounds/{round_payload['round_id']}/artifact-family:freeze",
+            json=freeze,
+        )
+
+    assert recorded.status_code == 200
+    assert recorded.json()["artifact_hash"] == artifact_hash
+    assert frozen.status_code == 200
+    assert frozen.json()["state"] == "correctness"
+    assert frozen.json()["artifact_family_hash"] == artifact_family_hash
+    repository.record_round_candidate_build.assert_called_once()
+    repository.freeze_search_round_artifact_family.assert_called_once()
+
+
+def test_search_round_artifact_api_rejects_path_identity_mismatch() -> None:
+    repository = _repository()
+    payload = {
+        "round_id": str(uuid4()),
+        "round_candidate_id": str(uuid4()),
+        "candidate_id": str(uuid4()),
+        "state": "build_failed",
+        "terminal_failure_code": "scripted_build_failure",
+        "failure_evidence_hash": _hash("4"),
+    }
+
+    with TestClient(create_app(repository=repository)) as client:
+        response = client.post(
+            f"/v1/search-rounds/{uuid4()}/candidates/"
+            f"{payload['round_candidate_id']}/build-terminal",
+            json=payload,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    repository.record_round_candidate_build.assert_not_called()

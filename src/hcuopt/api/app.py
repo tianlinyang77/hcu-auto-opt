@@ -12,10 +12,12 @@ from fastapi.responses import JSONResponse
 
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.m2 import (
+    ArtifactFamilyFreezeRequest,
     RoundBudgetFinalizeRequest,
     RoundBudgetMutationResult,
     RoundBudgetReserveRequest,
     RoundCandidate,
+    RoundCandidateBuildTerminal,
     RoundCandidateView,
     SearchRound,
     SearchRoundSummary,
@@ -226,6 +228,37 @@ def create_app(
         round_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).close_search_round_intake(round_id)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/candidates/{round_candidate_id}/build-terminal",
+        response_model=RoundCandidateView,
+    )
+    def record_search_round_candidate_build(
+        round_id: UUID,
+        round_candidate_id: UUID,
+        payload: RoundCandidateBuildTerminal,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Build terminal round_id")
+        if round_candidate_id != payload.round_candidate_id:
+            raise Conflict(
+                "path round_candidate_id does not match Build terminal member identity"
+            )
+        return repo(request).record_round_candidate_build(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/artifact-family:freeze",
+        response_model=SearchRoundView,
+    )
+    def freeze_search_round_artifact_family(
+        round_id: UUID,
+        payload: ArtifactFamilyFreezeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Artifact Family round_id")
+        return repo(request).freeze_search_round_artifact_family(payload)
 
     @application.post(
         "/v1/search-rounds/{round_id}/budget-reservations",
