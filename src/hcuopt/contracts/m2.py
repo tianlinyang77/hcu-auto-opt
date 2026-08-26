@@ -132,7 +132,7 @@ class RoundCandidate(ContractModel):
     source_package_store_id: str = Field(min_length=1, max_length=300)
     source_package_store_hash: str = Field(pattern=SHA256_PATTERN)
     source_package_hash: str = Field(pattern=SHA256_PATTERN)
-    source_manifest_version: str = Field(min_length=1, max_length=100)
+    source_manifest_version: Literal["m1-candidate-source-v1"] = "m1-candidate-source-v1"
     source_manifest_hash: str = Field(pattern=SHA256_PATTERN)
     baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
     candidate_source_hash: str = Field(pattern=SHA256_PATTERN)

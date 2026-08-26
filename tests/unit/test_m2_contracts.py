@@ -150,6 +150,8 @@ def test_round_candidate_rejects_partial_or_ambiguous_terminal_identity() -> Non
         )
     with pytest.raises(ValidationError, match="must differ"):
         _candidate(candidate_source_hash=_hash("4"))
+    with pytest.raises(ValidationError, match="m1-candidate-source-v1"):
+        _candidate(source_manifest_version="m2-unreviewed-manifest-v2")
 
 
 def test_budget_ledger_uses_lease_time_and_release_has_no_actual_charge() -> None:
