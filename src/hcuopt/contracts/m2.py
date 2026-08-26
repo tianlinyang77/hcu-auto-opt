@@ -38,6 +38,23 @@ class ScriptedCandidatePackageInput(ContractModel):
     optimization_intent: str = Field(min_length=1, max_length=2000)
 
 
+class ScriptedCandidateFixtureSpec(ContractModel):
+    fixture_id: Literal["noop", "known_faster", "known_slower", "build_failure"]
+    build_outcome: Literal["built", "build_failed"]
+    optimization_intent: str = Field(min_length=1, max_length=2000)
+    terminal_failure_code: str | None = Field(default=None, min_length=1, max_length=200)
+    synthetic: Literal[True] = True
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+
+    @model_validator(mode="after")
+    def bind_failure_to_build_outcome(self) -> ScriptedCandidateFixtureSpec:
+        if (self.build_outcome == "build_failed") != (
+            self.terminal_failure_code is not None
+        ):
+            raise ValueError("build failure Fixture requires one terminal failure code")
+        return self
+
+
 class RoundBudget(ContractModel):
     max_candidates: int = Field(ge=2, le=4)
     max_build_attempts: int = Field(ge=1, le=100)
