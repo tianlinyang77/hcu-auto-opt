@@ -73,18 +73,8 @@ class CandidateSourcePackageStore:
         profiler_evidence_uri: str,
         profiler_evidence_hash: str,
     ) -> LoadedCandidateSourcePackage:
-        package_dir = self._package_dir(candidate_source_hash)
-        if package_dir.is_symlink() or not package_dir.is_dir():
-            raise SourceArtifactError(
-                f"trusted Candidate source package does not exist: {package_dir}"
-            )
-        manifest_path = package_dir / "manifest.json"
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            raise SourceArtifactError(
-                f"Candidate source package has no regular manifest: {manifest_path}"
-            )
-        manifest_bytes = manifest_path.read_bytes()
-        manifest = CandidateSourcePackageManifest.model_validate_json(manifest_bytes)
+        package = self.read(candidate_source_hash=candidate_source_hash)
+        manifest = package.manifest
         expected = (
             candidate_id,
             hotspot_id,
@@ -108,6 +98,27 @@ class CandidateSourcePackageStore:
         if actual != expected:
             raise SourceArtifactError(
                 "trusted Candidate source manifest does not match the durable M1 Job"
+            )
+        return package
+
+    def read(self, *, candidate_source_hash: str) -> LoadedCandidateSourcePackage:
+        """Read and verify one immutable package before workflow-specific binding."""
+
+        package_dir = self._package_dir(candidate_source_hash)
+        if package_dir.is_symlink() or not package_dir.is_dir():
+            raise SourceArtifactError(
+                f"trusted Candidate source package does not exist: {package_dir}"
+            )
+        manifest_path = package_dir / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise SourceArtifactError(
+                f"Candidate source package has no regular manifest: {manifest_path}"
+            )
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = CandidateSourcePackageManifest.model_validate_json(manifest_bytes)
+        if manifest.candidate_source_hash != candidate_source_hash:
+            raise SourceArtifactError(
+                "Candidate source manifest does not match its content-addressed location"
             )
         approved_target = self.approved_mount_targets.get(manifest.replacement_point)
         if approved_target != manifest.overlay_mount_target:
