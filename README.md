@@ -131,6 +131,7 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [M1 接口复盘与 M2 Go/No-Go](docs/m1-retrospective.md)
 - [M2 搜索轮次建设计划](docs/m2-round-plan.md)
 - [M2 Contract 草案](docs/m2-contract-draft.md)
+- [M2 操作面与易用性建设计划](docs/m2-operability-plan.md)
 - [ADR-0009：M2a 轮次级 Search/Holdout 与 Barrier](docs/adr/0009-m2a-round-barrier.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
