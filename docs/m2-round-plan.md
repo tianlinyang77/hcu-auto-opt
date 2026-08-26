@@ -5,7 +5,8 @@
 当前只授权 M2 设计和无 HCU 工程准备。ADR-0009 状态为 Proposed；在四人评审和项目所有者
 明确批准 M2a 前，不创建真实多 Candidate Formal Task，不运行 Agent，不产生新的 HCU 性能
 结论。字段、表、API 和稳定错误码见 [M2a SearchRound Contract 草案](m2-contract-draft.md)；
-草案合入不等于 Contract Accepted。
+草案合入不等于 Contract Accepted。面向操作者的 Profile、Plan、CLI、通知、报告和 Web 分阶段
+要求见 [M2 操作面与易用性建设计划](m2-operability-plan.md)。
 
 ## 建设目标
 
@@ -40,6 +41,7 @@ Owner：A；B/C/D 必须共同 Review。
 - Candidate、Artifact 和条件性 Holdout Family Hash 的冻结输入、时间点与规范化算法；
 - nonce-sealed Holdout commitment/reveal 和零晋级终态；
 - 状态机、幂等键、错误码、Budget reservation/ledger、Signoff outbox 和 Contract 版本策略；
+- Profile ID/Version、Plan Preview、Round Summary 和 Operator API 的边界；
 - M1 v1 证据回放兼容测试清单。
 
 退出条件：四人签字、项目所有者只批准进入 M2a 代码实现；尚不批准 HCU Formal。
@@ -55,6 +57,7 @@ Owner：A。
 - 原子 Barrier Close、零晋级收敛、Budget reservation/ledger、Signoff Intent/Outbox 和 Reconcile；
 - `SELECT FOR UPDATE`/幂等/并发 PostgreSQL 集成测试；
 - API 返回 source commit、Contract version 和 Adapter Profile 供写前核对。
+- 提供可重建的 Round/Candidate/Resource/Evidence Read Model，供 CLI/Web 读取而不复制状态机。
 
 退出条件：两个 Worker 同时关闭 Barrier 只能产生一个逻辑对象；关闭后新增 Candidate、迟到
 Worker、旧 Claim/Fencing Token 和超预算 Job 均被拒绝；Signoff 任一崩溃点可恢复，且未复核
@@ -124,6 +127,22 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 
 未到第 5 步不占用 HCU 产生 M2 结论。
 
+### M2-OX：操作面与易用性横向轨道
+
+M2-OX 不是独立 Workflow，也不拥有第二套数据库状态。它跨越 M2-0 至 M2-5，把用户输入编译
+为已批准的 SearchRound Contract，并把权威事件和 Evidence 转为 CLI/Web 可读结果。
+
+交付顺序：
+
+1. M2-0 冻结 Profile、Plan Preview、Summary、稳定错误与操作成本指标；
+2. M2-1 至 M2-4 先完成 Scripted `plan/start/status/report` CLI 和 Read Model；
+3. Scripted 稳定后实现只读 Web、通知和失败引导；
+4. Signoff Intent/Outbox 与鉴权通过后，才开放受控创建、Cancel 和 Formal Signoff 页面。
+
+退出条件：注册 Profile 的 Scripted Round 无需 SSH、手工 Docker、数据库写入或复制内部
+UUID/Hash 即可从 Plan 运行到 Report；Formal 路径继续 fail-closed，且操作者主动操作时间目标
+不超过 15 分钟。详细 Contract、分工和指标见操作面计划。
+
 ## 四人立即分工
 
 | 人员 | 第一任务 | 依赖 | 不能改 |
@@ -145,6 +164,7 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 | Scripted | known faster/slower/inconclusive/invalid、零晋级、正确性/Build 失败、独立 synthetic 终态、Formal Signoff 拒绝 |
 | Evidence | Holdout commitment 枚举/篡改、Search/Holdout 复用、Baseline 复用、外部引用丢失 |
 | Resource | exclusive 冲突、过期 Lease、Fencing、清理失败、外部 Runner 出现 |
+| Operability | Plan 无 HCU Preflight、幂等启动、状态/错误可解释、Scripted/Formal 隔离、Cancel 清理、CLI 跨平台 |
 | Formal | 固定 Target/Workload、2–4 业务 Candidate、完整家族证据和人工接受 |
 
 ## M2a Formal Go/No-Go
@@ -159,6 +179,7 @@ A 主持评审，B 对测量可信度拥有停止权，D 对统计/证据无效�
 - 零晋级、Synthetic Evidence、Signoff 崩溃恢复和 Budget 事件互斥测试通过；
 - 轮次预算适配 HCU 时间窗口，且不会临时缩减正式采样计划；
 - Target Snapshot、Stage0Run、Baseline、Image 和 Real Adapter Profile 重新核对；
+- Formal Plan Preview、Read Model、Report 和资源清理状态可由 Operator API 复核；
 - HCU 资源窗口获得明确授权；
 - 项目所有者签署 M2a Formal Go。
 

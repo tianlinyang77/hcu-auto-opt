@@ -357,6 +357,10 @@ Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
 
 ## 6. API 草案
 
+本节仍是 SearchRound 权威写接口。面向操作者的 Profile、Plan Preview、Summary、CLI 和 Web
+只能作为这一层的受控外观，不能创建第二套 Round 状态或直接写数据库；拟议接口与分阶段
+验收见 [M2 操作面与易用性建设计划](m2-operability-plan.md)。
+
 面向操作者：
 
 | Method | Path | 作用 |
