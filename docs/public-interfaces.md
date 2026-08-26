@@ -105,4 +105,6 @@ Profile 必须由部署方显式组合 A/B/C/D Adapter；默认 Catalog 不提�
 
 M2a 当前只处于设计评审，拟新增 `SearchRound`、Phase-aware 测量引用、Barrier、Bonferroni
 FWER 和 Round EvidenceBundle；这些对象尚未进入本页所述的已实现公共接口。草案见
-[M2 Contract 草案](m2-contract-draft.md)。
+[M2 Contract 草案](m2-contract-draft.md)。面向 CLI/Web 的 Operator Facade 另以版本化
+Profile、Plan Preview 和可重建 Read Model 提供受控外观，不复制领域状态；其 Non-runnable
+草案见 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
