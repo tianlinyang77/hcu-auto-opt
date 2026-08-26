@@ -1,11 +1,11 @@
 # M2 操作面与易用性建设计划
 
-- 状态：OX-0 completed / OX-1 not authorized / Non-runnable
+- 状态：OX-0 completed / OX-1 Scripted implementation authorized
 - 跟踪：GitHub Issue #46
 - 依赖：[M2 搜索轮次建设计划](m2-round-plan.md)和
   [M2a SearchRound Contract 草案](m2-contract-draft.md)
 - OX-0 接口：[M2 Operator Contract 草案](m2-operator-contract-draft.md)
-- 当前授权：OX-0 接口已冻结；仅允许继续规划，OX-1 运行时代码尚未授权
+- 当前授权：OX-0 接口已冻结；允许 OX-1 无 HCU Scripted 运行时代码、增量迁移和测试
 
 ## 1. 定位
 
@@ -171,8 +171,8 @@ POST /v1/operator/search-rounds/{round_id}/cancel
 POST /v1/operator/search-rounds/{round_id}/signoff
 ```
 
-Operator API 只能组合和调用 M2 Contract 已批准的能力。ADR-0009 未 Accepted 前，这些接口不能
-注册到 Real Profile。
+Operator API 只能组合和调用 M2 Contract 已批准的能力。ADR-0009 已 Accepted，但当前只允许
+注册 synthetic Scripted Profile；Real Profile 仍须独立授权。
 
 ### 3.3 拟议 CLI
 

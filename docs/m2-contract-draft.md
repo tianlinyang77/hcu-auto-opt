@@ -1,16 +1,18 @@
 # M2a SearchRound Contract 草案
 
-- 状态：Draft / Non-runnable
-- 依据：[ADR-0009](adr/0009-m2a-round-barrier.md)（Proposed）
+- 状态：Frozen for M2a / Scripted implementation authorized
+- 依据：[ADR-0009](adr/0009-m2a-round-barrier.md)（Accepted / M2a Scripted implementation authorized）
 - 适用范围：同一 Hotspot 下 2–4 个人工 Python/Triton startup Overlay Candidate
-- 当前授权：文档、Contract 草案和无 HCU 测试设计
+- 当前授权：增量 Contract/迁移、无 HCU Scripted 控制面、synthetic Fixture 和测试
 
 ## 1. 权威边界
 
-本草案定义 M2a 的接口形状，不代表这些模型、表、API 或状态已经实现。ADR-0009 未经 A/B/C/D
-评审和项目所有者批准前：
+本 Contract 已冻结 M2a 的接口形状，但不表示这些模型、表、API 或状态已经实现。当前实现授权
+只覆盖无 HCU Scripted 路径：
 
-- 不把草案类型加入可创建真实任务的 Adapter Profile；
+- 可以新增版本化运行时 Contract、增量迁移、控制面、synthetic Authority/Profile/Fixture 和
+  Windows/Linux/PostgreSQL 测试；
+- 不把这些类型加入可创建真实任务的 Adapter Profile；
 - 不创建 M2a Formal Task，不运行 HCU 测量；
 - 不运行 Agent、Apex Generator、Beam Search 或自动调参；
 - 不改变已签核的 M1 v1 Schema、数据或回放语义；
@@ -497,15 +499,17 @@ Signoff API 必须拒绝它。
 
 ## 9. A/B/C/D Review 签字表
 
-ADR-0009 仍为 Proposed；下表默认未签署，不能用 PR 合入或 CI 绿灯代替 Owner 决定。
+项目所有者确认四线对 PR #55 的 Proposed 设计无阻塞，并代为登记 `accepted-for-draft`。该记录
+不表示 reviewer 曾在对应 Issue 单独留言；最终实现仍须按各行职责接受 CODEOWNER Review。
 
 | Review | 必须确认的内容 | 状态 | Reviewer / 日期 |
 | --- | --- | --- | --- |
-| A 控制面 | 状态、事务、幂等、Budget、Barrier、服务身份和 Signoff | Pending | — |
-| B 测量 | 唯一 Harness、Phase 隔离、同时期 Baseline、Lease 消耗和清理证据 | Pending | — |
-| C 构建 | 人工 Intake、Candidate/Artifact 与条件性 Holdout Family Hash、Worktree、Artifact 冻结和失败证据 | Pending | — |
-| D 判定 | Plan 隔离、晋级规则、Bonferroni、失败计入 `m` 和 Round Evidence | Pending | — |
-| 项目所有者 | 只批准 M2a 代码实现，或另行批准一次 Formal HCU 窗口 | Pending | — |
+| A 控制面 | 状态、事务、幂等、Budget、Barrier、服务身份和 Signoff | Accepted for draft | tianlinyang77 / #56 / 2026-08-26 |
+| B 测量 | 唯一 Harness、Phase 隔离、同时期 Baseline、Lease 消耗和清理证据 | Accepted for draft | lvj-repox / #57 / 2026-08-26 |
+| C 构建 | 人工 Intake、Candidate/Artifact 与条件性 Holdout Family Hash、Worktree、Artifact 冻结和失败证据 | Accepted for draft | reverie-hub / #58 / 2026-08-26 |
+| D 判定 | Plan 隔离、晋级规则、Bonferroni、失败计入 `m` 和 Round Evidence | Accepted for draft | dddddddxl / #59 / 2026-08-26 |
+| 项目所有者 | 只批准 M2a 无 HCU Scripted 代码实现 | Authorized | #44 / 2026-08-26 |
+| 项目所有者 | 另行批准一次 Formal HCU 窗口 | Pending | — |
 
-只有 A/B/C/D 对 Contract 签署且项目所有者明确批准后，ADR 才能从 Proposed 进入 Accepted。
-“批准 M2a 代码实现”与“批准 M2a Formal HCU 运行”必须分成两个决定。
+ADR-0009 已进入 Accepted，并获得 M2a 无 HCU Scripted 实现授权。“批准 M2a Scripted 代码
+实现”与“批准 M2a Formal HCU 运行”仍是两个决定；后者继续 Pending。

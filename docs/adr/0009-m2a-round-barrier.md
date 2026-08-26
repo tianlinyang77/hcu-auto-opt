@@ -1,8 +1,10 @@
 # ADR-0009：M2a 使用人工有限候选的轮次级 Search/Holdout 与 Barrier
 
-- 状态：Proposed
+- 状态：Accepted / M2a Scripted implementation authorized
 - 日期：2026-08-26
 - 跟踪：GitHub Issue #44
+- 接受记录：A/B/C/D 评审范围分别见 #56、#57、#58、#59；项目所有者确认四线无阻塞并接受本 ADR
+- 实现授权：仅 M2a 无 HCU Scripted Contract、迁移、控制面、Fixture 与测试
 
 ## 背景
 
@@ -239,12 +241,16 @@ Barrier 关闭、FWER 和签核均由各自权威组件执行。
 - Bonferroni 在小候选族上较保守；它优先保护可信度，后续扩展需显式新版本。
 - M1 已签核证据无需迁移，M2 的新对象可以增量实现和独立回滚。
 
-## 拟冻结的评审决策
+## 冻结的评审决策
 
-以下四项作为 A/B/C/D Review 的明确输入，ADR 保持 Proposed，直到四线签署和项目所有者决定：
+以下四项已由项目所有者依据 #56～#59 的四线评审范围接受，并作为 M2a Scripted 实现边界：
 
 1. M2a 固定 2–4 个 Candidate，硬上限 4，最多提升 2 个；
 2. Holdout 内容由 D `HoldoutPlanAuthority` 管理；Scripted 可用 synthetic Store，Formal 必须使用
    opt-in 受保护 Store、独立身份/ACL 和一次性 Reveal Lease，不要求拆微服务；
 3. 保留全部 `faster`，只推荐 adjusted lower 最大的一个，相同则按 Candidate UUID 升序破同分；
 4. HCU 硬预算以 exclusive Lease 实际持有时间执行，同时记录 Harness 有效时间用于效率分析。
+
+本次 Accepted 允许实现无 HCU Scripted 路径，但不批准 Real Operator Profile、真实多 Candidate
+Formal Task、HCU 性能测量、Agent/M2b、Baseline 提升、M3 E2E 或自动发布。上述能力仍须分别
+满足本 ADR 的 Go/No-Go 条件并取得项目所有者的独立授权。

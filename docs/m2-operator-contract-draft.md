@@ -1,8 +1,8 @@
 # M2 Operator Contract 草案（OX-0）
 
-- 状态：Frozen for OX-0 / Non-runnable
+- 状态：Frozen for OX-0 / OX-1 Scripted implementation authorized
 - 跟踪：GitHub Issue #46
-- 依据：[ADR-0010](adr/0010-m2-operator-facade.md)（Accepted / Implementation not authorized）
+- 依据：[ADR-0010](adr/0010-m2-operator-facade.md)（Accepted / OX-1 Scripted implementation authorized）
 - 依赖：[M2a SearchRound Contract 草案](m2-contract-draft.md)
 
 ## 1. 权威与版本边界
@@ -319,8 +319,8 @@ OX-0/OX-1 必测：
 | C | Candidate Package、Source/Artifact 引用和批量 Intake | Accepted for draft，reverie-hub，#51 |
 | D | Hotspot、统计展示、Evidence Report 与 Signoff readiness | Accepted for draft，dddddddxl，#52 |
 | 项目所有者 | 接受 OX-0 Contract | Accepted，2026-08-26 |
-| 项目所有者 | 另行批准 OX-1 无 HCU Scripted 实现 | Pending |
+| 项目所有者 | 另行批准 OX-1 无 HCU Scripted 实现 | Authorized，#46，2026-08-26 |
 
-OX-0 已完成接口冻结和 A/B/C/D Review，但不表示易用性已经实现。ADR-0009 仍为 Proposed，且
-OX-1 尚未获得项目所有者的单独实现授权；在两项门禁关闭前，不得创建运行时代码、Real Profile、
-数据库迁移或 Formal Task。
+OX-0 已完成接口冻结和 A/B/C/D Review，ADR-0009 已 Accepted，OX-1 无 HCU Scripted 实现已获
+授权。可以创建版本化运行时 Contract、synthetic Profile/Authority、增量迁移、CLI/API 和测试；
+仍不得创建 Real Profile、Formal Task、HCU 测量或生产发布路径。
