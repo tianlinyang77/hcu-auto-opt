@@ -37,6 +37,7 @@ def _round(**updates) -> SearchRound:
     payload = {
         "round_id": uuid4(),
         "task_id": uuid4(),
+        "idempotency_key": "m2-search-round-fixture",
         "state": "intake_open",
         "run_mode": "scripted",
         "project_mode": None,
@@ -93,6 +94,7 @@ def _candidate(**updates) -> RoundCandidate:
 def test_search_round_is_strict_and_binds_scripted_mode() -> None:
     result = _round()
     assert result.schema_version == "m2a-search-round-v1"
+    assert result.idempotency_key == "m2-search-round-fixture"
     assert result.budget.max_candidates == result.declared_candidate_count
     assert result.automatic_release_allowed is False
 
