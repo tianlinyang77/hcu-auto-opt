@@ -1575,7 +1575,7 @@ class PostgresRepository:
                     %s, %s, %s, %s, %s, %s, FALSE, %s, %s, %s, %s, %s,
                     'formal', %s
                 )
-                ON CONFLICT (idempotency_key) DO NOTHING
+                ON CONFLICT DO NOTHING
                 RETURNING *
                 """,
                 (
