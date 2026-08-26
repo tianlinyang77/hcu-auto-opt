@@ -1,8 +1,8 @@
 # M2 Operator Contract 草案（OX-0）
 
-- 状态：Draft / Non-runnable
+- 状态：Frozen for OX-0 / Non-runnable
 - 跟踪：GitHub Issue #46
-- 依据：[ADR-0010](adr/0010-m2-operator-facade.md)（Proposed）
+- 依据：[ADR-0010](adr/0010-m2-operator-facade.md)（Accepted / Implementation not authorized）
 - 依赖：[M2a SearchRound Contract 草案](m2-contract-draft.md)
 
 ## 1. 权威与版本边界
@@ -71,6 +71,10 @@ Repository 解析并冻结它们。
 绑定 `hotspot_id`、Hotspot Intake Hash、`profiler|manual` 来源、Profiler/Correctness Evidence
 URI/Hash、Replacement Point、Workload Hash 和 Shape/dtype 摘要。来源为 manual 时所有 View 保留
 该标签。
+
+运行时必须实现为以 `source=profiler|manual` 判别的 strict union：profiler 分支绑定原始 Profiler
+Evidence URI/Hash，manual 分支绑定人工 Intake/Attestation URI/Hash；自由 object、仅派生摘要或
+缺少原始 Evidence 的引用均无效。
 
 ### 3.2 `OperatorCandidateInput`
 
@@ -299,7 +303,8 @@ OX-0/OX-1 必测：
 - 在第 1～N 个 Candidate 创建后、RoundCandidate 绑定后、Intake Close 前后分别注入崩溃并并发
   Reconcile；重放必须返回同一组 Candidate ID、RoundCandidate ID 和 Candidate Family；
 - 相同输入重放和不同输入冲突；
-- Read Model 删除后从事件重建完全一致；
+- Read Model 删除后从事件重建完全一致；D 的 verdict、CI、MDE、FWER、Evidence Hash 和
+  Signoff readiness 必须逐字段保持，展示字段变化不能改变结论；
 - Lease expired 与 Cleanup verified 不混淆；
 - Summary/错误/通知不泄漏凭据、内部地址、宿主路径或原始异常；
 - Windows/Linux CLI `--json` Golden Contract 一致；
@@ -309,11 +314,13 @@ OX-0/OX-1 必测：
 
 | DRI | 必须确认 | 状态 |
 | --- | --- | --- |
-| A | Profile/Preview、StartIntent/Reconcile、幂等、Read Model、API/DB | Pending |
-| B | MeasurementPreset、Lease/Cleanup Summary、错误语义 | Pending |
-| C | Candidate Package、Source/Artifact 引用和批量 Intake | Pending |
-| D | Hotspot、统计展示、Evidence Report 与 Signoff readiness | Pending |
-| 项目所有者 | 只批准 OX-1 无 HCU Scripted 实现 | Pending |
+| A | Profile/Preview、StartIntent/Reconcile、幂等、Read Model、API/DB | Accepted for draft，tianlinyang77，#49 |
+| B | MeasurementPreset、Lease/Cleanup Summary、错误语义 | Accepted for draft，lvj-repox，#50 |
+| C | Candidate Package、Source/Artifact 引用和批量 Intake | Accepted for draft，reverie-hub，#51 |
+| D | Hotspot、统计展示、Evidence Report 与 Signoff readiness | Accepted for draft，dddddddxl，#52 |
+| 项目所有者 | 接受 OX-0 Contract | Accepted，2026-08-26 |
+| 项目所有者 | 另行批准 OX-1 无 HCU Scripted 实现 | Pending |
 
-ADR-0009 与 ADR-0010 Accepted、上述 Review 完成前，本草案不得进入 Real Profile、数据库迁移或
-Formal Task。OX-0 合入只表示接口可继续评审，不表示 Contract 已冻结或易用性已经建成。
+OX-0 已完成接口冻结和 A/B/C/D Review，但不表示易用性已经实现。ADR-0009 仍为 Proposed，且
+OX-1 尚未获得项目所有者的单独实现授权；在两项门禁关闭前，不得创建运行时代码、Real Profile、
+数据库迁移或 Formal Task。

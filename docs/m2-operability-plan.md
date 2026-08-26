@@ -1,11 +1,11 @@
 # M2 操作面与易用性建设计划
 
-- 状态：Planning / Non-runnable
+- 状态：OX-0 completed / OX-1 not authorized / Non-runnable
 - 跟踪：GitHub Issue #46
 - 依赖：[M2 搜索轮次建设计划](m2-round-plan.md)和
   [M2a SearchRound Contract 草案](m2-contract-draft.md)
 - OX-0 接口：[M2 Operator Contract 草案](m2-operator-contract-draft.md)
-- 当前授权：文档、接口草案和无 HCU 的 Scripted 交互设计
+- 当前授权：OX-0 接口已冻结；仅允许继续规划，OX-1 运行时代码尚未授权
 
 ## 1. 定位
 
@@ -212,7 +212,7 @@ Fake、Scripted 和 Formal 使用固定且明显不同的标识；页面不得�
 - 冻结 Profile ID/Version、Plan Preview、Summary、错误码和幂等语义；
 - 明确哪些字段来自现有 Authority，禁止复制事实；
 - 冻结 CLI 命令、Scripted/Formal 标签和操作成本指标；
-- A/B/C/D Review，ADR-0009 Accepted 前不创建 Real Operator Profile。
+- A/B/C/D 已完成 `accepted-for-draft` Review；ADR-0009 Accepted 前不创建 Real Operator Profile。
 
 ### OX-1：Scripted CLI 与 Plan Compiler
 
