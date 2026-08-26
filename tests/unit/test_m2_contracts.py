@@ -7,10 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from hcuopt.contracts.m2 import (
+    ArtifactFamilyFreezeRequest,
     BudgetUsage,
     RoundBudget,
     RoundBudgetLedgerEntry,
     RoundCandidate,
+    RoundCandidateBuildTerminal,
     SearchRound,
 )
 
@@ -154,6 +156,40 @@ def test_round_candidate_rejects_partial_or_ambiguous_terminal_identity() -> Non
         _candidate(candidate_source_hash=_hash("4"))
     with pytest.raises(ValidationError, match="m1-candidate-source-v1"):
         _candidate(source_manifest_version="m2-unreviewed-manifest-v2")
+
+
+def test_round_candidate_build_terminal_is_unambiguous() -> None:
+    candidate_id = uuid4()
+    member_id = uuid4()
+    round_id = uuid4()
+    result = RoundCandidateBuildTerminal(
+        round_id=round_id,
+        round_candidate_id=member_id,
+        candidate_id=candidate_id,
+        state="built",
+        artifact_id=uuid4(),
+        artifact_hash=_hash("9"),
+    )
+    assert result.state.value == "built"
+    ArtifactFamilyFreezeRequest(
+        round_id=round_id,
+        candidate_family_hash=_hash("a"),
+        expected_artifact_family_hash=_hash("b"),
+    )
+
+    with pytest.raises(ValidationError, match="written in pairs"):
+        RoundCandidateBuildTerminal.model_validate(
+            {**result.model_dump(mode="json"), "artifact_hash": None}
+        )
+    with pytest.raises(ValidationError, match="must be build_failed or invalid"):
+        RoundCandidateBuildTerminal(
+            round_id=round_id,
+            round_candidate_id=member_id,
+            candidate_id=candidate_id,
+            state="built",
+            terminal_failure_code="wrong_terminal",
+            failure_evidence_hash=_hash("c"),
+        )
 
 
 def test_budget_ledger_uses_lease_time_and_release_has_no_actual_charge() -> None:

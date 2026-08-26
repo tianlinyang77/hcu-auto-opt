@@ -9,14 +9,17 @@ from uuid import UUID, uuid4
 import pytest
 
 from hcuopt.contracts.m2 import (
+    ArtifactFamilyFreezeRequest,
     BudgetUsage,
     RoundBudget,
     RoundBudgetLedgerEntry,
     RoundBudgetReservation,
     RoundCandidate,
+    RoundCandidateBuildTerminal,
     SearchRound,
 )
 from hcuopt.domain.errors import Conflict
+from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -288,6 +291,35 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         )
         return reservation, entry
 
+    def _record_synthetic_artifact(
+        self,
+        task_id: UUID,
+        candidate_id: UUID,
+        content_hash: str,
+        *,
+        synthetic: bool = True,
+    ) -> UUID:
+        artifact_id = uuid4()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, task_id, candidate_id, kind, uri,
+                    content_hash, metadata, synthetic
+                ) VALUES (%s, %s, %s, 'scripted_overlay', %s, %s, '{}'::jsonb, %s)
+                """,
+                (
+                    artifact_id,
+                    task_id,
+                    candidate_id,
+                    f"fixture:///m2/artifacts/{artifact_id}",
+                    content_hash,
+                    synthetic,
+                ),
+            )
+        self.connection.commit()
+        return artifact_id
+
     def test_round_create_is_idempotent_and_rejects_different_inputs(self) -> None:
         request = self._round()
         first = self.repository.create_search_round(request)
@@ -436,3 +468,99 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         )
         with self.assertRaises(Conflict):
             self.repository.finalize_round_budget(release)
+
+    def test_build_terminals_and_concurrent_artifact_family_freeze(self) -> None:
+        request = self._round()
+        self.repository.create_search_round(request)
+        first = self._candidate(request.round_id, 0)
+        second = self._candidate(request.round_id, 1)
+        self.repository.add_round_candidate(first)
+        self.repository.add_round_candidate(second)
+        closed = self.repository.close_search_round_intake(request.round_id)
+
+        artifact_hash = _hash("f")
+        untrusted_artifact_id = self._record_synthetic_artifact(
+            request.task_id,
+            first.candidate_id,
+            _hash("e"),
+            synthetic=False,
+        )
+        with self.assertRaises(Conflict):
+            self.repository.record_round_candidate_build(
+                RoundCandidateBuildTerminal(
+                    round_id=request.round_id,
+                    round_candidate_id=first.round_candidate_id,
+                    candidate_id=first.candidate_id,
+                    state="built",
+                    artifact_id=untrusted_artifact_id,
+                    artifact_hash=_hash("e"),
+                )
+            )
+        artifact_id = self._record_synthetic_artifact(
+            request.task_id, first.candidate_id, artifact_hash
+        )
+        built = RoundCandidateBuildTerminal(
+            round_id=request.round_id,
+            round_candidate_id=first.round_candidate_id,
+            candidate_id=first.candidate_id,
+            state="built",
+            artifact_id=artifact_id,
+            artifact_hash=artifact_hash,
+        )
+        failed = RoundCandidateBuildTerminal(
+            round_id=request.round_id,
+            round_candidate_id=second.round_candidate_id,
+            candidate_id=second.candidate_id,
+            state="build_failed",
+            terminal_failure_code="scripted_build_failure",
+            failure_evidence_hash=_hash("a"),
+        )
+        self.repository.record_round_candidate_build(built)
+        with self.assertRaises(Conflict):
+            self.repository.freeze_search_round_artifact_family(
+                ArtifactFamilyFreezeRequest(
+                    round_id=request.round_id,
+                    candidate_family_hash=closed["candidate_family_hash"],
+                    expected_artifact_family_hash=_hash("b"),
+                )
+            )
+        self.repository.record_round_candidate_build(failed)
+
+        summary = self.repository.search_round_summary(request.round_id)
+        expected = artifact_family_hash(summary["round"], summary["candidates"])
+        freeze = ArtifactFamilyFreezeRequest(
+            round_id=request.round_id,
+            candidate_family_hash=closed["candidate_family_hash"],
+            expected_artifact_family_hash=expected,
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            frozen = list(
+                pool.map(
+                    lambda _: self.repository.freeze_search_round_artifact_family(freeze),
+                    range(2),
+                )
+            )
+
+        self.assertEqual(frozen[0]["artifact_family_hash"], expected)
+        self.assertEqual(frozen[1]["artifact_family_hash"], expected)
+        self.assertEqual(frozen[0]["state"], "correctness")
+        self.assertEqual(frozen[0]["version"], 5)
+        replay = self.repository.record_round_candidate_build(built)
+        self.assertEqual(replay["artifact_id"], artifact_id)
+        with self.assertRaises(Conflict):
+            self.repository.record_round_candidate_build(
+                built.model_copy(update={"artifact_hash": _hash("c")})
+            )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT event_type, count(*) FROM task_events
+                WHERE event_type IN (
+                    'm2_round_candidate_build_terminal',
+                    'm2_round_artifact_family_frozen'
+                ) GROUP BY event_type
+                """
+            )
+            counts = dict(cursor.fetchall())
+        self.assertEqual(counts["m2_round_candidate_build_terminal"], 2)
+        self.assertEqual(counts["m2_round_artifact_family_frozen"], 1)
