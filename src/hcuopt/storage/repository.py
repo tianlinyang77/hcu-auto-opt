@@ -14,7 +14,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
-from hcuopt.contracts.m2 import RoundCandidate, SearchRound
+from hcuopt.contracts.m2 import (
+    BudgetUsage,
+    RoundBudget,
+    RoundBudgetLedgerEntry,
+    RoundBudgetReservation,
+    RoundCandidate,
+    SearchRound,
+)
 from hcuopt.contracts.platform_v1 import (
     SHA256_PATTERN,
     ArtifactManifest,
@@ -50,6 +57,8 @@ from hcuopt.domain.enums import (
     ManualCandidateKind,
     ManualCandidateVerdict,
     ProjectMode,
+    RoundBudgetEntryType,
+    RoundBudgetReservationState,
     RoundCandidateState,
     SearchRoundRunMode,
     SearchRoundState,
@@ -712,6 +721,311 @@ class PostgresRepository:
             "budget_ledger": ledger,
             "automatic_release_allowed": False,
         }
+
+    @staticmethod
+    def _round_budget_violation(
+        budget: RoundBudget, usage: BudgetUsage
+    ) -> str | None:
+        limits = {
+            "candidates": budget.max_candidates,
+            "build_attempts": budget.max_build_attempts,
+            "correctness_attempts": budget.max_correctness_attempts,
+            "search_samples": budget.max_search_samples,
+            "holdout_samples": budget.max_holdout_samples,
+            "wall_seconds": budget.max_wall_seconds,
+            "exclusive_lease_seconds": budget.max_exclusive_lease_seconds,
+        }
+        return next(
+            (name for name, limit in limits.items() if getattr(usage, name) > limit),
+            None,
+        )
+
+    def reserve_round_budget(
+        self,
+        request: RoundBudgetReservation,
+        entry: RoundBudgetLedgerEntry,
+    ) -> dict[str, Any]:
+        """Atomically reserve declared budget before one queued Job Attempt."""
+
+        if request.state is not RoundBudgetReservationState.RESERVED:
+            raise Conflict("new M2a Budget reservation must start reserved")
+        if request.planned.is_zero():
+            raise Conflict("M2a Budget reservation cannot be empty")
+        if (
+            entry.entry_type is not RoundBudgetEntryType.RESERVE
+            or entry.reservation_id != request.reservation_id
+            or entry.round_id != request.round_id
+            or entry.reserved != request.planned
+        ):
+            raise Conflict("M2a Budget reserve entry does not match its reservation")
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (request.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {request.round_id}")
+            existing = connection.execute(
+                """
+                SELECT * FROM round_budget_reservations
+                WHERE reservation_id = %s OR idempotency_key = %s
+                   OR (job_id = %s AND attempt = %s)
+                FOR UPDATE
+                """,
+                (
+                    request.reservation_id,
+                    request.idempotency_key,
+                    request.job_id,
+                    request.attempt,
+                ),
+            ).fetchone()
+            if existing is not None:
+                expected = request.model_dump(mode="python")
+                immutable_fields = (
+                    "reservation_id",
+                    "round_id",
+                    "job_id",
+                    "attempt",
+                    "candidate_id",
+                    "phase",
+                    "planned",
+                    "idempotency_key",
+                )
+                if any(existing[name] != expected[name] for name in immutable_fields):
+                    raise Conflict("M2a Budget reservation identity belongs to other inputs")
+                reserve_entry = connection.execute(
+                    """
+                    SELECT * FROM round_budget_ledger
+                    WHERE reservation_id = %s AND entry_type = 'reserve'
+                    """,
+                    (request.reservation_id,),
+                ).fetchone()
+                if reserve_entry is None:
+                    raise Conflict("M2a Budget reservation is missing its reserve ledger event")
+                persisted_entry = RoundBudgetLedgerEntry.model_validate(reserve_entry)
+                if persisted_entry.model_dump(mode="json") != entry.model_dump(mode="json"):
+                    raise Conflict("M2a Budget reserve event was replayed with other inputs")
+                return {"reservation": existing, "ledger_entry": reserve_entry}
+
+            if round_row["state"] in {
+                SearchRoundState.INTAKE_OPEN.value,
+                SearchRoundState.SCRIPTED_COMPLETED.value,
+                SearchRoundState.COMPLETED.value,
+                SearchRoundState.REJECTED.value,
+                SearchRoundState.CANCELLED.value,
+            }:
+                raise Conflict("M2a Round is not accepting new Budget reservations")
+            job = connection.execute(
+                "SELECT * FROM jobs WHERE job_id = %s FOR SHARE", (request.job_id,)
+            ).fetchone()
+            if (
+                job is None
+                or job["task_id"] != round_row["task_id"]
+                or job["state"] != JobState.QUEUED.value
+                or request.attempt != job["attempts"] + 1
+            ):
+                raise Conflict("M2a Budget reservation Job binding is not reservable")
+            if request.candidate_id is not None:
+                member = connection.execute(
+                    """
+                    SELECT 1 FROM round_candidates
+                    WHERE round_id = %s AND candidate_id = %s
+                    """,
+                    (request.round_id, request.candidate_id),
+                ).fetchone()
+                if member is None:
+                    raise Conflict("M2a Budget reservation Candidate is not a Round member")
+
+            candidate_count = connection.execute(
+                "SELECT count(*) AS count FROM round_candidates WHERE round_id = %s",
+                (request.round_id,),
+            ).fetchone()
+            assert candidate_count is not None
+            usage = BudgetUsage(candidates=candidate_count["count"])
+            outstanding = connection.execute(
+                """
+                SELECT planned FROM round_budget_reservations
+                WHERE round_id = %s AND state = 'reserved'
+                """,
+                (request.round_id,),
+            ).fetchall()
+            settled = connection.execute(
+                """
+                SELECT actual FROM round_budget_ledger
+                WHERE round_id = %s AND entry_type = 'settle'
+                """,
+                (request.round_id,),
+            ).fetchall()
+            for row in outstanding:
+                usage = usage.plus(BudgetUsage.model_validate(row["planned"]))
+            for row in settled:
+                usage = usage.plus(BudgetUsage.model_validate(row["actual"]))
+            proposed = usage.plus(request.planned)
+            violation = self._round_budget_violation(
+                RoundBudget.model_validate(round_row["budget"]), proposed
+            )
+            if violation is not None:
+                raise Conflict(f"M2a Round Budget exhausted: {violation}")
+
+            reservation = connection.execute(
+                """
+                INSERT INTO round_budget_reservations (
+                    reservation_id, round_id, job_id, attempt, candidate_id,
+                    phase, planned, state, idempotency_key
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'reserved', %s)
+                RETURNING *
+                """,
+                (
+                    request.reservation_id,
+                    request.round_id,
+                    request.job_id,
+                    request.attempt,
+                    request.candidate_id,
+                    request.phase.value if request.phase is not None else None,
+                    Jsonb(request.planned.model_dump(mode="json")),
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            ledger_entry = connection.execute(
+                """
+                INSERT INTO round_budget_ledger (
+                    ledger_entry_id, reservation_id, round_id, entry_type,
+                    reserved, actual, lease_held_seconds, harness_active_seconds,
+                    raw_usage_evidence_hash, idempotency_key, created_at
+                ) VALUES (%s, %s, %s, 'reserve', %s, %s, 0, 0, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    entry.ledger_entry_id,
+                    entry.reservation_id,
+                    entry.round_id,
+                    Jsonb(entry.reserved.model_dump(mode="json")),
+                    Jsonb(entry.actual.model_dump(mode="json")),
+                    entry.raw_usage_evidence_hash,
+                    entry.idempotency_key,
+                    entry.created_at,
+                ),
+            ).fetchone()
+            assert reservation is not None and ledger_entry is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_round_budget_reserved', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(request.round_id),
+                            "reservation_id": str(request.reservation_id),
+                            "job_id": str(request.job_id),
+                            "attempt": request.attempt,
+                        }
+                    ),
+                ),
+            )
+        return {"reservation": reservation, "ledger_entry": ledger_entry}
+
+    def finalize_round_budget(
+        self, entry: RoundBudgetLedgerEntry
+    ) -> dict[str, Any]:
+        """Append one settle/release event and close its reservation exactly once."""
+
+        if entry.entry_type not in {
+            RoundBudgetEntryType.SETTLE,
+            RoundBudgetEntryType.RELEASE,
+        }:
+            raise Conflict("M2a Budget terminal event must settle or release")
+        terminal_state = (
+            RoundBudgetReservationState.SETTLED
+            if entry.entry_type is RoundBudgetEntryType.SETTLE
+            else RoundBudgetReservationState.RELEASED
+        )
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (entry.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {entry.round_id}")
+            reservation = connection.execute(
+                """
+                SELECT * FROM round_budget_reservations
+                WHERE reservation_id = %s FOR UPDATE
+                """,
+                (entry.reservation_id,),
+            ).fetchone()
+            if reservation is None or reservation["round_id"] != entry.round_id:
+                raise Conflict("M2a Budget terminal event has no matching reservation")
+            existing = connection.execute(
+                """
+                SELECT * FROM round_budget_ledger
+                WHERE reservation_id = %s AND entry_type IN ('settle', 'release')
+                """,
+                (entry.reservation_id,),
+            ).fetchone()
+            if existing is not None:
+                persisted = RoundBudgetLedgerEntry.model_validate(existing)
+                if persisted.model_dump(mode="json") != entry.model_dump(mode="json"):
+                    raise Conflict("M2a Budget reservation already has another terminal event")
+                return {"reservation": reservation, "ledger_entry": existing}
+            if reservation["state"] != RoundBudgetReservationState.RESERVED.value:
+                raise Conflict("M2a Budget reservation is already terminal")
+            if BudgetUsage.model_validate(reservation["planned"]) != entry.reserved:
+                raise Conflict("M2a Budget terminal event changed the reserved amount")
+
+            ledger_entry = connection.execute(
+                """
+                INSERT INTO round_budget_ledger (
+                    ledger_entry_id, reservation_id, round_id, entry_type,
+                    reserved, actual, lease_held_seconds, harness_active_seconds,
+                    raw_usage_evidence_hash, idempotency_key, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    entry.ledger_entry_id,
+                    entry.reservation_id,
+                    entry.round_id,
+                    entry.entry_type.value,
+                    Jsonb(entry.reserved.model_dump(mode="json")),
+                    Jsonb(entry.actual.model_dump(mode="json")),
+                    entry.lease_held_seconds,
+                    entry.harness_active_seconds,
+                    entry.raw_usage_evidence_hash,
+                    entry.idempotency_key,
+                    entry.created_at,
+                ),
+            ).fetchone()
+            reservation = connection.execute(
+                """
+                UPDATE round_budget_reservations
+                SET state = %s, updated_at = now()
+                WHERE reservation_id = %s
+                RETURNING *
+                """,
+                (terminal_state.value, entry.reservation_id),
+            ).fetchone()
+            assert ledger_entry is not None and reservation is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    round_row["task_id"],
+                    f"m2_round_budget_{entry.entry_type.value}",
+                    Jsonb(
+                        {
+                            "round_id": str(entry.round_id),
+                            "reservation_id": str(entry.reservation_id),
+                            "ledger_entry_id": str(entry.ledger_entry_id),
+                        }
+                    ),
+                ),
+            )
+        return {"reservation": reservation, "ledger_entry": ledger_entry}
 
     def _upsert_target_snapshot(
         self,

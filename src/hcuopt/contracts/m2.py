@@ -47,6 +47,14 @@ class BudgetUsage(ContractModel):
     def is_zero(self) -> bool:
         return all(value == 0 for value in self.model_dump().values())
 
+    def plus(self, other: BudgetUsage) -> BudgetUsage:
+        return BudgetUsage.model_validate(
+            {
+                name: getattr(self, name) + getattr(other, name)
+                for name in type(self).model_fields
+            }
+        )
+
 
 class SearchRound(ContractModel):
     schema_version: Literal["m2a-search-round-v1"] = M2_SEARCH_ROUND_SCHEMA_VERSION

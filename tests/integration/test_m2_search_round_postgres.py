@@ -8,7 +8,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from hcuopt.contracts.m2 import RoundBudget, RoundCandidate, SearchRound
+from hcuopt.contracts.m2 import (
+    BudgetUsage,
+    RoundBudget,
+    RoundBudgetLedgerEntry,
+    RoundBudgetReservation,
+    RoundCandidate,
+    SearchRound,
+)
 from hcuopt.domain.errors import Conflict
 from hcuopt.storage.repository import PostgresRepository
 
@@ -234,6 +241,53 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         payload.update(updates)
         return RoundCandidate.model_validate(payload)
 
+    def _add_job(self, task_id: UUID, suffix: str) -> UUID:
+        job_id = uuid4()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, task_id, job_type, accepted_worker_type,
+                    lease_scope, payload, idempotency_key
+                ) VALUES (%s, %s, 'manual_performance', 'gpu', 'exclusive', %s, %s)
+                """,
+                (job_id, task_id, Jsonb({"fixture": suffix}), f"m2-job-{suffix}"),
+            )
+        self.connection.commit()
+        return job_id
+
+    def _reservation(
+        self,
+        round_id: UUID,
+        job_id: UUID,
+        suffix: str,
+        planned: BudgetUsage,
+    ) -> tuple[RoundBudgetReservation, RoundBudgetLedgerEntry]:
+        reservation = RoundBudgetReservation(
+            reservation_id=uuid4(),
+            round_id=round_id,
+            job_id=job_id,
+            attempt=1,
+            phase="search",
+            planned=planned,
+            state="reserved",
+            idempotency_key=f"m2-reservation-{suffix}",
+        )
+        entry = RoundBudgetLedgerEntry(
+            ledger_entry_id=uuid4(),
+            reservation_id=reservation.reservation_id,
+            round_id=round_id,
+            entry_type="reserve",
+            reserved=planned,
+            actual=BudgetUsage(),
+            lease_held_seconds=0,
+            harness_active_seconds=0,
+            raw_usage_evidence_hash=_hash("d"),
+            idempotency_key=f"m2-ledger-reserve-{suffix}",
+            created_at=datetime.now(timezone.utc),
+        )
+        return reservation, entry
+
     def test_round_create_is_idempotent_and_rejects_different_inputs(self) -> None:
         request = self._round()
         first = self.repository.create_search_round(request)
@@ -298,3 +352,87 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
             self.repository.add_round_candidate(
                 self._candidate(request.round_id, 1, idempotency_key="new-after-close")
             )
+
+    def test_budget_reservation_is_atomic_and_settle_records_overrun(self) -> None:
+        request = self._round()
+        self.repository.create_search_round(request)
+        self.repository.add_round_candidate(self._candidate(request.round_id, 0))
+        self.repository.add_round_candidate(self._candidate(request.round_id, 1))
+        self.repository.close_search_round_intake(request.round_id)
+
+        first_job = self._add_job(request.task_id, "budget-first")
+        second_job = self._add_job(request.task_id, "budget-second")
+        planned = BudgetUsage(
+            search_samples=150,
+            wall_seconds=20,
+            exclusive_lease_seconds=10,
+        )
+        attempts = [
+            self._reservation(request.round_id, first_job, "first", planned),
+            self._reservation(request.round_id, second_job, "second", planned),
+        ]
+
+        def reserve(pair):
+            try:
+                return "reserved", self.repository.reserve_round_budget(*pair)
+            except Conflict:
+                return "conflict", None
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(reserve, attempts))
+        self.assertEqual([item[0] for item in outcomes].count("reserved"), 1)
+        self.assertEqual([item[0] for item in outcomes].count("conflict"), 1)
+
+        winner_index = next(index for index, item in enumerate(outcomes) if item[0] == "reserved")
+        reservation, reserve_entry = attempts[winner_index]
+        replay = self.repository.reserve_round_budget(reservation, reserve_entry)
+        self.assertEqual(replay["reservation"]["reservation_id"], reservation.reservation_id)
+
+        settle = RoundBudgetLedgerEntry(
+            ledger_entry_id=uuid4(),
+            reservation_id=reservation.reservation_id,
+            round_id=request.round_id,
+            entry_type="settle",
+            reserved=planned,
+            actual=BudgetUsage(
+                search_samples=220,
+                wall_seconds=25,
+                exclusive_lease_seconds=12,
+            ),
+            lease_held_seconds=12,
+            harness_active_seconds=8,
+            raw_usage_evidence_hash=_hash("e"),
+            idempotency_key="m2-ledger-settle-overrun",
+            created_at=datetime.now(timezone.utc),
+        )
+        terminal = self.repository.finalize_round_budget(settle)
+        self.assertEqual(terminal["reservation"]["state"], "settled")
+        replay_terminal = self.repository.finalize_round_budget(settle)
+        self.assertEqual(
+            replay_terminal["ledger_entry"]["ledger_entry_id"],
+            settle.ledger_entry_id,
+        )
+
+        third_job = self._add_job(request.task_id, "budget-after-overrun")
+        third = self._reservation(
+            request.round_id,
+            third_job,
+            "after-overrun",
+            BudgetUsage(search_samples=1),
+        )
+        with self.assertRaises(Conflict):
+            self.repository.reserve_round_budget(*third)
+
+        release = settle.model_copy(
+            update={
+                "ledger_entry_id": uuid4(),
+                "entry_type": "release",
+                "actual": BudgetUsage(),
+                "lease_held_seconds": 0,
+                "harness_active_seconds": 0,
+                "idempotency_key": "m2-ledger-release-too-late",
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+        with self.assertRaises(Conflict):
+            self.repository.finalize_round_budget(release)
