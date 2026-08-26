@@ -14,6 +14,7 @@ from hcuopt.adapters.manual_candidate import (
 from hcuopt.contracts.m1 import CandidateOverlayFile
 from hcuopt.contracts.m2 import (
     RoundCandidate,
+    ScriptedCandidateFixtureSpec,
     ScriptedCandidatePackageInput,
     SearchRound,
 )
@@ -27,6 +28,30 @@ from hcuopt.domain.errors import SourceArtifactError
 from hcuopt.measurement.evidence import canonical_json_bytes
 
 SHA256_VALUE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+SCRIPTED_CANDIDATE_FIXTURES = (
+    ScriptedCandidateFixtureSpec(
+        fixture_id="noop",
+        build_outcome="built",
+        optimization_intent="exercise an equivalent source change",
+    ),
+    ScriptedCandidateFixtureSpec(
+        fixture_id="known_faster",
+        build_outcome="built",
+        optimization_intent="exercise the synthetic favorable-signal path",
+    ),
+    ScriptedCandidateFixtureSpec(
+        fixture_id="known_slower",
+        build_outcome="built",
+        optimization_intent="exercise the synthetic unfavorable-signal path",
+    ),
+    ScriptedCandidateFixtureSpec(
+        fixture_id="build_failure",
+        build_outcome="build_failed",
+        optimization_intent="exercise immutable Build failure evidence",
+        terminal_failure_code="scripted_build_failure",
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
