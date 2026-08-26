@@ -25,6 +25,11 @@ Operator Profile 只保存不可变版本、内容 Hash、允许模式和现有 
 TargetSnapshot、Stage0Run、Baseline、Hotspot、Candidate Source、Measurement Protocol 和
 AdapterProfile 仍由各自当前 Authority 提供。Formal 禁止 `latest` 或移动别名。
 
+Candidate Source 只从 Target Profile 绑定的部署侧内容寻址 Package Store 解析。兼容已签核的
+M1 Schema，部署侧 C Intake Publisher 在发布 Package 前分配 `candidate_id` 并写入不可变
+Manifest；UI 只提交内容寻址引用和 expected assertion，不能指定 Candidate、Source、
+Replacement Point 或 Artifact 事实。
+
 ### 3. 启动前生成持久化 Plan Preview
 
 Plan Compiler 在不占用 HCU 的情况下解析 Profile、执行 Preflight，并保存内容寻址、带有效期的
@@ -37,6 +42,10 @@ Search Plan Hash 或 Holdout commitment；阻塞项存在、Preview 过期或权
 `OperatorStartIntent`，随后由 Reconcile 驱动：创建 Round Authority、让 D 冻结 Search Plan
 与 Holdout commitment、批量 Intake Candidate 并关闭 Intake，最后才允许排 Job。半完成 Round
 可以审计和恢复，但不可执行；禁止由浏览器承担多步写入或补偿逻辑。
+
+StartIntent 在开始 Reconcile 前冻结逐候选成员：Manifest 中预分配的 `candidate_id`、由 Round 和
+输入摘要确定性派生的 `round_candidate_id`、独立 Intake 幂等键和成员进度。任一成员未完成绑定
+或 Intake Close 未完成时，Round 都不可执行。
 
 ### 5. 状态展示来自可重建 Read Model
 

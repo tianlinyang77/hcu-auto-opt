@@ -42,7 +42,7 @@ Create Round authority
 
 | Hash | 冻结时间 | 规范化输入 | 回答什么 |
 | --- | --- | --- | --- |
-| Candidate Family | Intake Close | 排序后的 Candidate ID、Source Hash、Hotspot、Replacement Point、意图 | 提交了哪些源码候选 |
+| Candidate Family | Intake Close | 排序后的 ordinal、Candidate/RoundCandidate ID、Package Store/Package/Manifest Hash、Manifest Version、Baseline/Candidate Source Hash、Hotspot、Replacement Point、Candidate Kind、意图 | 提交了哪些已验证源码候选 |
 | Artifact Family | 所有 Build 终态 | 排序后的 Candidate + Artifact ID/Hash；失败成员使用终态与失败证据 Hash | 实际生成或拒绝了哪些制品 |
 | Holdout Family | Search Barrier Close 且至少一项晋级 | 排序后的 promoted Candidate、Artifact Hash、`m`、选择规则 Hash | 哪些不可变制品进入最终比较 |
 
@@ -118,7 +118,10 @@ intake_open | intake_closed | building | correctness
 | `round_candidate_id` | UUID | Round 内成员 ID |
 | `round_id` / `candidate_id` | UUID | 指向 Round 和通用 Candidate |
 | `ordinal` | int 0..3 | 只用于稳定排序，不表示排名 |
-| `source_hash` | SHA256 | Intake 时冻结 |
+| `source_package_store_id` / `source_package_store_hash` | string/SHA256 | Target Profile 绑定的部署侧 Authority |
+| `source_package_hash` | SHA256 | 外层规范化 Package 身份，绑定 Manifest 与文件清单 |
+| `source_manifest_version` / `source_manifest_hash` | string/SHA256 | 已验证 M1 Manifest 身份 |
+| `baseline_source_hash` / `candidate_source_hash` | SHA256 | 与 Manifest 和 Round Baseline 一致 |
 | `optimization_intent` | string | 一个清晰假设 |
 | `replacement_point` | string | 必须等于 Round 值 |
 | `track` | literal `triton` | M2a 不开放 HIP/配置混批 |
@@ -130,8 +133,17 @@ intake_open | intake_closed | building | correctness
 | `state` | RoundCandidateState | Candidate 在本 Round 的状态 |
 | `idempotency_key` | string | 输入完全相同才可重放 |
 
-同一 Round 禁止重复 `candidate_id`、`source_hash`、`ordinal` 或幂等键。Intake Close 后以上输入
-字段不可更新；Search 开始后 Artifact ID/Hash 也不可替换或重建。
+M2 不修改 M1 `CandidateSourcePackageManifest`。部署侧 C Intake Publisher 在 Package 发布前分配
+Candidate UUID 并写入 Manifest；控制面从 Target Profile 绑定的 Package Store 重新读取、重哈希
+和验证 Manifest/文件，再使用该 UUID 创建通用 Candidate。`round_candidate_id` 必须按 Round ID、
+ordinal、Candidate ID 和输入摘要确定性派生；UI、自定义 URI 或 Reconcile 过程不得另造身份。
+外层 `source_package_hash` 使用 Manifest Hash 与按 path 排序的文件 Hash 清单计算，不向 M1
+Manifest 增加字段。
+
+同一 Round 禁止重复 `candidate_id`、`candidate_source_hash`、Manifest Hash、`ordinal` 或幂等键。
+Candidate Family Hash 必须直接包含上述 Package/Manifest/Kind 字段，不能假设 Candidate ID
+隐式承载其语义。Intake Close 后以上输入字段不可更新；Search 开始后 Artifact ID/Hash 也不可
+替换或重建。
 
 ### 3.3 `RoundMeasurementRef`
 
@@ -336,7 +348,7 @@ Harness 有效时间、原始使用证据 Hash 和事件自己的幂等键。
 | 表 | 关键唯一/不可变约束 |
 | --- | --- |
 | `search_rounds` | `round_id`；一个 Task 一个活动 Round；Candidate/Artifact Hash 只写一次，Holdout Hash 仅晋级时写一次 |
-| `round_candidates` | unique `(round_id,candidate_id)`、`(round_id,ordinal)`、`(round_id,source_hash)`、`idempotency_key` |
+| `round_candidates` | unique `(round_id,candidate_id)`、`(round_id,round_candidate_id)`、`(round_id,ordinal)`、`(round_id,candidate_source_hash)`、`(round_id,source_package_hash)`、`(round_id,source_manifest_hash)`、`idempotency_key` |
 | `round_plans` | unique `(round_id,phase)`；Holdout 预先只公开 nonce commitment，内容/nonce 对非 D 角色不可读 |
 | `round_measurements` | unique `(round_id,candidate_id,phase)`、`measurement_id`、`raw_evidence_hash`、`baseline_sample_set_hash` |
 | `round_barriers` | unique `(round_id,phase)`、`idempotency_key`；关闭后不可修改成员 |
@@ -362,14 +374,15 @@ Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
 验收见 [M2 操作面与易用性建设计划](m2-operability-plan.md)，字段草案见
 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
 
-面向操作者：
+SearchRound 权威写接口由 Operator Facade 的服务身份组合调用；普通 CLI/Web 不能绕过 Preview 和
+StartIntent 直接串联这些接口：
 
 | Method | Path | 作用 |
 | --- | --- | --- |
 | POST | `/v1/search-rounds` | 按 `run_mode` 创建 synthetic Scripted 或绑定 Formal Stage 0 的 Round |
 | GET | `/v1/search-rounds/{round_id}` | 读取 Round 权威与服务身份 |
 | GET | `/v1/search-rounds/{round_id}/summary` | 读取成员、Job、Barrier、Budget、Evidence、Signoff |
-| POST | `/v1/search-rounds/{round_id}/candidates` | 仅 Intake Open 时登记人工 Candidate |
+| POST | `/v1/search-rounds/{round_id}/candidates` | 仅 StartIntent Reconciler 在 Intake Open 时按冻结成员登记 Candidate |
 | POST | `/v1/search-rounds/{round_id}/intake-close` | 原子关闭 Intake 并冻结 Candidate Family |
 | POST | `/v1/search-rounds/{round_id}/cancel` | 停止排新 Job，保留已有证据并执行清理 |
 | POST | `/v1/search-rounds/{round_id}/signoff` | 仅 Formal：创建/重放 durable Signoff Intent；不提前推进终态 |
@@ -402,6 +415,8 @@ Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
 | 409 | `project_mode_not_allowed` | 不是允许的 Formal Stage 0 模式 | false |
 | 409 | `round_intake_closed` | 关闭后新增或替换 Candidate | false |
 | 409 | `round_candidate_count_mismatch` | Intake Close 时不是声明的 2–4 个 | false |
+| 409 | `round_candidate_package_invalid` | Package Store、Package/Manifest/File Hash 或 Authority 绑定无效 | false |
+| 409 | `round_candidate_id_conflict` | Manifest Candidate ID 已被其他输入占用 | false |
 | 409 | `round_family_hash_mismatch` | Candidate Family 绑定漂移 | false |
 | 409 | `artifact_family_hash_mismatch` | Artifact/失败家族漂移 | false |
 | 409 | `holdout_family_hash_mismatch` | 晋级族或 `m` 漂移 | false |
@@ -428,7 +443,10 @@ Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
 ### 无数据库
 
 - 所有模型拒绝 extra field、错误 Hash、错误 UUID、Candidate 数越界和非 Overlay/HIP 输入；
+- Package Store Authority 不可由 UI 覆盖；Manifest/文件重哈希及 Candidate、Hotspot、Baseline、
+  Replacement Point、Candidate Kind 绑定任一失败都拒绝 Intake；
 - Candidate/Artifact 及适用的 Holdout Family Hash 对排序无关，但对字节、成员、失败证据或 `m` 变化敏感；
+- Candidate Family Hash 对 Package Store/Package Hash、Manifest Version/Hash、ordinal、Candidate Kind 任一变化敏感；
 - Barrier 拒绝 phase/outcome、成员数和 promoted 列表的非法组合；
 - Formal 只接受 business Candidate，Scripted 只接受 fixture Candidate；
 - Holdout `RoundMeasurementRef` 缺 `holdout_family_hash` 时失败；Search 带该字段时失败；
@@ -443,6 +461,8 @@ Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
 ### PostgreSQL
 
 - 两个请求并发 Intake Close 只生成一个 Candidate Family；
+- 创建第 1～N 个 Candidate 或 RoundCandidate 后崩溃、Intake Close 前后崩溃和并发 Reconcile
+  只收敛到同一组确定性成员；未 finalized Round 不得 Build 或排 Job；
 - 两个组件并发 Close Barrier 只生成一个逻辑 Barrier；
 - 迟到 Worker、旧 Claim/Fencing Token 和关闭后 Candidate 写入均被拒绝；
 - Budget reserve/settle/release 事件幂等；并发 settle/release 只能一个提交成功，失败重试不重复收费；
