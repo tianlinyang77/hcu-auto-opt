@@ -15,11 +15,13 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from hcuopt.contracts.m2 import (
+    ArtifactFamilyFreezeRequest,
     BudgetUsage,
     RoundBudget,
     RoundBudgetLedgerEntry,
     RoundBudgetReservation,
     RoundCandidate,
+    RoundCandidateBuildTerminal,
     SearchRound,
 )
 from hcuopt.contracts.platform_v1 import (
@@ -670,6 +672,201 @@ class PostgresRepository:
                             "round_id": str(round_id),
                             "candidate_family_hash": family_hash,
                             "candidate_count": len(members),
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def record_round_candidate_build(
+        self, request: RoundCandidateBuildTerminal
+    ) -> dict[str, Any]:
+        """Record one immutable Scripted Build success or failure under the Round lock."""
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (request.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {request.round_id}")
+            member = connection.execute(
+                "SELECT * FROM round_candidates WHERE round_candidate_id = %s FOR UPDATE",
+                (request.round_candidate_id,),
+            ).fetchone()
+            if (
+                member is None
+                or member["round_id"] != request.round_id
+                or member["candidate_id"] != request.candidate_id
+            ):
+                raise Conflict("M2a Build terminal does not match one Round member")
+
+            terminal_fields = (
+                "state",
+                "artifact_id",
+                "artifact_hash",
+                "terminal_failure_code",
+                "failure_evidence_hash",
+            )
+            expected = request.model_dump(mode="python")
+            if member["state"] in {
+                RoundCandidateState.BUILT.value,
+                RoundCandidateState.BUILD_FAILED.value,
+                RoundCandidateState.INVALID.value,
+            }:
+                if any(member[name] != expected[name] for name in terminal_fields):
+                    raise Conflict("M2a Candidate already has another Build terminal")
+                return member
+            if (
+                round_row["candidate_family_hash"] is None
+                or round_row["artifact_family_hash"] is not None
+                or round_row["state"]
+                not in {
+                    SearchRoundState.INTAKE_CLOSED.value,
+                    SearchRoundState.BUILDING.value,
+                }
+            ):
+                raise Conflict("M2a Round is not accepting Build terminals")
+
+            if request.artifact_id is not None:
+                artifact = connection.execute(
+                    """
+                    SELECT * FROM artifacts
+                    WHERE artifact_id = %s AND candidate_id = %s
+                      AND task_id = %s AND content_hash = %s
+                    FOR SHARE
+                    """,
+                    (
+                        request.artifact_id,
+                        request.candidate_id,
+                        round_row["task_id"],
+                        request.artifact_hash,
+                    ),
+                ).fetchone()
+                if artifact is None or not artifact["synthetic"]:
+                    raise Conflict(
+                        "M2a Scripted Build terminal requires its synthetic Artifact"
+                    )
+
+            member = connection.execute(
+                """
+                UPDATE round_candidates
+                SET state = %s, artifact_id = %s, artifact_hash = %s,
+                    terminal_failure_code = %s, failure_evidence_hash = %s,
+                    updated_at = now()
+                WHERE round_candidate_id = %s
+                RETURNING *
+                """,
+                (
+                    request.state.value,
+                    request.artifact_id,
+                    request.artifact_hash,
+                    request.terminal_failure_code,
+                    request.failure_evidence_hash,
+                    request.round_candidate_id,
+                ),
+            ).fetchone()
+            assert member is not None
+            generic_state = (
+                CandidateState.BUILT
+                if request.state is RoundCandidateState.BUILT
+                else CandidateState.BUILD_FAILED
+            )
+            connection.execute(
+                "UPDATE candidates SET state = %s, updated_at = now() WHERE candidate_id = %s",
+                (generic_state.value, request.candidate_id),
+            )
+            connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                """,
+                (SearchRoundState.BUILDING.value, request.round_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_round_candidate_build_terminal', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(request.round_id),
+                            "round_candidate_id": str(request.round_candidate_id),
+                            "candidate_id": str(request.candidate_id),
+                            "state": request.state.value,
+                        }
+                    ),
+                ),
+            )
+        return member
+
+    def freeze_search_round_artifact_family(
+        self, request: ArtifactFamilyFreezeRequest
+    ) -> dict[str, Any]:
+        """Recompute and freeze the complete Artifact Family exactly once."""
+
+        from hcuopt.orchestrator.search_round import artifact_family_hash
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (request.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {request.round_id}")
+            if round_row["candidate_family_hash"] != request.candidate_family_hash:
+                raise Conflict("M2a Artifact Family changed its Candidate Family binding")
+            members = connection.execute(
+                """
+                SELECT * FROM round_candidates
+                WHERE round_id = %s ORDER BY ordinal
+                FOR UPDATE
+                """,
+                (request.round_id,),
+            ).fetchall()
+            try:
+                computed = artifact_family_hash(round_row, members)
+            except (KeyError, TypeError, ValueError) as error:
+                raise Conflict(f"M2a Artifact Family is not ready: {error}") from error
+            if computed != request.expected_artifact_family_hash:
+                raise Conflict("M2a Artifact Family Hash does not match the frozen members")
+            if round_row["artifact_family_hash"] is not None:
+                if round_row["artifact_family_hash"] != computed:
+                    raise Conflict("M2a Artifact Family is already frozen with other members")
+                return round_row
+            if round_row["state"] != SearchRoundState.BUILDING.value:
+                raise Conflict("M2a Artifact Family requires a building Round")
+
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = %s, artifact_family_hash = %s,
+                    version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (
+                    SearchRoundState.CORRECTNESS.value,
+                    computed,
+                    request.round_id,
+                ),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_round_artifact_family_frozen', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(request.round_id),
+                            "candidate_family_hash": request.candidate_family_hash,
+                            "artifact_family_hash": computed,
                         }
                     ),
                 ),

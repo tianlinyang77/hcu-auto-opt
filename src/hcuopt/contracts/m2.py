@@ -213,6 +213,45 @@ class RoundCandidateView(RoundCandidate):
     updated_at: datetime
 
 
+class RoundCandidateBuildTerminal(ContractModel):
+    round_id: UUID
+    round_candidate_id: UUID
+    candidate_id: UUID
+    state: RoundCandidateState
+    artifact_id: UUID | None = None
+    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    terminal_failure_code: str | None = Field(default=None, min_length=1, max_length=200)
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_one_build_terminal(self) -> RoundCandidateBuildTerminal:
+        has_artifact = self.artifact_id is not None and self.artifact_hash is not None
+        has_failure = (
+            self.terminal_failure_code is not None
+            and self.failure_evidence_hash is not None
+        )
+        if (self.artifact_id is None) != (self.artifact_hash is None) or (
+            self.terminal_failure_code is None
+        ) != (self.failure_evidence_hash is None):
+            raise ValueError("Build terminal identities must be written in pairs")
+        if has_artifact == has_failure:
+            raise ValueError("Build terminal must bind exactly one Artifact or failure")
+        if has_artifact and self.state is not RoundCandidateState.BUILT:
+            raise ValueError("Artifact Build terminal must be built")
+        if has_failure and self.state not in {
+            RoundCandidateState.BUILD_FAILED,
+            RoundCandidateState.INVALID,
+        }:
+            raise ValueError("failure Build terminal must be build_failed or invalid")
+        return self
+
+
+class ArtifactFamilyFreezeRequest(ContractModel):
+    round_id: UUID
+    candidate_family_hash: str = Field(pattern=SHA256_PATTERN)
+    expected_artifact_family_hash: str = Field(pattern=SHA256_PATTERN)
+
+
 class RoundBudgetReservation(ContractModel):
     reservation_id: UUID
     round_id: UUID
