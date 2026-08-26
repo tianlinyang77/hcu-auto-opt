@@ -2,10 +2,11 @@
 
 ## 当前授权边界
 
-当前只授权 M2 设计和无 HCU 工程准备。ADR-0009 状态为 Proposed；在四人评审和项目所有者
-明确批准 M2a 前，不创建真实多 Candidate Formal Task，不运行 Agent，不产生新的 HCU 性能
-结论。字段、表、API 和稳定错误码见 [M2a SearchRound Contract 草案](m2-contract-draft.md)；
-草案合入不等于 Contract Accepted。面向操作者的 Profile、Plan、CLI、通知、报告和 Web 分阶段
+ADR-0009 已由项目所有者依据 #56～#59 四线范围接受，并授权 M2a/OX-1 无 HCU Scripted 实现。
+当前可以建设增量 Contract/迁移、Round 控制面、synthetic Fixture/Profile、CLI/API 和
+Windows/Linux/PostgreSQL 测试；仍不创建真实多 Candidate Formal Task，不运行 Agent，不产生
+新的 HCU 性能结论。字段、表、API 和稳定错误码见
+[M2a SearchRound Contract 草案](m2-contract-draft.md)。面向操作者的 Profile、Plan、CLI、通知、报告和 Web 分阶段
 要求见 [M2 操作面与易用性建设计划](m2-operability-plan.md)。
 OX-0 字段、幂等、Preflight、Read Model 和 CLI/API 映射见
 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
@@ -35,13 +36,17 @@ M2a 只回答 Kernel 级候选在冻结 Search/Holdout 下能否可信晋级，�
 
 Owner：A；B/C/D 必须共同 Review。
 
+状态：Accepted，#56～#59 四线无阻塞，项目所有者在 #44 授权进入无 HCU Scripted 实现。
+
 交付：
 
-- ADR-0009 从 Proposed 评审为 Accepted 或明确拒绝；
+- ADR-0009 已从 Proposed 评审为 Accepted，并仅授权无 HCU Scripted 实现；
 - `SearchRound`、`RoundCandidate`、`RoundMeasurementRef`、`RoundBarrierResult`、
   `MultipleComparisonResult`、`RoundEvidenceBundle`、`RoundSignoffIntent/Signoff` 的字段草案；
 - Candidate、Artifact 和条件性 Holdout Family Hash 的冻结输入、时间点与规范化算法；
 - nonce-sealed Holdout commitment/reveal 和零晋级终态；
+- D `HoldoutPlanAuthority`、Formal 受保护 Store/ACL 和一次性 Reveal Lease；
+- 固定 2–4 个 Candidate、最多提升 2 个、确定性单推荐和 Lease 时间硬预算；
 - 状态机、幂等键、错误码、Budget reservation/ledger、Signoff outbox 和 Contract 版本策略；
 - Profile ID/Version、Plan Preview、Round Summary 和 Operator API 的边界；
 - M1 v1 证据回放兼容测试清单。

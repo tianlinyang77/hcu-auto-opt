@@ -3,12 +3,12 @@
 ## 结论
 
 M1 已完成单人工 Python startup Overlay Candidate 的真实闭环，并由项目所有者接受证据。
-当前决策是 **GO_TO_M2_DESIGN_ONLY**，不是 GO_TO_M2_FORMAL：可以设计新 ADR、Contract、
-数据库迁移和无 HCU 测试，但在 ADR-0009 经四人评审且项目所有者明确批准前，不创建真实
-多 Candidate Formal Task，不运行 Agent，不占用 HCU 做 M2 性能结论。
+当前决策是 **GO_TO_M2_SCRIPTED_IMPLEMENTATION**，不是 GO_TO_M2_FORMAL：ADR-0009 已完成
+四线范围评审并由项目所有者接受，允许增量 Contract/迁移、无 HCU Scripted 控制面和测试；
+仍不创建真实多 Candidate Formal Task，不运行 Agent，不占用 HCU 做 M2 性能结论。
 
 当前 Contract 字段、持久化、API、错误码和四人签字位见
-[M2a SearchRound Contract 草案](m2-contract-draft.md)。该文档仍是 Non-runnable Draft。
+[M2a SearchRound Contract 草案](m2-contract-draft.md)。该文档已冻结实现边界，但代码尚待交付。
 
 ## M1 最终权威状态
 
@@ -87,8 +87,8 @@ FWER、预算和失败证据成立；随后 Agent/Apex 只能作为 Candidate In
 | 决策 | 当前状态 | 说明 |
 | --- | --- | --- |
 | M1 完成 | GO | 正式证据已由人工接受 |
-| M2 设计与无 HCU 测试 | GO | 不产生新的性能结论 |
-| M2a 真实多 Candidate Formal | HOLD | 等待 ADR、Contract、迁移草案、四人评审和所有者批准 |
+| M2a 无 HCU Scripted 实现与测试 | GO | 不产生新的性能结论，不注册 Real Profile |
+| M2a 真实多 Candidate Formal | HOLD | 等待 Scripted、PostgreSQL、Target Lock 退出条件和独立 HCU 授权 |
 | M2b Agent Candidate Generator | STOP | 只有 M2a Target Lock 闭环通过后才重新评审 |
 | 自动安装/生产发布 | STOP | 当前及 M2 均不授权 |
 
