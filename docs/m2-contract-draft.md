@@ -93,6 +93,7 @@ Holdout Family 后失败的成员仍计入冻结的 `m`。
 | `candidate_family_hash` | SHA256/null | Intake Close 后只写一次 |
 | `artifact_family_hash` | SHA256/null | Build Barrier 后只写一次 |
 | `holdout_family_hash` | SHA256/null | 有晋级成员时只写一次；零晋级保持 null |
+| `automatic_release_allowed` | literal false | Scripted/Formal 均禁止自动发布 |
 | `version` | positive int | 乐观并发控制 |
 | `created_at` / `intake_closed_at` | datetime | 审计时间 |
 

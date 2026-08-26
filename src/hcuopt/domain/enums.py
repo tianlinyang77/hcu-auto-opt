@@ -201,3 +201,67 @@ class LeaseScope(StrEnum):
     NONE = "none"
     SHARED = "shared"
     EXCLUSIVE = "exclusive"
+
+
+class SearchRoundRunMode(StrEnum):
+    SCRIPTED = "scripted"
+    FORMAL = "formal"
+
+
+class SearchRoundState(StrEnum):
+    INTAKE_OPEN = "intake_open"
+    INTAKE_CLOSED = "intake_closed"
+    BUILDING = "building"
+    CORRECTNESS = "correctness"
+    SEARCH_MEASURING = "search_measuring"
+    SEARCH_BARRIER = "search_barrier"
+    HOLDOUT_MEASURING = "holdout_measuring"
+    HOLDOUT_BARRIER = "holdout_barrier"
+    AWAITING_SIGNOFF = "awaiting_signoff"
+    SCRIPTED_COMPLETED = "scripted_completed"
+    COMPLETED = "completed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class RoundCandidateState(StrEnum):
+    INTAKE_ACCEPTED = "intake_accepted"
+    BUILDING = "building"
+    BUILD_FAILED = "build_failed"
+    BUILT = "built"
+    CORRECTNESS_FAILED = "correctness_failed"
+    CORRECTNESS_PASSED = "correctness_passed"
+    SEARCH_FAILED = "search_failed"
+    SEARCH_MEASURED = "search_measured"
+    NOT_PROMOTED = "not_promoted"
+    HOLDOUT_FAILED = "holdout_failed"
+    HOLDOUT_MEASURED = "holdout_measured"
+    INVALID = "invalid"
+
+
+class RoundPhase(StrEnum):
+    SEARCH = "search"
+    HOLDOUT = "holdout"
+
+
+class RoundBarrierOutcome(StrEnum):
+    MEMBERS_PROMOTED = "members_promoted"
+    NO_PROMOTABLE_CANDIDATE = "no_promotable_candidate"
+    COMPLETED = "completed"
+
+
+class RoundTerminalReason(StrEnum):
+    HOLDOUT_COMPLETED = "holdout_completed"
+    NO_PROMOTABLE_CANDIDATE = "no_promotable_candidate"
+
+
+class RoundBudgetReservationState(StrEnum):
+    RESERVED = "reserved"
+    SETTLED = "settled"
+    RELEASED = "released"
+
+
+class RoundBudgetEntryType(StrEnum):
+    RESERVE = "reserve"
+    SETTLE = "settle"
+    RELEASE = "release"
