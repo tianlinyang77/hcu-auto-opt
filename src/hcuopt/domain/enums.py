@@ -37,6 +37,7 @@ class WorkflowType(StrEnum):
     FRAMEWORK_SMOKE = "framework_smoke"
     STAGE0 = "stage0"
     MANUAL_CANDIDATE = "manual_candidate"
+    SEARCH_ROUND = "search_round"
 
 
 class FrameworkSmokeDecision(StrEnum):
