@@ -1,9 +1,10 @@
 # ADR-0010：M2 操作面是可信控制面的版本化外观
 
-- 状态：Proposed
+- 状态：Accepted / Implementation not authorized
 - 日期：2026-08-26
 - 跟踪：GitHub Issue #46
 - 依赖：ADR-0009
+- 接受记录：A/B/C/D 分别在 #49、#50、#51、#52 完成 `accepted-for-draft`；项目所有者接受 OX-0
 
 ## 背景
 
@@ -74,7 +75,8 @@ Facade 记录主动操作时间、人工介入、Preflight 提前阻塞、自动
 - 新增 Profile/Preview/Read Model 的版本与兼容责任；
 - 启动前多一次 Preflight 和确认，但可在占用 HCU 前发现错误；
 - Web 交付晚于 CLI，但不会产生两套业务逻辑；
-- ADR-0009 和本 ADR 未 Accepted 前，不注册 Real Operator Profile，不创建 Formal Round。
+- ADR-0009 仍为 Proposed；在其 Accepted 且获得独立实现授权前，不注册 Real Operator Profile，
+  不创建数据库迁移或 Formal Round。
 
 ## 非目标
 
@@ -84,9 +86,14 @@ Facade 记录主动操作时间、人工介入、Preflight 提前阻塞、自动
 
 ## 接受条件
 
-- [ ] A 确认 durable StartIntent、幂等、Read Model 和服务身份语义；
-- [ ] B 确认 MeasurementPreset、Lease/Cleanup 摘要不形成第二套 Harness；
-- [ ] C 确认 Candidate Source Package 和 Artifact 引用不可变；
-- [ ] D 确认 Hotspot、verdict、Evidence 与 Signoff 展示不重新计算结论；
-- [ ] 项目所有者批准 OX-1 无 HCU Scripted 实现；
+- [x] A 确认 durable StartIntent、幂等、Read Model 和服务身份语义；
+- [x] B 确认 MeasurementPreset、Lease/Cleanup 摘要不形成第二套 Harness；
+- [x] C 确认 Candidate Source Package 和 Artifact 引用不可变；
+- [x] D 确认 Hotspot、verdict、Evidence 与 Signoff 展示不重新计算结论；
+- [x] 项目所有者接受 OX-0 Operator Contract；
+- [ ] 项目所有者另行批准 OX-1 无 HCU Scripted 实现；
 - [ ] 独立授权后才允许 Real Operator Profile 或 HCU Formal。
+
+本 ADR 的 Accepted 只表示 OX-0 接口方向已经冻结。它不批准 OX-1 运行时代码、数据库迁移、
+Real Operator Profile、HCU Formal、Agent、Baseline 提升或自动发布；这些能力继续受 ADR-0009
+和各自独立授权门禁约束。
