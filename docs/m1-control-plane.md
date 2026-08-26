@@ -23,8 +23,9 @@ Formal Stage 0（DEGRADED_MANUAL_INTAKE）
 原始数值证据并发布 Verification Artifact，B 通过唯一 Harness 产生 MeasurementSeries，
 D Adjudicator 再次重读正确性和性能证据。四段能力必须组合成同一个 opt-in Real Profile。
 默认 Adapter Catalog 仍故意不注册 M1，因此测试夹具或不完整 Worker 不能开放真实任务。
-业务 Hotspot 冻结后，还需提供对应的 `M1WorkloadFactory` 和 Correctness Evidence Producer，
-再进行 nmz36 Target Lock 实机闭环。
+首个业务 Hotspot 已通过 `nmz36-m1-manual-v1` 提供的 `M1WorkloadFactory` 和 Correctness
+Evidence Producer 完成 Target Lock Formal 闭环及人工签核。该结果只证明冻结业务路径上的
+单 Candidate Kernel 级证据，不把一次部署实现变成默认 Catalog 能力。
 
 ## B 测量链当前能力
 
@@ -190,7 +191,11 @@ POST /v1/manual-candidate/tasks/<task-id>/signoff
 
 Signoff 必须绑定 D 最终写入的 EvidenceBundle。批准只会把 Task/Candidate 记为
 `completed/accepted`，不会自动安装 Overlay，也不会把 `automatic_release_allowed` 改成
-`true`。
+`true`。签核前复核、幂等重放和签核后检查见 [M1 人工签核 Runbook](m1-signoff-runbook.md)。
+
+首个真实 M1 Task 已于 2026-08-26 签核为 `completed/accepted`；权威 ID、原始证据 Hash、
+670 个可信根文件复核和最终资源状态见
+[M1 nmz36 Formal 与签核记录](evidence/m1-formal-nmz36-20260825.md)。
 
 ## 本地验证
 
@@ -213,10 +218,8 @@ B 的可移植契约、no-op、已知信号、Stage 0 报告篡改和 Worker fai
 pytest tests/unit/test_m1_measurement.py tests/unit/test_m1_control_plane.py -q
 ```
 
-nmz36 Target Lock 测试还需要 C 提供真实的 `M1WorkloadFactory`：它负责在锁定镜像中分别
-启动干净 Baseline 和只读 startup Overlay Candidate，并返回 Artifact import attestation、
-哈希化缓存证明和实现 B Event Record 协议的进程入口。
-B 不接受 Job payload 传入命令、mount 或任意 Python 入口。
-
-本地测试能验收 A 控制面和 B 证据生产逻辑；只有 C/D Real Adapter 接齐后，才运行 nmz36
-上的 M1 Target Lock 实机闭环。
+Target Lock Formal 仍必须由部署方提供经审核的 `M1WorkloadFactory`：它负责在锁定镜像中
+分别启动干净 Baseline 和只读 startup Overlay Candidate，并返回 Artifact import
+attestation、哈希化缓存证明和实现 B Event Record 协议的进程入口。B 不接受 Job payload
+传入命令、mount 或任意 Python 入口。Scripted/本地测试只验收 Contract 和证据算法；真实
+性能结论必须另行获得 HCU 资源授权并完整运行 Formal 链。

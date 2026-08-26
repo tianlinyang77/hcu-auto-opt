@@ -45,17 +45,21 @@ D 只消费 B 的 Harness，不实现计时底层。Registry、签核和回滚�
 
 ## 依赖顺序（不作为固定排期）
 
-| 阶段 | 目标 | 关键交付 / 退出条件 |
-|---|---|---|
-| F0 | 公共接口 | platform-v1.1、Target Loader、Adapter/Workflow 注入、Contract 测试 |
-| F1 | 真实 No-op 框架 | SSH/Container、固定源码、No-op Artifact、SGLang Smoke、证据归档 |
-| S0 | 能力闸门 | 分辨率、σ/CV/MDE、环境指纹；Profiler 和热补丁探针；Go/No-Go |
-| M1 | 手工候选闭环 | 手工 Candidate、隔离构建、正确性和可信性能结果 |
-| M2 | 搜索轮次 | Search/Holdout、Barrier、FDR/FWER、预算和失败证据 |
-| M3 | 模型与 E2E | Logits、Token smoke、自回归、ABBA、消融与归因 |
-| M4 | 恢复与交付 | Fencing 故障注入、Registry、签核材料、一键复现和限制说明 |
+| 阶段 | 状态 | 目标 | 关键交付 / 退出条件 |
+|---|---|---|---|
+| F0 | 已完成 | 公共接口 | platform-v1.1、Target Loader、Adapter/Workflow 注入、Contract 测试 |
+| F1 | 已完成 | 真实 No-op 框架 | SSH/Container、固定源码、No-op Artifact、SGLang Smoke、证据归档 |
+| S0 | 已完成，能力降级 | 能力闸门 | G0-M 通过，G0-P degraded，G0-H overlay-only；模式为 `DEGRADED_MANUAL_INTAKE` |
+| M1 | 已完成并签核 | 手工候选闭环 | 单业务 Candidate、隔离构建、正确性、可信性能、独立裁决和人工接受 |
+| M2 | 设计评审中 | 搜索轮次 | M2a 人工有限候选的 Search/Holdout、Barrier、FWER、预算和失败证据；M2b 另行决策 |
+| M3 | 未开始 | 模型与 E2E | Logits、Token smoke、自回归、ABBA、消融与归因 |
+| M4 | 未开始 | 恢复与交付 | Fencing 故障注入、Registry、签核材料、一键复现和限制说明 |
 
 F1 未完成不运行 Stage 0；S0 未通过不投入搜索、Agent、Beam 和真实优化候选，但不得用 S0 阻止完成承载它的 F0/F1 框架。
+
+M1 已于 2026-08-26 以 Signoff `923c24ed-ce3b-54fa-9889-2e6dba39014c` 完成。当前只允许
+推进 M2 设计、Contract、数据库草案和无 HCU 测试；M2a Formal 必须等待 ADR-0009 评审接受
+和项目所有者单独批准。详细拆分见 [M2 搜索轮次建设计划](m2-round-plan.md)。
 
 ## 周工作方式
 

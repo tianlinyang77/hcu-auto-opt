@@ -3,7 +3,9 @@
 ## 目的
 
 公共接口层是四条开发线之间唯一允许共享的数据和调用边界。它解决“控制面怎样调用
-执行、源码、构建和评测模块”；真实 F1 Profile 已接入，性能测量仍不在本阶段范围内。
+执行、源码、构建和评测模块”。`platform-v1.2` 仍是 F1 通用底座；M1 已在其上通过专用
+Contract 和 opt-in Real Profile 完成一次真实 Build、正确性、性能测量、独立裁决和人工
+签核。M1 性能证据不反向改写 `platform-v1.2`，M2 也必须通过版本化新 Contract 增量演进。
 
 当前版本为 `platform-v1.2`。它在 v1.1 上增加了 Target blocker 作用域，以及
 Framework Smoke 的 baseline/noop 双执行身份；变更依据见
@@ -93,3 +95,14 @@ A 线的持久化、状态、API、取消、复测与 Reconcile 已进入 F1 实
 
 F1 之后的 Stage 0 已建立 Target-bound 控制面和七探针 Barrier，接口与真假证据边界见
 [S0-A Stage 0 控制面](s0-control-plane.md)。
+
+## M1 与 M2 接口边界
+
+M1 专用接口位于 `src/hcuopt/contracts/v1.py`、`src/hcuopt/contracts/m1.py`、
+`src/hcuopt/measurement/m1_harness.py` 和 `src/hcuopt/evaluation/m1_verifier.py`。真实 M1
+Profile 必须由部署方显式组合 A/B/C/D Adapter；默认 Catalog 不提供自动回退。首份真实
+证据已签核，因此 `m1-kernel-performance-evidence-v1` 按只读兼容边界管理。
+
+M2a 当前只处于设计评审，拟新增 `SearchRound`、Phase-aware 测量引用、Barrier、Bonferroni
+FWER 和 Round EvidenceBundle；这些对象尚未进入本页所述的已实现公共接口。草案见
+[M2 Contract 草案](m2-contract-draft.md)。

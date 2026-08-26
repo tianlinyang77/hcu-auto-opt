@@ -2,7 +2,9 @@
 
 面向 HCU 推理工作负载的自动性能优化平台。系统从真实 Workload 出发，发现瓶颈、生成候选、隔离构建、可信评测，并把可复现证据交给人工签核。
 
-仓库已经完成 F1 Framework Smoke 和 Formal Stage 0，当前进入 **M1 手工 Candidate 闭环阶段**。Formal Stage 0 的模式是 `DEGRADED_MANUAL_INTAKE`：允许人工定位并提交候选，但不开放 Agent 搜索、自动发布或生产灰度。当前第一步是冻结 Baseline、Candidate、Build、正确性、测量、独立裁决和签核的公共接口，再由 B/C/D 接入真实 Adapter。
+仓库已经完成 F1 Framework Smoke、Formal Stage 0 和 **M1 单人工 Candidate 可信闭环**。首个真实业务 Candidate 已完成 Build、正确性、可信测量、独立裁决和人工证据接受；完整记录见 [M1 nmz36 Formal 与签核](docs/evidence/m1-formal-nmz36-20260825.md)。Formal Stage 0 的模式仍是 `DEGRADED_MANUAL_INTAKE`，`automatic_release_allowed=false`；M1 的完成不开放 Agent 搜索、自动发布或生产灰度。
+
+当前工作进入 [M1 接口复盘与 M2 Go/No-Go](docs/m1-retrospective.md)。M2 的提案是先做 M2a：同一热点下 2–4 个人工不可变 Candidate 的 Search/Holdout/轮次 Barrier，再单独评审是否进入 M2b Candidate Generator。M2 ADR 仍是 Proposed，在评审接受前不得创建真实多 Candidate Formal Task。
 
 首个实测目标已经冻结为 SGLang 0.5.12、`HYGON-AI/sglang-das` 固定 Commit 和指定 DTK 26.04 镜像；精确版本、运行拓扑及待解除阻塞见 [nmz36 Target Lock](config/targets/nmz36-sglang-0.5.12.yaml)。Target Lock 使用镜像 digest 与完整源码 Commit，禁止用同名 Tag、`latest` 或其他 0.5.12 镜像替换。
 
@@ -18,7 +20,7 @@ docker compose run --rm api \
 
 API 文档：`http://localhost:8000/docs`。详细说明见 [Framework Smoke 控制面](docs/framework-smoke-control-plane.md) 和 [Walking Skeleton](docs/walking-skeleton.md)。
 
-M1-A 已提供独立的单候选控制面和 PostgreSQL 契约，但默认 Adapter Catalog 暂不注册 M1 Real Profile；这会阻止任何 Fake 结果冒充真实优化证据。接口和接线边界见 [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)。
+M1-A/B/C/D 已通过 opt-in Real Profile `nmz36-m1-manual-v1` 完成一次真实闭环。默认 Adapter Catalog 仍不注册该 Profile；部署方必须显式组合全部 Real Adapter，这会阻止 Fake 或不完整实现冒充真实优化证据。接口和接线边界见 [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)。
 
 ## MVP 范围
 
@@ -125,6 +127,11 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [S0-C Profiler 与可逆 Overlay 能力探针](docs/s0-runtime-probes.md)
 - [M1-C 人工热点与启动时 Overlay 制品链](docs/m1-hotspot-overlay.md)
 - [M1-A 手工 Candidate 控制面](docs/m1-control-plane.md)
+- [M1 人工签核 Runbook](docs/m1-signoff-runbook.md)
+- [M1 接口复盘与 M2 Go/No-Go](docs/m1-retrospective.md)
+- [M2 搜索轮次建设计划](docs/m2-round-plan.md)
+- [M2 Contract 草案](docs/m2-contract-draft.md)
+- [ADR-0009：M2a 轮次级 Search/Holdout 与 Barrier](docs/adr/0009-m2a-round-barrier.md)
 - [状态机](docs/state-machine.md)
 - [团队与排期](docs/team-plan.md)
 - [Walking Skeleton](docs/walking-skeleton.md)
