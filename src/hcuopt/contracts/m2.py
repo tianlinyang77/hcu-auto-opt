@@ -237,6 +237,41 @@ class RoundBudgetLedgerEntry(ContractModel):
         return self
 
 
+class RoundBudgetReserveRequest(ContractModel):
+    reservation: RoundBudgetReservation
+    ledger_entry: RoundBudgetLedgerEntry
+
+    @model_validator(mode="after")
+    def require_matching_reserve_pair(self) -> RoundBudgetReserveRequest:
+        if self.ledger_entry.entry_type is not RoundBudgetEntryType.RESERVE:
+            raise ValueError("Budget reserve request requires a reserve ledger entry")
+        if (
+            self.reservation.reservation_id != self.ledger_entry.reservation_id
+            or self.reservation.round_id != self.ledger_entry.round_id
+            or self.reservation.planned != self.ledger_entry.reserved
+        ):
+            raise ValueError("Budget reservation and reserve ledger entry must match")
+        return self
+
+
+class RoundBudgetFinalizeRequest(ContractModel):
+    ledger_entry: RoundBudgetLedgerEntry
+
+    @model_validator(mode="after")
+    def require_terminal_entry(self) -> RoundBudgetFinalizeRequest:
+        if self.ledger_entry.entry_type not in {
+            RoundBudgetEntryType.SETTLE,
+            RoundBudgetEntryType.RELEASE,
+        }:
+            raise ValueError("Budget finalize request requires settle or release")
+        return self
+
+
+class RoundBudgetMutationResult(ContractModel):
+    reservation: RoundBudgetReservationView
+    ledger_entry: RoundBudgetLedgerEntry
+
+
 class SearchRoundSummary(ContractModel):
     round: SearchRoundView
     candidates: list[RoundCandidateView]
