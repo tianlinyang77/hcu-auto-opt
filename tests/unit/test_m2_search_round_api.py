@@ -81,6 +81,57 @@ def _persisted(payload: dict) -> dict:
     return {**payload, "created_at": payload.get("created_at", now), "updated_at": now}
 
 
+def _usage(**updates) -> dict:
+    payload = {
+        "candidates": 0,
+        "build_attempts": 0,
+        "correctness_attempts": 0,
+        "search_samples": 0,
+        "holdout_samples": 0,
+        "wall_seconds": 0.0,
+        "exclusive_lease_seconds": 0.0,
+    }
+    payload.update(updates)
+    return payload
+
+
+def _budget_reservation(round_id: str) -> dict:
+    return {
+        "reservation_id": str(uuid4()),
+        "round_id": round_id,
+        "job_id": str(uuid4()),
+        "attempt": 1,
+        "candidate_id": str(uuid4()),
+        "phase": "search",
+        "planned": _usage(search_samples=20, exclusive_lease_seconds=10.0),
+        "state": "reserved",
+        "idempotency_key": "m2-budget-reservation-api",
+    }
+
+
+def _budget_entry(
+    reservation: dict, entry_type: str, *, terminal: bool = False
+) -> dict:
+    actual = (
+        _usage(search_samples=20, exclusive_lease_seconds=10.0)
+        if terminal
+        else _usage()
+    )
+    return {
+        "ledger_entry_id": str(uuid4()),
+        "reservation_id": reservation["reservation_id"],
+        "round_id": reservation["round_id"],
+        "entry_type": entry_type,
+        "reserved": reservation["planned"],
+        "actual": actual,
+        "lease_held_seconds": 10.0 if terminal else 0.0,
+        "harness_active_seconds": 8.0 if terminal else 0.0,
+        "raw_usage_evidence_hash": _hash("f"),
+        "idempotency_key": f"m2-budget-{entry_type}-api",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _repository() -> Mock:
     repository = Mock(spec=PostgresRepository)
     repository.create_search_round.side_effect = lambda request: _persisted(
@@ -164,3 +215,75 @@ def test_search_round_api_is_declared_in_openapi() -> None:
     assert "/v1/search-rounds/{round_id}/summary" in paths
     assert "/v1/search-rounds/{round_id}/candidates" in paths
     assert "/v1/search-rounds/{round_id}/intake-close" in paths
+    assert "/v1/search-rounds/{round_id}/budget-reservations" in paths
+    assert (
+        "/v1/search-rounds/{round_id}/budget-reservations/"
+        "{reservation_id}/finalize"
+    ) in paths
+
+
+def test_search_round_budget_api_preserves_atomic_pairs() -> None:
+    repository = _repository()
+    round_id = str(uuid4())
+    reservation = _budget_reservation(round_id)
+    reserve_entry = _budget_entry(reservation, "reserve")
+    settle_entry = _budget_entry(reservation, "settle", terminal=True)
+    persisted_reservation = _persisted(reservation)
+    repository.reserve_round_budget.return_value = {
+        "reservation": persisted_reservation,
+        "ledger_entry": reserve_entry,
+    }
+    repository.finalize_round_budget.return_value = {
+        "reservation": {**persisted_reservation, "state": "settled"},
+        "ledger_entry": settle_entry,
+    }
+
+    with TestClient(create_app(repository=repository)) as client:
+        reserved = client.post(
+            f"/v1/search-rounds/{round_id}/budget-reservations",
+            json={"reservation": reservation, "ledger_entry": reserve_entry},
+        )
+        settled = client.post(
+            f"/v1/search-rounds/{round_id}/budget-reservations/"
+            f"{reservation['reservation_id']}/finalize",
+            json={"ledger_entry": settle_entry},
+        )
+
+    assert reserved.status_code == 201
+    assert reserved.json()["reservation"]["state"] == "reserved"
+    assert settled.status_code == 200
+    assert settled.json()["reservation"]["state"] == "settled"
+    repository.reserve_round_budget.assert_called_once()
+    repository.finalize_round_budget.assert_called_once()
+
+
+def test_search_round_budget_api_rejects_path_identity_mismatch() -> None:
+    repository = _repository()
+    reservation = _budget_reservation(str(uuid4()))
+    reserve_entry = _budget_entry(reservation, "reserve")
+
+    with TestClient(create_app(repository=repository)) as client:
+        response = client.post(
+            f"/v1/search-rounds/{uuid4()}/budget-reservations",
+            json={"reservation": reservation, "ledger_entry": reserve_entry},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    repository.reserve_round_budget.assert_not_called()
+
+
+def test_search_round_budget_api_rejects_mismatched_reserve_pair() -> None:
+    repository = _repository()
+    reservation = _budget_reservation(str(uuid4()))
+    reserve_entry = _budget_entry(reservation, "reserve")
+    reserve_entry["reservation_id"] = str(uuid4())
+
+    with TestClient(create_app(repository=repository)) as client:
+        response = client.post(
+            f"/v1/search-rounds/{reservation['round_id']}/budget-reservations",
+            json={"reservation": reservation, "ledger_entry": reserve_entry},
+        )
+
+    assert response.status_code == 422
+    repository.reserve_round_budget.assert_not_called()

@@ -12,6 +12,9 @@ from fastapi.responses import JSONResponse
 
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.m2 import (
+    RoundBudgetFinalizeRequest,
+    RoundBudgetMutationResult,
+    RoundBudgetReserveRequest,
     RoundCandidate,
     RoundCandidateView,
     SearchRound,
@@ -223,6 +226,37 @@ def create_app(
         round_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).close_search_round_intake(round_id)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/budget-reservations",
+        response_model=RoundBudgetMutationResult,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def reserve_search_round_budget(
+        round_id: UUID, payload: RoundBudgetReserveRequest, request: Request
+    ) -> dict[str, Any]:
+        if round_id != payload.reservation.round_id:
+            raise Conflict("path round_id does not match Budget reservation round_id")
+        return repo(request).reserve_round_budget(
+            payload.reservation, payload.ledger_entry
+        )
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/budget-reservations/{reservation_id}/finalize",
+        response_model=RoundBudgetMutationResult,
+    )
+    def finalize_search_round_budget(
+        round_id: UUID,
+        reservation_id: UUID,
+        payload: RoundBudgetFinalizeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        entry = payload.ledger_entry
+        if round_id != entry.round_id:
+            raise Conflict("path round_id does not match Budget ledger round_id")
+        if reservation_id != entry.reservation_id:
+            raise Conflict("path reservation_id does not match Budget ledger reservation_id")
+        return repo(request).finalize_round_budget(entry)
 
     @application.post(
         "/v1/framework-smoke/tasks",
