@@ -1,0 +1,467 @@
+# M2a SearchRound Contract 草案
+
+- 状态：Draft / Non-runnable
+- 依据：[ADR-0009](adr/0009-m2a-round-barrier.md)（Proposed）
+- 适用范围：同一 Hotspot 下 2–4 个人工 Python/Triton startup Overlay Candidate
+- 当前授权：文档、Contract 草案和无 HCU 测试设计
+
+## 1. 权威边界
+
+本草案定义 M2a 的接口形状，不代表这些模型、表、API 或状态已经实现。ADR-0009 未经 A/B/C/D
+评审和项目所有者批准前：
+
+- 不把草案类型加入可创建真实任务的 Adapter Profile；
+- 不创建 M2a Formal Task，不运行 HCU 测量；
+- 不运行 Agent、Apex Generator、Beam Search 或自动调参；
+- 不改变已签核的 M1 v1 Schema、数据或回放语义；
+- 不开放自动安装、Baseline 提升、M3 E2E 或生产发布。
+
+M2a 继续继承 Formal Stage 0 的 `DEGRADED_MANUAL_INTAKE` 模式。人工 Candidate Intake 是能力
+边界的一部分，不得用自动发现结果冒充人工确认的 Hotspot 或源码包。
+
+## 2. 冻结顺序
+
+```text
+Create Round authority
+→ Freeze Search Plan + nonce-sealed Holdout commitment
+→ Intake 2–4 immutable Candidates
+→ Intake Close / candidate_family_hash
+→ Build all members / artifact_family_hash
+→ Correctness terminal states
+→ Search measurements / Search Barrier
+→ If promoted: reveal/verify Holdout Plan, freeze holdout_family_hash and m >= 1
+→ If promoted: Holdout measurements / Holdout Barrier / Bonferroni FWER
+→ If none promoted: no_promotable_candidate, skip Holdout/FWER
+→ RoundEvidenceBundle
+→ If formal: Human Round Signoff
+→ If scripted: synthetic validation / scripted_completed
+```
+
+`candidate_family_hash`、`artifact_family_hash` 和条件性的 `holdout_family_hash` 构成最多
+三个不同时间点的权威：
+
+| Hash | 冻结时间 | 规范化输入 | 回答什么 |
+| --- | --- | --- | --- |
+| Candidate Family | Intake Close | 排序后的 Candidate ID、Source Hash、Hotspot、Replacement Point、意图 | 提交了哪些源码候选 |
+| Artifact Family | 所有 Build 终态 | 排序后的 Candidate + Artifact ID/Hash；失败成员使用终态与失败证据 Hash | 实际生成或拒绝了哪些制品 |
+| Holdout Family | Search Barrier Close 且至少一项晋级 | 排序后的 promoted Candidate、Artifact Hash、`m`、选择规则 Hash | 哪些不可变制品进入最终比较 |
+
+规范化序列使用 UTF-8 JSON、字段名排序、无多余空白、UUID 小写连字符格式和完整
+`sha256:<64-hex>`，然后计算 SHA256。任何失败成员都保留在 Candidate/Artifact Family 中；进入
+Holdout Family 后失败的成员仍计入冻结的 `m`。
+
+## 3. Contract 模型
+
+所有模型继承仓库 `ContractModel`，默认 `extra=forbid`。以下字段名在评审接受前均为草案。
+
+### 3.1 `SearchRound`
+
+轮次级唯一权威，不复用 M1 `manual_candidate` Task 状态机。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `schema_version` | literal `m2a-search-round-v1` | Contract 版本 |
+| `round_id` | UUID | 轮次 ID |
+| `task_id` | UUID | M2a Task；当前一个 Task 只允许一个活动 Round |
+| `state` | RoundState | 只由 A 控制面推进 |
+| `run_mode` | `scripted` 或 `formal` | 决定真假证据和 Signoff 边界 |
+| `project_mode` | `degraded_manual_intake` 或 null | Formal 必须为前者；Scripted 必须为空 |
+| `target_snapshot_id` | UUID | Formal 绑定真实 Target；Scripted 绑定 synthetic fixture snapshot |
+| `stage0_run_id` | UUID | Formal 必须 formal/finalized；Scripted 绑定 synthetic fixture authority |
+| `stage0_protocol_hash` | SHA256 | 绑定真实协议或 synthetic fixture 协议 |
+| `baseline_epoch_id` | UUID | 同一逻辑基线 |
+| `hotspot_id` | UUID | 同一人工业务 Hotspot |
+| `replacement_point` | string | 全家族相同替换点 |
+| `workload_id` / `workload_hash` | string / SHA256 | 冻结业务 Workload |
+| `configuration_hash` | SHA256 | 冻结运行配置 |
+| `image_digest` | SHA256 digest | 禁止 Tag 漂移 |
+| `adapter_profile` | string | Formal 必须是 opt-in Real M2a Profile；Scripted 必须显式 synthetic |
+| `declared_candidate_count` | int 2..4 | Intake Close 必须精确满足 |
+| `max_promoted` | int 1..2 | 且不大于候选数 |
+| `family_alpha` | float 0..1 | 由 D 协议冻结 |
+| `search_plan_hash` | SHA256 | Search 内容承诺 |
+| `holdout_plan_commitment` | SHA256 | Intake 前提交 `SHA256(nonce || canonical_plan)` |
+| `holdout_commitment_scheme` | literal `sha256-nonce-v1` | 禁止普通无盐 Hash |
+| `holdout_plan_hash` | SHA256/null | Search Barrier 后受控揭示并验证成功才写入 |
+| `holdout_reveal_evidence_hash` | SHA256/null | 绑定 commitment、32-byte nonce、Plan URI/Hash、actor 和时间 |
+| `selection_rule_hash` | SHA256 | Search 晋级规则 |
+| `budget` | `RoundBudget` | 声明硬上限 |
+| `candidate_family_hash` | SHA256/null | Intake Close 后只写一次 |
+| `artifact_family_hash` | SHA256/null | Build Barrier 后只写一次 |
+| `holdout_family_hash` | SHA256/null | 有晋级成员时只写一次；零晋级保持 null |
+| `version` | positive int | 乐观并发控制 |
+| `created_at` / `intake_closed_at` | datetime | 审计时间 |
+
+`run_mode=formal` 必须绑定 Formal/finalized Stage0Run、真实 Target/Baseline 和 Real Adapter，且
+继承 `degraded_manual_intake`。`run_mode=scripted` 的 `project_mode` 必须为空，并使用显式
+synthetic Authority/Profile；所有证据必须 `synthetic=true`，不得调用 Formal Signoff。Scripted
+Bundle 递归校验通过后只能由 A 的 Scripted Finalizer 推进到 `scripted_completed`，不得进入
+`awaiting_signoff`、`completed` 或 `rejected`，也不得创建 Signoff Intent/Artifact。两种模式都保持
+`automatic_release_allowed=false`。
+
+若 Search Barrier 没有晋级成员，`holdout_family_hash`、`holdout_plan_hash` 和 reveal evidence
+保持为空，Round 以 `no_promotable_candidate` 跳过 Holdout/FWER；不得构造空 Family 或计算
+`m=0`。
+
+拟议 `RoundState`：
+
+```text
+intake_open | intake_closed | building | correctness
+| search_measuring | search_barrier | holdout_measuring | holdout_barrier
+| awaiting_signoff | scripted_completed | completed | rejected | cancelled
+```
+
+### 3.2 `RoundCandidate`
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `round_candidate_id` | UUID | Round 内成员 ID |
+| `round_id` / `candidate_id` | UUID | 指向 Round 和通用 Candidate |
+| `ordinal` | int 0..3 | 只用于稳定排序，不表示排名 |
+| `source_hash` | SHA256 | Intake 时冻结 |
+| `optimization_intent` | string | 一个清晰假设 |
+| `replacement_point` | string | 必须等于 Round 值 |
+| `track` | literal `triton` | M2a 不开放 HIP/配置混批 |
+| `release_mode` | literal `overlay` | startup Overlay |
+| `candidate_kind` | `business` 或 `fixture` | Formal 只能 business；Scripted 只能 fixture |
+| `artifact_id` / `artifact_hash` | UUID/SHA256/null | Build 成功后绑定 |
+| `terminal_failure_code` | string/null | Build/Correctness/预算失败 |
+| `failure_evidence_hash` | SHA256/null | 失败成员也进入 Artifact Family |
+| `state` | RoundCandidateState | Candidate 在本 Round 的状态 |
+| `idempotency_key` | string | 输入完全相同才可重放 |
+
+同一 Round 禁止重复 `candidate_id`、`source_hash`、`ordinal` 或幂等键。Intake Close 后以上输入
+字段不可更新；Search 开始后 Artifact ID/Hash 也不可替换或重建。
+
+### 3.3 `RoundMeasurementRef`
+
+它只包装 M1 单次比较证据，不复制或修改 `m1-kernel-performance-evidence-v1`。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `round_measurement_ref_id` | UUID | 引用 ID |
+| `round_id` / `candidate_id` | UUID | 成员绑定 |
+| `phase` | `search` 或 `holdout` | 两个 Phase 绝不复用 |
+| `candidate_family_hash` | SHA256 | 绑定 Intake Family |
+| `artifact_family_hash` | SHA256 | 绑定 Build Family |
+| `holdout_family_hash` | SHA256/null | Holdout 必填，Search 必须为空 |
+| `artifact_id` / `artifact_hash` | UUID/SHA256 | 本 Candidate 的冻结制品 |
+| `measurement_id` | UUID | 现有 MeasurementSeries |
+| `evidence_schema_version` | literal `m1-kernel-performance-evidence-v1` | M1 证据只读复用 |
+| `raw_evidence_uri` / `raw_evidence_hash` | URI/SHA256 | 可重读原始主文件 |
+| `measurement_plan_hash` | SHA256 | B Harness 计划 |
+| `phase_plan_hash` | SHA256 | Search 用冻结 Hash；Holdout 用已揭示并验证的 Plan Hash |
+| `holdout_reveal_evidence_hash` | SHA256/null | Holdout 必填，Search 必须为空 |
+| `baseline_sample_set_hash` | SHA256 | 该 Candidate/Phase 自己的同时期 Baseline 身份 |
+| `lease_id` / `resource_id` / `fencing_token` | UUID/UUID/int | 控制面权威资源绑定 |
+| `status` | literal `measured` | 只有完整采集才建立 Ref；B 不写快慢 verdict |
+| `created_at` | datetime | 审计时间 |
+
+`measurement_id`、`raw_evidence_hash` 和 `baseline_sample_set_hash` 在所有 Round/Phase/Candidate
+间唯一，避免复制同一数据后改标签。Holdout 还必须证明其输入、进程、缓存 Namespace 与 Search
+不同。采集、清理或证据生产失败时不创建伪装成完整测量的 Ref，失败证据直接进入
+`BarrierMemberResult`；D 可据此给出 `invalid`，该成员仍保留在冻结家族中。
+
+### 3.4 `RoundBarrierResult`
+
+Barrier 是批级权威，单个 Worker 不能自行宣告关闭。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `barrier_id` | UUID | Barrier ID |
+| `round_id` | UUID | 所属 Round |
+| `phase` | `search` 或 `holdout` | 每轮每 Phase 唯一 |
+| `input_family_hash` | SHA256 | Search 用 Artifact Family；Holdout 用 Holdout Family |
+| `expected_member_count` | int | 冻结成员数 |
+| `members` | list[`BarrierMemberResult`] | 按 Candidate ID 排序的全部终态 |
+| `rule_version` / `rule_hash` | string/SHA256 | 关闭与选择规则 |
+| `promoted_candidate_ids` | UUID list | 仅 Search；最多 `max_promoted` |
+| `outcome` | `members_promoted` / `no_promotable_candidate` / `completed` | 批级关闭结果 |
+| `input_summary_hash` | SHA256 | 全部成员输入摘要 |
+| `closed_by` | authority identity | A/D 权威组件，不是测量 Worker |
+| `closed_at` | datetime | 关闭时间 |
+| `idempotency_key` | string | 并发关闭返回同一对象 |
+
+`BarrierMemberResult` 必须为每个冻结成员保存 Candidate/Artifact、正确性、Measurement Ref 或
+失败证据、预算状态和终态。成员缺失、仍在运行、Family Hash 不符或迟到写回时，Barrier
+保持未关闭并返回稳定错误。
+
+Search Barrier 的 `promoted_candidate_ids=[]` 时 outcome 必须为 `no_promotable_candidate`，
+控制面直接生成失败家族 Evidence；不得创建 Holdout Barrier 或 MultipleComparison。
+
+`phase` 与结果字段使用判别联合约束：Search Barrier 有晋级成员时 `outcome=members_promoted`，
+无晋级成员时 `outcome=no_promotable_candidate`；Holdout Barrier 只能
+`outcome=completed`，且 `promoted_candidate_ids` 必须为空。Search 的
+`expected_member_count` 等于 Artifact Family 成员数，Holdout 的值等于冻结的 `m`。任何
+phase/outcome、成员数或 promoted 列表不一致都拒绝持久化。
+
+### 3.5 `MultipleComparisonResult`
+
+M2a 固定使用 Bonferroni FWER，不允许同轮临时切换 FDR。
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `multiple_comparison_id` | UUID | 批级裁决 ID |
+| `round_id` / `holdout_barrier_id` | UUID | 绑定已关闭 Holdout Barrier |
+| `holdout_family_hash` | SHA256 | 冻结最终比较家族 |
+| `method` | literal `bonferroni_fwer` | 协议方法 |
+| `protocol_version` / `protocol_hash` | string/SHA256 | D 规则 |
+| `family_alpha` | float | Round 冻结值 |
+| `m` | int 1..2 | 冻结 Holdout 成员数，失败后不缩小；禁止 0 |
+| `alpha_candidate` | float | 必须等于 `family_alpha / m` |
+| `candidate_results` | list[`AdjustedCandidateResult`] | 全部 Holdout 成员 |
+| `recommended_candidate_id` | UUID/null | 最多一个推荐；不删除其他 faster |
+| `result_hash` | SHA256 | 规范化结果 Hash |
+| `created_at` | datetime | 审计时间 |
+
+每个 `AdjustedCandidateResult` 保存 Measurement Ref、正确性、adjusted CI、Stage 0 MDE、当前
+Holdout Workload MDE、可信门限和 `faster|slower|inconclusive|invalid`。没有有效区间的失败
+成员仍保留，且仍计入 `m`。
+
+有效证据使用 `confidence = 1 - alpha_candidate` 的确定性 bootstrap。记 adjusted CI 为
+`[lower, upper]`，`threshold=max(Stage 0 MDE, Holdout Workload MDE)`：
+
+```text
+lower > threshold   → faster
+upper < -threshold  → slower
+otherwise           → inconclusive
+invalid bindings / correctness / cleanup / evidence → invalid
+```
+
+### 3.6 `RoundEvidenceBundle`
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `schema_version` | literal `m2a-round-evidence-v1` | Bundle 版本 |
+| `round_evidence_bundle_id` | UUID | Bundle ID |
+| `round_id` / `task_id` | UUID | 权威对象 |
+| `run_mode` | `scripted` 或 `formal` | 绑定真假 Authority |
+| `terminal_reason` | `holdout_completed` 或 `no_promotable_candidate` | 决定最终化路径 |
+| `candidate_family_hash` / `artifact_family_hash` | SHA256 | 始终存在的两个冻结家族 |
+| `holdout_family_hash` | SHA256/null | 仅有晋级成员时存在 |
+| `search_plan_hash` / `holdout_plan_commitment` | SHA256 | Search 计划与预先承诺 |
+| `holdout_plan_hash` / `holdout_reveal_evidence_hash` | SHA256/null | 有晋级成员并完成 reveal 时存在 |
+| `candidate_evidence` | list | 全部赢家、淘汰、失败和 invalid 成员 |
+| `search_barrier_id` | UUID | 始终存在 |
+| `holdout_barrier_id` / `multiple_comparison_id` | UUID/null | 零晋级时必须为空，其余必填 |
+| `budget_ledger_hash` | SHA256 | 声明与实际消耗 |
+| `evidence_index_uri` / `evidence_index_hash` | URI/SHA256 | 跨根递归索引与保留策略 |
+| `summary` | object | 只保存派生摘要，不代替原始证据 |
+| `synthetic` | bool | Scripted 必须 true；Formal 必须 false |
+| `automatic_release_allowed` | literal false | Contract 与 DB 双重强制 |
+| `created_at` | datetime | 审计时间 |
+
+Evidence Index 必须列出每个外部 URI、内容 Hash、类型、生产者、保留责任和可访问性检查结果。
+递归验证任何缺失或 Hash 不一致时 Bundle 为 `invalid`，不能只复制赢家摘要后签核。
+
+`terminal_reason=no_promotable_candidate` 时 Holdout Family/Plan reveal、Holdout Barrier 和 FWER
+引用必须全部为空；其他 Candidate、Search、失败、预算与清理证据仍必须完整。
+`terminal_reason=holdout_completed` 时这四类引用必须全部非空。`run_mode=scripted` 与
+`synthetic=true`、`run_mode=formal` 与 `synthetic=false` 也是不可分割的判别联合，不能只在
+API 层检查。
+
+### 3.7 `RoundSignoffIntent` 与 `RoundSignoff`
+
+Signoff 不是一次“写数据库再尽力写文件”的操作。首先创建 durable Intent：
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `signoff_intent_id` / `round_signoff_id` | UUID | 由幂等输入确定性生成 |
+| `round_id` / `round_evidence_bundle_id` | UUID | 锁定最终 Formal Evidence |
+| `decision` / `actor` / `reason` | string | 人工输入 |
+| `decision_at` | datetime | 首次 Intent 事务固定，重放不改变 |
+| `input_digest` | SHA256 | 覆盖全部签核输入 |
+| `idempotency_key` | string | 完全相同输入重放 |
+| `state` | `preparing` / `artifact_published` / `finalized` / `failed` | Reconcile 权威 |
+
+Intent 创建事务同时写 outbox，但不推进 Round 终态。Publisher 使用 Intent 中固定的 Signoff ID
+和 `decision_at` 生成规范化 `signoff-decision.json`，经临时文件和原子 rename 发布到内容寻址
+存储；相同输入重复发布得到相同 Hash。Finalizer 在新事务中重新读取 Artifact、复算 Hash、
+锁定 Intent/Round 并写最终 `RoundSignoff`、审计事件和终态。任何崩溃点由 Reconcile 按 Intent
+状态重放；孤儿 Artifact 可复用但不能单独证明签核完成。
+
+最终 `RoundSignoff` 字段：
+
+| 字段 | 类型/约束 | 说明 |
+| --- | --- | --- |
+| `round_signoff_id` | UUID | 签核 ID |
+| `round_id` | UUID | 每轮唯一 |
+| `round_evidence_bundle_id` | UUID | 必须是该 Round 最终 Bundle |
+| `decision` | `approved` 或 `rejected` | 人工决定 |
+| `actor` / `reason` | string | 审计信息 |
+| `idempotency_key` | string | 完全相同输入重放 |
+| `decision_artifact_uri` / `decision_artifact_hash` | URI/SHA256 | 内容寻址 `signoff-decision.json` |
+| `created_at` | datetime | 审计时间 |
+
+`signoff-decision.json` 规范化保存 Round、EvidenceBundle、适用的 Family Hash、decision、
+actor、reason、idempotency key 和 Intent 固定时间。数据库行与 Artifact 必须互相引用且 Hash
+一致。只有 `run_mode=formal`、`synthetic=false`、Artifact 可读且 Hash 复核通过才能 Finalize；
+批准仍保持 `automatic_release_allowed=false`，不修改 Baseline Epoch。
+
+## 4. Budget Contract
+
+`RoundBudget` 至少声明：
+
+```text
+max_candidates
+max_build_attempts
+max_correctness_attempts
+max_search_samples
+max_holdout_samples
+max_wall_seconds
+max_exclusive_lease_seconds
+```
+
+每个 Job Attempt 先创建 `RoundBudgetReservation`：`reservation_id`、Round/Job/Attempt、Candidate、
+Phase、各 charge kind 的 planned amount 和状态。`RoundBudgetLedgerEntry` 是追加写事件，包含
+`reservation_id`、`entry_type=reserve|settle|release`、reserved/actual amount、Lease 持有时间、
+Harness 有效时间、原始使用证据 Hash 和事件自己的幂等键。
+
+- `reserve`：排队前锁定 Round，按当前 reserved + consumed 原子检查并占用预算；
+- `settle`：Job 已执行后写入实际消耗并释放未使用的 reservation；
+- `release`：仅用于尚未执行的取消，或 Reconcile 确认不可能执行的 reservation；
+- 同一 reservation 的 `settle` 与 `release` 互斥；迟到 settle、重复 event 或跨 Attempt 引用被拒绝；
+- Job 重试创建新的 Attempt 和 reservation，不复用上一次收费身份。
+
+超预算保留 `budget_exhausted` 证据，不缩减已冻结的正式采样计划。即使清理使实际 Lease 时间
+超过预留，也如实 settle，并阻止后续 Job；不得截断证据来伪装未超预算。
+
+硬预算使用 Lease 持有时间，Harness 有效时间同时记录供效率分析。该选择仍待 ADR 评审确认。
+
+## 5. 持久化草案
+
+迁移文件编号和文件名在 ADR Accepted 后按仓库当时的真实迁移序列分配；本草案不预占或猜测
+编号。拟新增表和关键约束如下：
+
+| 表 | 关键唯一/不可变约束 |
+| --- | --- |
+| `search_rounds` | `round_id`；一个 Task 一个活动 Round；Candidate/Artifact Hash 只写一次，Holdout Hash 仅晋级时写一次 |
+| `round_candidates` | unique `(round_id,candidate_id)`、`(round_id,ordinal)`、`(round_id,source_hash)`、`idempotency_key` |
+| `round_plans` | unique `(round_id,phase)`；Holdout 预先只公开 nonce commitment，内容/nonce 对非 D 角色不可读 |
+| `round_measurements` | unique `(round_id,candidate_id,phase)`、`measurement_id`、`raw_evidence_hash`、`baseline_sample_set_hash` |
+| `round_barriers` | unique `(round_id,phase)`、`idempotency_key`；关闭后不可修改成员 |
+| `multiple_comparison_results` | unique `round_id`、`holdout_barrier_id`、`result_hash` |
+| `round_budget_reservations` | unique `(job_id,attempt)` 和 `reservation_id`；状态转换检查约束只允许一个终态 |
+| `round_budget_ledger` | append-only；unique `(reservation_id,entry_type)`、`(round_id,idempotency_key)`，并以 partial unique `reservation_id WHERE entry_type IN ('settle','release')` 强制二选一 |
+| `round_evidence_bundles` | unique `round_id`、`evidence_index_hash`；Scripted 强制 synthetic=true，Formal 强制 false，automatic release 始终 false |
+| `round_signoff_intents` | unique `round_id`、`idempotency_key`、`input_digest`；保存确定性 ID、固定输入和 Intent 状态 |
+| `outbox_events` | unique `(aggregate_type,aggregate_id,event_type)`；引用 Signoff Intent，保存 payload Hash、发布状态和重试信息 |
+| `round_signoffs` | unique `round_id`、`idempotency_key`、`decision_artifact_hash`；只接受 finalized Intent |
+
+必须使用 PostgreSQL 集成测试验证 Barrier、Budget、Intake Close、Signoff 并发和 Outbox
+Reconcile；SQLite 单测不能替代 `SELECT ... FOR UPDATE`、partial unique index、互斥终态或
+事务冲突语义。
+
+旧 M1 表不迁移、不 UPDATE、不复用 `manual_candidate_signoffs`。通用 Candidate、Artifact、
+Measurement 可通过外键被 Round 引用，但其既有行保持不可变。
+
+## 6. API 草案
+
+面向操作者：
+
+| Method | Path | 作用 |
+| --- | --- | --- |
+| POST | `/v1/search-rounds` | 按 `run_mode` 创建 synthetic Scripted 或绑定 Formal Stage 0 的 Round |
+| GET | `/v1/search-rounds/{round_id}` | 读取 Round 权威与服务身份 |
+| GET | `/v1/search-rounds/{round_id}/summary` | 读取成员、Job、Barrier、Budget、Evidence、Signoff |
+| POST | `/v1/search-rounds/{round_id}/candidates` | 仅 Intake Open 时登记人工 Candidate |
+| POST | `/v1/search-rounds/{round_id}/intake-close` | 原子关闭 Intake 并冻结 Candidate Family |
+| POST | `/v1/search-rounds/{round_id}/cancel` | 停止排新 Job，保留已有证据并执行清理 |
+| POST | `/v1/search-rounds/{round_id}/signoff` | 仅 Formal：创建/重放 durable Signoff Intent；不提前推进终态 |
+
+面向权威组件，不提供给 Candidate Generator：
+
+| Method | Path | 调用者 |
+| --- | --- | --- |
+| POST | `/v1/search-rounds/{round_id}/artifact-family:freeze` | A/C Build 汇总器 |
+| POST | `/v1/search-rounds/{round_id}/barriers/search:close` | A + D Search 权威 |
+| POST | `/v1/search-rounds/{round_id}/holdout-plan:reveal` | D 授权揭示并验证 nonce commitment |
+| POST | `/v1/search-rounds/{round_id}/barriers/holdout:close` | A + D Holdout 权威 |
+| POST | `/v1/search-rounds/{round_id}/multiple-comparison` | D FWER 组件 |
+| POST | `/v1/search-rounds/{round_id}/evidence-bundles` | D Round Evidence 组件 |
+| POST | `/v1/search-rounds/{round_id}/scripted:finalize` | A Scripted Finalizer；只接受 synthetic Bundle，不创建 Signoff |
+| POST | `/v1/search-rounds/{round_id}/signoff:finalize` | A Signoff Finalizer；只接受已发布且复核的 Artifact |
+
+是否保留这些内部 HTTP 路径由实现评审决定；即使改为 Repository 方法，调用权限和幂等语义
+不变。Worker 仍通过通用 Claim/Complete/Fail API 提交原始 Job 结果，不能直接推进 Round、
+关闭 Barrier、写 FWER 或 Signoff。
+
+所有可写响应必须返回服务 `source_commit`、`contract_version`、`adapter_profile` 和 Round
+`version`；客户端在下一次写入前核对，避免把旧端口实例当成当前 Contract。
+
+## 7. 稳定错误码草案
+
+| HTTP | code | 条件 | retryable |
+| ---: | --- | --- | --- |
+| 409 | `m2a_not_approved` | ADR/Profile/项目授权尚未开放 | false |
+| 409 | `project_mode_not_allowed` | 不是允许的 Formal Stage 0 模式 | false |
+| 409 | `round_intake_closed` | 关闭后新增或替换 Candidate | false |
+| 409 | `round_candidate_count_mismatch` | Intake Close 时不是声明的 2–4 个 | false |
+| 409 | `round_family_hash_mismatch` | Candidate Family 绑定漂移 | false |
+| 409 | `artifact_family_hash_mismatch` | Artifact/失败家族漂移 | false |
+| 409 | `holdout_family_hash_mismatch` | 晋级族或 `m` 漂移 | false |
+| 409 | `holdout_commitment_mismatch` | 揭示的 nonce/Plan 不能重建预先 commitment | false |
+| 409 | `holdout_plan_not_revealed` | Holdout 测量前尚未完成受控揭示 | true |
+| 409 | `round_artifact_frozen` | Search 后尝试重建或换 Artifact | false |
+| 409 | `round_barrier_not_ready` | 仍有成员未到终态或证据缺失 | true |
+| 409 | `round_barrier_already_closed` | 不同输入重复关闭 | false |
+| 409 | `phase_evidence_reused` | Search/Holdout Measurement、URI 或 Hash 复用 | false |
+| 409 | `baseline_sample_reused` | 跨 Candidate/Phase 复用同时期 Baseline | false |
+| 403 | `holdout_plan_forbidden` | 未授权角色读取 Holdout 内容 | false |
+| 409 | `round_budget_exhausted` | 声明预算不足以排下一 Job | false |
+| 409 | `round_signoff_evidence_mismatch` | Signoff 未绑定最终 Round Evidence | false |
+| 409 | `round_signoff_artifact_unavailable` | Finalizer 无法重读或重哈希 Signoff Artifact | true |
+| 409 | `synthetic_round_not_signable` | Scripted/synthetic Round 调用 Formal Signoff | false |
+| 409 | `service_identity_mismatch` | 客户端期望 Commit/Contract 与服务不一致 | false |
+
+已有 `stale_claim_token`、`stale_fencing_token`、`target_not_ready`、`adapter_unavailable` 继续
+复用。通用 `conflict` 只作为未知兼容兜底；上述可预期控制流错误必须返回稳定 code，不能让
+客户端解析英文 message。
+
+## 8. Contract 测试清单
+
+### 无数据库
+
+- 所有模型拒绝 extra field、错误 Hash、错误 UUID、Candidate 数越界和非 Overlay/HIP 输入；
+- Candidate/Artifact 及适用的 Holdout Family Hash 对排序无关，但对字节、成员、失败证据或 `m` 变化敏感；
+- Barrier 拒绝 phase/outcome、成员数和 promoted 列表的非法组合；
+- Formal 只接受 business Candidate，Scripted 只接受 fixture Candidate；
+- Holdout `RoundMeasurementRef` 缺 `holdout_family_hash` 时失败；Search 带该字段时失败；
+- nonce/Plan 不能重建 commitment、普通无盐 Hash 或未 reveal 的 Holdout Measurement 被拒绝；
+- Bonferroni `m=0`、`alpha_candidate != family_alpha/m`、缺少失败成员或缩小 `m` 时失败；
+- 调整后 CI 对称产生 faster/slower/inconclusive，证据无效才产生 invalid；
+- 零晋级 Bundle 必须缺 Holdout/FWER 引用，普通 Bundle 缺任一引用时失败；
+- Scripted Bundle 必须 synthetic，Formal Bundle 必须 non-synthetic；Synthetic Signoff 被拒绝，
+  Scripted 只能进入 `scripted_completed`；
+- M1 v1 已签核 Fixture 逐字节回放通过，M2 模型不修改解析结果。
+
+### PostgreSQL
+
+- 两个请求并发 Intake Close 只生成一个 Candidate Family；
+- 两个组件并发 Close Barrier 只生成一个逻辑 Barrier；
+- 迟到 Worker、旧 Claim/Fencing Token 和关闭后 Candidate 写入均被拒绝；
+- Budget reserve/settle/release 事件幂等；并发 settle/release 只能一个提交成功，失败重试不重复收费；
+- Search/Holdout Measurement 和 Baseline Sample Set 的唯一约束不可绕过；
+- Signoff 在 Intent 后、Artifact 发布后、Finalize 前各点故障均可 Reconcile；终态前 Artifact 必须可读且 Hash 一致；
+- 从现有迁移升级后，已签核 M1 Task/Evidence/Signoff 内容和回放结果不变。
+
+### Scripted Round
+
+2–4 个 Fixture 覆盖 known faster、slower、inconclusive、invalid、零晋级、Build 失败、
+Correctness 失败和预算耗尽。Fixture 只能验证控制流/算法，必须标记 synthetic，Formal
+Signoff API 必须拒绝它。
+
+## 9. A/B/C/D Review 签字表
+
+ADR-0009 仍为 Proposed；下表默认未签署，不能用 PR 合入或 CI 绿灯代替 Owner 决定。
+
+| Review | 必须确认的内容 | 状态 | Reviewer / 日期 |
+| --- | --- | --- | --- |
+| A 控制面 | 状态、事务、幂等、Budget、Barrier、服务身份和 Signoff | Pending | — |
+| B 测量 | 唯一 Harness、Phase 隔离、同时期 Baseline、Lease 消耗和清理证据 | Pending | — |
+| C 构建 | 人工 Intake、Candidate/Artifact 与条件性 Holdout Family Hash、Worktree、Artifact 冻结和失败证据 | Pending | — |
+| D 判定 | Plan 隔离、晋级规则、Bonferroni、失败计入 `m` 和 Round Evidence | Pending | — |
+| 项目所有者 | 只批准 M2a 代码实现，或另行批准一次 Formal HCU 窗口 | Pending | — |
+
+只有 A/B/C/D 对 Contract 签署且项目所有者明确批准后，ADR 才能从 Proposed 进入 Accepted。
+“批准 M2a 代码实现”与“批准 M2a Formal HCU 运行”必须分成两个决定。

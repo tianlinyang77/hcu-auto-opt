@@ -3,7 +3,7 @@
 `m1-kernel-correctness-v1` 是 M1 单候选链路的 D-owned 只读协议。它不运行新的计时器，
 也不接受 Producer 提交的 `passed`、`speedup` 或其他汇总结论。
 
-当前 PR 提供不依赖 HCU 的核心能力：
+当前实现提供以下核心能力：
 
 - 冻结 Hotspot 的 Shape、Dtype、参考实现 Hash、随机种子、特殊值、重复预算和显式容差；
 - 在可信根目录内重新打开并校验 SourceSnapshot、Artifact、进程、缓存、stdout 和规范化输出；
@@ -20,6 +20,10 @@
 - 原子发布 `correctness.json`、`performance.json`、`evidence-bundle.json`、`signoff.md`
   和 `sha256sums.json`。
 
+这里的 `signoff.md` 是 D 生成的待人工审阅摘要，不是人工决定。人工批准或拒绝的权威记录
+来自 Signoff API、PostgreSQL 审计行和 `manual_candidate_signoff_recorded` 事件。M2a 提案
+将另外生成内容寻址的 `signoff-decision.json`，但不得回写或重命名已签核的 M1 文件。
+
 正确性不是 `correct` 时，性能裁决固定为 `invalid` 且不产生快慢结论。所有报告都固定
 `automatic_release_allowed=false`，人工批准也只表示接受证据。
 
@@ -28,6 +32,7 @@
 取得 shared/exclusive 两次租约权威信息，重新读取正确性、Verification Artifact 和 B 的
 MeasurementSeries 后才写 verdict。`invalid` 同样生成完整 EvaluationRun 和 EvidenceBundle。
 
-默认 Catalog 仍不注册真实 M1 Profile。业务 Hotspot 冻结后，必须补齐对应的 Correctness
-Evidence Producer 和 C→B `M1WorkloadFactory`，再运行 nmz36 Target Lock 闭环；Scripted
-夹具不能作为真实候选结论。
+默认 Catalog 仍不注册真实 M1 Profile。首个业务 Hotspot 已通过部署方显式组合的
+Correctness Evidence Producer 和 C→B `M1WorkloadFactory` 完成 nmz36 Target Lock Formal
+闭环及人工签核；Scripted 夹具仍不能作为真实候选结论。签核操作边界见
+[M1 人工签核 Runbook](m1-signoff-runbook.md)。

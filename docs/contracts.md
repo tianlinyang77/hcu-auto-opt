@@ -22,6 +22,22 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | ResourceLease | A/B | Worker | 携带 fencing_token；过期后不能写回 |
 | ExperimentEvidence | A/D | Registry/KB | 区分事实、复验知识和 Agent 推测 |
 
+## M1 签核后的兼容边界
+
+2026-08-26，首份真实 `manual_candidate` EvidenceBundle 已完成人工签核。根据 ADR-0006，以下
+接口从此按“可继续读取和重放”的兼容边界管理：
+
+- `m1-kernel-performance-evidence-v1` 的字段、单位、ABBA acquisition 和 Producer 不写
+  verdict 的语义；
+- `MeasurementSeries` 到 M1 原始证据 URI/Hash 的绑定；
+- M1 Correctness、EvaluationRun、EvidenceBundle 和单 Candidate Signoff 的既有语义；
+- `manual_candidate` 的一个 Task 只能登记一个逻辑 Candidate 的约束。
+
+M2 不在这些 v1 对象中追加 Search、Holdout、候选族或多重比较字段，而是用新对象引用既有
+单次比较证据。需要不兼容变化时必须发布新 Schema 版本，保留旧版本解析器、迁移策略和 M1
+签核证据回放测试。M2a 的 Proposed 契约见 [M2 Contract 草案](m2-contract-draft.md)；它在
+ADR-0009 Accepted 前不属于可运行 Contract。
+
 ## Candidate 最小字段
 
 ```yaml
