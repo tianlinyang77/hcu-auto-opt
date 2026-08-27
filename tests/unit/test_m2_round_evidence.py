@@ -11,6 +11,7 @@ import pytest
 from hcuopt.contracts.m2 import RoundBudget, SearchRound
 from hcuopt.domain.enums import RoundCandidateState, RoundTerminalReason, SearchRoundState
 from hcuopt.evaluation.m2_authority import SyntheticHoldoutPlanAuthority
+from hcuopt.evaluation.m2_finalizer import M2ScriptedRoundFinalizer
 from hcuopt.evaluation.m2_models import (
     BarrierMemberResult,
     MultipleComparisonResult,
@@ -543,3 +544,31 @@ def test_search_baseline_or_fwer_identity_change_is_invalid() -> None:
             multiple_comparison=changed_multiple,
         )
     assert fwer_mismatch.value.code == "holdout_evidence_binding_mismatch"
+
+
+def test_scripted_finalizer_rebuilds_bundle_and_rejects_substitution() -> None:
+    scenario = _zero_scenario()
+    published = _publish_index(scenario)
+    bundle = _build(scenario, published)
+    finalizer = M2ScriptedRoundFinalizer(scenario.store)
+
+    finalizer.verify(
+        round_authority=scenario.round_authority,
+        search_decision=scenario.search_decision,
+        evidence_bundle=bundle,
+        holdout_barrier=None,
+        multiple_comparison=None,
+    )
+
+    changed = bundle.model_copy(
+        update={"summary": {**bundle.summary, "candidate_count": 999}}
+    )
+    with pytest.raises(M2RoundEvidenceError) as mismatch:
+        finalizer.verify(
+            round_authority=scenario.round_authority,
+            search_decision=scenario.search_decision,
+            evidence_bundle=changed,
+            holdout_barrier=None,
+            multiple_comparison=None,
+        )
+    assert mismatch.value.code == "round_evidence_bundle_mismatch"

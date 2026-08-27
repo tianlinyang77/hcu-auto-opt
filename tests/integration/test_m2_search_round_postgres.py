@@ -3,7 +3,7 @@
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,8 +18,28 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     SearchRound,
 )
+from hcuopt.domain.enums import RoundCandidateState, SearchRoundState
 from hcuopt.domain.errors import Conflict
-from hcuopt.orchestrator.search_round import artifact_family_hash
+from hcuopt.evaluation.m2_authority import SyntheticHoldoutPlanAuthority
+from hcuopt.evaluation.m2_finalizer import M2ScriptedRoundFinalizer
+from hcuopt.evaluation.m2_models import BarrierMemberResult
+from hcuopt.evaluation.m2_statistics import (
+    ScriptedCandidateStatisticsInput,
+    SearchBarrierDecision,
+    bonferroni_fwer,
+    close_scripted_holdout_barrier,
+    close_scripted_search_barrier,
+)
+from hcuopt.evaluation.m2_verifier import (
+    SyntheticEvidenceStore,
+    build_scripted_round_evidence,
+    publish_scripted_evidence_index,
+    scripted_round_evidence_requirements,
+)
+from hcuopt.orchestrator.search_round import (
+    artifact_family_hash,
+    round_budget_ledger_document,
+)
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -320,6 +340,152 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         self.connection.commit()
         return artifact_id
 
+    @staticmethod
+    def _round_authority(row: dict) -> SearchRound:
+        return SearchRound.model_validate(
+            {name: row[name] for name in SearchRound.model_fields}
+        )
+
+    @staticmethod
+    def _publish(store: SyntheticEvidenceStore, label: str):
+        return store.publish({"label": label, "synthetic": True})
+
+    def _prepare_scripted_evaluation(
+        self,
+        *,
+        promote: bool,
+    ) -> tuple[
+        SyntheticEvidenceStore,
+        SyntheticHoldoutPlanAuthority,
+        SearchRound,
+        tuple[BarrierMemberResult, ...],
+        SearchBarrierDecision,
+    ]:
+        now = datetime.now(timezone.utc)
+        store = SyntheticEvidenceStore()
+        holdout_authority = SyntheticHoldoutPlanAuthority(
+            authority_id=f"m2-scripted-holdout-{uuid4()}",
+            authority_version="1.0.0",
+        )
+        plan = {
+            "protocol_version": "m2-scripted-holdout-v1",
+            "cases": [{"shape": [1, 2048], "dtype": "float16", "seed": 20260827}],
+        }
+        request_id = uuid4()
+        commitment = holdout_authority.commit_plan(
+            round_id=request_id,
+            plan=plan,
+            nonce=bytes(range(32)),
+            created_at=now,
+        )
+        request = self._round(
+            round_id=request_id,
+            task_id=uuid4(),
+            idempotency_key=f"m2-scripted-finalizer-{request_id}",
+            search_plan_hash=self._publish(store, f"search-plan-{request_id}").sha256,
+            holdout_plan_commitment=commitment.commitment,
+            holdout_plan_authority_id=holdout_authority.authority_id,
+            holdout_plan_authority_hash=holdout_authority.authority_hash,
+            selection_rule_hash=self._publish(
+                store, f"selection-rule-{request_id}"
+            ).sha256,
+        )
+        self.repository.create_search_round(request)
+        candidates = tuple(
+            self._candidate(
+                request.round_id,
+                ordinal,
+                idempotency_key=f"m2-finalizer-candidate-{request_id}-{ordinal}",
+            )
+            for ordinal in range(2)
+        )
+        for candidate in candidates:
+            self.repository.add_round_candidate(candidate)
+        closed = self.repository.close_search_round_intake(request.round_id)
+
+        search_members: list[BarrierMemberResult] = []
+        statistics: list[ScriptedCandidateStatisticsInput] = []
+        for ordinal, candidate in enumerate(candidates):
+            artifact = self._publish(store, f"artifact-{request_id}-{ordinal}")
+            artifact_id = self._record_synthetic_artifact(
+                request.task_id,
+                candidate.candidate_id,
+                artifact.sha256,
+            )
+            self.repository.record_round_candidate_build(
+                RoundCandidateBuildTerminal(
+                    round_id=request.round_id,
+                    round_candidate_id=candidate.round_candidate_id,
+                    candidate_id=candidate.candidate_id,
+                    state="built",
+                    artifact_id=artifact_id,
+                    artifact_hash=artifact.sha256,
+                )
+            )
+            correctness = self._publish(
+                store, f"correctness-search-{request_id}-{ordinal}"
+            )
+            member = BarrierMemberResult(
+                round_candidate_id=candidate.round_candidate_id,
+                candidate_id=candidate.candidate_id,
+                candidate_state=RoundCandidateState.SEARCH_MEASURED,
+                artifact_id=artifact_id,
+                artifact_hash=artifact.sha256,
+                correctness_evidence_hash=correctness.sha256,
+                scripted_phase_receipt_id=uuid4(),
+                budget_usage_evidence_hash=self._publish(
+                    store, f"budget-search-{request_id}-{ordinal}"
+                ).sha256,
+                cleanup_evidence_hash=self._publish(
+                    store, f"cleanup-search-{request_id}-{ordinal}"
+                ).sha256,
+                synthetic=True,
+            )
+            search_members.append(member)
+            effect = 0.15 + ordinal * 0.02 if promote else -0.10 - ordinal * 0.02
+            statistics.append(
+                ScriptedCandidateStatisticsInput(
+                    candidate_id=candidate.candidate_id,
+                    scripted_phase_receipt_id=member.scripted_phase_receipt_id,
+                    correctness_evidence_hash=correctness.sha256,
+                    raw_evidence_hash=self._publish(
+                        store, f"raw-search-{request_id}-{ordinal}"
+                    ).sha256,
+                    baseline_sample_set_hash=self._publish(
+                        store, f"baseline-search-{request_id}-{ordinal}"
+                    ).sha256,
+                    restart_effects=(effect,) * 4,
+                    baseline_restart_means_ns=(100.0,) * 4,
+                    stage0_mde_ratio=0.03,
+                )
+            )
+
+        frozen_summary = self.repository.search_round_summary(request.round_id)
+        artifact_hash = artifact_family_hash(
+            frozen_summary["round"], frozen_summary["candidates"]
+        )
+        self.repository.freeze_search_round_artifact_family(
+            ArtifactFamilyFreezeRequest(
+                round_id=request.round_id,
+                candidate_family_hash=closed["candidate_family_hash"],
+                expected_artifact_family_hash=artifact_hash,
+            )
+        )
+        search_row = self.repository.get_search_round(request.round_id)
+        search_authority = self._round_authority(search_row).model_copy(
+            update={"state": SearchRoundState.SEARCH_BARRIER}
+        )
+        decision = close_scripted_search_barrier(
+            round_authority=search_authority,
+            expected_candidate_ids=(item.candidate_id for item in search_members),
+            members=tuple(search_members),
+            statistics=tuple(statistics),
+            closed_by="m2-scripted-evaluation-authority",
+            closed_at=now,
+            idempotency_key=f"m2-search-barrier-{request_id}",
+        )
+        return store, holdout_authority, request, tuple(search_members), decision
+
     def test_round_create_is_idempotent_and_rejects_different_inputs(self) -> None:
         request = self._round()
         first = self.repository.create_search_round(request)
@@ -564,3 +730,210 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
             counts = dict(cursor.fetchall())
         self.assertEqual(counts["m2_round_candidate_build_terminal"], 2)
         self.assertEqual(counts["m2_round_artifact_family_frozen"], 1)
+
+    def test_scripted_round_zero_and_holdout_paths_finalize_atomically(self) -> None:
+        for promote in (False, True):
+            with self.subTest(promote=promote):
+                store, holdout_authority, request, search_members, decision = (
+                    self._prepare_scripted_evaluation(promote=promote)
+                )
+                self.repository = PostgresRepository(
+                    DATABASE_URL,
+                    m2_scripted_finalizer=M2ScriptedRoundFinalizer(store),
+                )
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    closed = list(
+                        pool.map(
+                            lambda _, value=decision: (
+                                self.repository.close_scripted_search_barrier(value)
+                            ),
+                            range(2),
+                        )
+                    )
+                self.assertEqual(closed[0]["state"], "search_barrier")
+                self.assertEqual(closed[0]["version"], closed[1]["version"])
+
+                holdout_barrier = None
+                multiple_comparison = None
+                if promote:
+                    round_authority = self._round_authority(closed[0])
+                    reveal_lease_id = uuid4()
+                    execution_lease_id = uuid4()
+                    now = datetime.now(timezone.utc)
+                    holdout_authority.issue_reveal_lease(
+                        round_authority=round_authority,
+                        authorized_worker_id="m2-scripted-measurement-worker",
+                        execution_lease_id=execution_lease_id,
+                        resource_id="scripted-resource",
+                        fencing_token=9,
+                        issued_at=now,
+                        expires_at=now + timedelta(minutes=5),
+                        reveal_lease_id=reveal_lease_id,
+                    )
+                    reveal = holdout_authority.reveal(
+                        reveal_lease_id=reveal_lease_id,
+                        round_id=request.round_id,
+                        authorized_worker_id="m2-scripted-measurement-worker",
+                        execution_lease_id=execution_lease_id,
+                        resource_id="scripted-resource",
+                        fencing_token=9,
+                        revealed_at=now,
+                    )
+                    self.assertEqual(
+                        store.publish_bytes(reveal.canonical_plan_json.encode()).sha256,
+                        reveal.plan_hash,
+                    )
+                    self.assertEqual(
+                        store.publish(reveal.evidence_payload()).sha256,
+                        reveal.reveal_evidence_hash,
+                    )
+                    revealed = self.repository.record_scripted_holdout_reveal(reveal)
+                    self.assertEqual(revealed["state"], "holdout_measuring")
+                    holdout_authority_row = self._round_authority(revealed).model_copy(
+                        update={"state": SearchRoundState.HOLDOUT_BARRIER}
+                    )
+                    search_by_id = {item.candidate_id: item for item in search_members}
+                    holdout_members: list[BarrierMemberResult] = []
+                    holdout_statistics: list[ScriptedCandidateStatisticsInput] = []
+                    for ordinal, candidate_id in enumerate(
+                        decision.barrier.promoted_candidate_ids
+                    ):
+                        search_member = search_by_id[candidate_id]
+                        member = BarrierMemberResult(
+                            round_candidate_id=search_member.round_candidate_id,
+                            candidate_id=candidate_id,
+                            candidate_state=RoundCandidateState.HOLDOUT_MEASURED,
+                            artifact_id=search_member.artifact_id,
+                            artifact_hash=search_member.artifact_hash,
+                            correctness_evidence_hash=(
+                                search_member.correctness_evidence_hash
+                            ),
+                            scripted_phase_receipt_id=uuid4(),
+                            budget_usage_evidence_hash=self._publish(
+                                store,
+                                f"budget-holdout-{request.round_id}-{ordinal}",
+                            ).sha256,
+                            cleanup_evidence_hash=self._publish(
+                                store,
+                                f"cleanup-holdout-{request.round_id}-{ordinal}",
+                            ).sha256,
+                            synthetic=True,
+                        )
+                        holdout_members.append(member)
+                        holdout_statistics.append(
+                            ScriptedCandidateStatisticsInput(
+                                candidate_id=candidate_id,
+                                scripted_phase_receipt_id=(
+                                    member.scripted_phase_receipt_id
+                                ),
+                                correctness_evidence_hash=(
+                                    member.correctness_evidence_hash
+                                ),
+                                raw_evidence_hash=self._publish(
+                                    store,
+                                    f"raw-holdout-{request.round_id}-{ordinal}",
+                                ).sha256,
+                                baseline_sample_set_hash=self._publish(
+                                    store,
+                                    f"baseline-holdout-{request.round_id}-{ordinal}",
+                                ).sha256,
+                                restart_effects=(0.20 + ordinal * 0.02,) * 4,
+                                baseline_restart_means_ns=(100.0,) * 4,
+                                stage0_mde_ratio=0.03,
+                            )
+                        )
+                    holdout_barrier = close_scripted_holdout_barrier(
+                        round_authority=holdout_authority_row,
+                        expected_candidate_ids=decision.barrier.promoted_candidate_ids,
+                        members=tuple(holdout_members),
+                        closed_by="m2-scripted-evaluation-authority",
+                        closed_at=now,
+                        idempotency_key=f"m2-holdout-barrier-{request.round_id}",
+                    )
+                    held = self.repository.close_scripted_holdout_barrier(
+                        holdout_barrier
+                    )
+                    self.assertEqual(held["state"], "holdout_barrier")
+                    multiple_comparison = bonferroni_fwer(
+                        round_authority=self._round_authority(held),
+                        holdout_barrier=holdout_barrier,
+                        statistics=tuple(holdout_statistics),
+                        created_at=now,
+                    )
+                    replayed = self.repository.record_scripted_multiple_comparison(
+                        multiple_comparison
+                    )
+                    self.assertEqual(
+                        replayed.result_hash, multiple_comparison.result_hash
+                    )
+
+                summary = self.repository.search_round_summary(request.round_id)
+                budget_document = round_budget_ledger_document(
+                    request.round_id,
+                    summary["budget_reservations"],
+                    summary["budget_ledger"],
+                )
+                budget_artifact = store.publish(budget_document)
+                authority = self._round_authority(summary["round"])
+                requirements = scripted_round_evidence_requirements(
+                    round_authority=authority,
+                    search_decision=decision,
+                    budget_ledger_hash=budget_artifact.sha256,
+                    holdout_barrier=holdout_barrier,
+                    multiple_comparison=multiple_comparison,
+                )
+                published = publish_scripted_evidence_index(
+                    store=store,
+                    round_id=request.round_id,
+                    requirements=requirements,
+                    producer="m2-scripted-evaluation-authority",
+                    retention_owner="m2-postgres-integration",
+                    created_at=datetime.now(timezone.utc),
+                )
+                bundle = build_scripted_round_evidence(
+                    round_authority=authority,
+                    search_decision=decision,
+                    budget_ledger_hash=budget_artifact.sha256,
+                    evidence_index_uri=published.artifact.uri,
+                    evidence_index_hash=published.artifact.sha256,
+                    evidence_reader=store,
+                    holdout_barrier=holdout_barrier,
+                    multiple_comparison=multiple_comparison,
+                )
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    terminal = list(
+                        pool.map(
+                            lambda _, value=bundle: (
+                                self.repository.finalize_scripted_search_round(value)
+                            ),
+                            range(2),
+                        )
+                    )
+                self.assertEqual(terminal[0]["state"], "scripted_completed")
+                self.assertEqual(terminal[0]["version"], terminal[1]["version"])
+                final_summary = self.repository.search_round_summary(request.round_id)
+                self.assertIsNotNone(final_summary["evidence_bundle"])
+                self.assertFalse(final_summary["automatic_release_allowed"])
+                with self.connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT event_type, count(*) FROM task_events
+                        WHERE task_id = %s AND event_type IN (
+                            'm2_search_barrier_closed',
+                            'm2_holdout_plan_revealed',
+                            'm2_holdout_barrier_closed',
+                            'm2_multiple_comparison_recorded',
+                            'm2_scripted_round_completed'
+                        ) GROUP BY event_type
+                        """,
+                        (request.task_id,),
+                    )
+                    event_counts = dict(cursor.fetchall())
+                self.assertEqual(event_counts["m2_search_barrier_closed"], 1)
+                self.assertEqual(event_counts["m2_scripted_round_completed"], 1)
+                if promote:
+                    self.assertEqual(event_counts["m2_holdout_plan_revealed"], 1)
+                    self.assertEqual(event_counts["m2_holdout_barrier_closed"], 1)
+                    self.assertEqual(
+                        event_counts["m2_multiple_comparison_recorded"], 1
+                    )

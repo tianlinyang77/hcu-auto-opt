@@ -134,6 +134,11 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 
 未到第 5 步不占用 HCU 产生 M2 结论。
 
+当前实现进度：步骤 1–3 的控制面已接通。PostgreSQL 以 append-only 表保存 Barrier、Reveal、
+FWER 和 Evidence Bundle；A Finalizer 会重算数据库 Budget Ledger Hash，并调用 D verifier 从
+Evidence URI 递归重建 Bundle。零晋级与完成 Holdout 两条路径都只能进入
+`scripted_completed`。步骤 4–7 尚未开始，因此不得据此创建 Formal Round 或申请 HCU 性能窗口。
+
 ### M2-OX：操作面与易用性横向轨道
 
 M2-OX 不是独立 Workflow，也不拥有第二套数据库状态。它跨越 M2-0 至 M2-5，把用户输入编译

@@ -221,6 +221,14 @@ Barrier 关闭、FWER 和签核均由各自权威组件执行。
 
 ## M2a → M2b Go/No-Go
 
+### 实现状态（2026-08-27）
+
+无 HCU Scripted 路径已按本 ADR 接入 PostgreSQL：迁移 `0009_m2_round_authority.sql` 以
+append-only 表保存 Search/Holdout Barrier、Holdout Reveal、Bonferroni Result 和
+RoundEvidenceBundle；A Finalizer 在同一事务中重算 Budget Ledger Hash、调用 D verifier 递归
+重建 Bundle，并只推进到 `scripted_completed`。Formal Store、HCU Target Lock 和人工 Signoff
+仍未实现，不能据此越过下面的 Go/No-Go 条件。
+
 只有以下条件全部满足才讨论 M2b：
 
 - 2–4 个 Scripted Candidate 能覆盖 faster/slower/inconclusive/invalid 和预算失败；

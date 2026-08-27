@@ -59,9 +59,12 @@ from hcuopt.domain.enums import (
     ManualCandidateKind,
     ManualCandidateVerdict,
     ProjectMode,
+    RoundBarrierOutcome,
     RoundBudgetEntryType,
     RoundBudgetReservationState,
     RoundCandidateState,
+    RoundPhase,
+    RoundTerminalReason,
     SearchRoundRunMode,
     SearchRoundState,
     Stage0ProbeType,
@@ -73,6 +76,21 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken, StaleFencingToken
 from hcuopt.domain.transitions import transition_candidate, transition_task
+from hcuopt.evaluation.m2_authority import HoldoutRevealResult
+from hcuopt.evaluation.m2_finalizer import M2ScriptedRoundFinalizationService
+from hcuopt.evaluation.m2_models import (
+    MultipleComparisonResult,
+    RoundBarrierResult,
+    RoundEvidenceBundle,
+)
+from hcuopt.evaluation.m2_statistics import (
+    SearchBarrierDecision,
+    close_scripted_holdout_barrier,
+    close_scripted_search_barrier,
+    m2_fwer_protocol_hash,
+    recompute_multiple_comparison_result_hash,
+)
+from hcuopt.evaluation.m2_verifier import M2RoundEvidenceError
 from hcuopt.evaluation.stage0_finalizer import Stage0FinalizationService
 from hcuopt.evaluation.stage0_protocol import (
     Stage0ProtocolError,
@@ -84,6 +102,7 @@ from hcuopt.evaluation.stage0_verifier import (
     Stage0VerificationContext,
     verification_input_digest,
 )
+from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
@@ -101,9 +120,11 @@ class PostgresRepository:
         database_url: str,
         *,
         stage0_finalizer: Stage0FinalizationService | None = None,
+        m2_scripted_finalizer: M2ScriptedRoundFinalizationService | None = None,
     ) -> None:
         self.database_url = database_url
         self.stage0_finalizer = stage0_finalizer
+        self.m2_scripted_finalizer = m2_scripted_finalizer
 
     @contextmanager
     def connection(self) -> Iterator[Connection[dict[str, Any]]]:
@@ -167,6 +188,14 @@ class PostgresRepository:
     def _digest_json(value: Mapping[str, Any]) -> str:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _m2_payload_hash(value: Any) -> str:
+        return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+    @staticmethod
+    def _search_round_authority(row: Mapping[str, Any]) -> SearchRound:
+        return SearchRound.model_validate({name: row[name] for name in SearchRound.model_fields})
 
     def create_search_round(self, request: SearchRound) -> dict[str, Any]:
         """Create or replay one non-executable M2a Scripted Round authority."""
@@ -873,6 +902,676 @@ class PostgresRepository:
             )
         return round_row
 
+    def close_scripted_search_barrier(self, decision: SearchBarrierDecision) -> dict[str, Any]:
+        """Persist one D-owned Search Barrier and freeze its promoted family."""
+
+        barrier = decision.barrier
+        if (
+            barrier.phase is not RoundPhase.SEARCH
+            or barrier.run_mode is not SearchRoundRunMode.SCRIPTED
+            or not barrier.synthetic
+        ):
+            raise Conflict("M2a Search Barrier requires scripted Search evidence")
+        payload = decision.model_dump(mode="json")
+        payload_hash = self._m2_payload_hash(decision)
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (barrier.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {barrier.round_id}")
+            existing = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'search'
+                """,
+                (barrier.round_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["barrier_id"] != barrier.barrier_id
+                    or existing["idempotency_key"] != barrier.idempotency_key
+                    or existing["payload_hash"] != payload_hash
+                    or existing["payload"] != payload
+                ):
+                    raise Conflict("M2a Search Barrier is already closed with other inputs")
+                return round_row
+            if (
+                round_row["run_mode"] != SearchRoundRunMode.SCRIPTED.value
+                or round_row["state"]
+                not in {
+                    SearchRoundState.CORRECTNESS.value,
+                    SearchRoundState.SEARCH_MEASURING.value,
+                }
+                or round_row["artifact_family_hash"] is None
+            ):
+                raise Conflict("M2a Search Barrier is not ready to close")
+            members = connection.execute(
+                """
+                SELECT * FROM round_candidates
+                WHERE round_id = %s ORDER BY candidate_id
+                FOR UPDATE
+                """,
+                (barrier.round_id,),
+            ).fetchall()
+            if len(members) != round_row["declared_candidate_count"]:
+                raise Conflict("M2a Search Barrier lost a frozen Candidate member")
+            member_by_candidate = {row["candidate_id"]: row for row in members}
+            for item in barrier.members:
+                stored = member_by_candidate.get(item.candidate_id)
+                if (
+                    stored is None
+                    or stored["round_candidate_id"] != item.round_candidate_id
+                    or stored["artifact_id"] != item.artifact_id
+                    or stored["artifact_hash"] != item.artifact_hash
+                ):
+                    raise Conflict("M2a Search Barrier Candidate or Artifact identity drifted")
+                if (
+                    stored["state"]
+                    in {
+                        RoundCandidateState.BUILD_FAILED.value,
+                        RoundCandidateState.INVALID.value,
+                    }
+                    and stored["failure_evidence_hash"] != item.failure_evidence_hash
+                ):
+                    raise Conflict("M2a Search Barrier changed frozen Build failure evidence")
+
+            authority = self._search_round_authority(round_row).model_copy(
+                update={"state": SearchRoundState.SEARCH_BARRIER}
+            )
+            expected = close_scripted_search_barrier(
+                round_authority=authority,
+                expected_candidate_ids=tuple(member_by_candidate),
+                members=barrier.members,
+                statistics=decision.input_summary.statistics,
+                closed_by=barrier.closed_by,
+                closed_at=barrier.closed_at,
+                idempotency_key=barrier.idempotency_key,
+            )
+            if canonical_json_bytes(expected) != canonical_json_bytes(decision):
+                raise Conflict("M2a Search Barrier does not match the D selection authority")
+
+            connection.execute(
+                """
+                INSERT INTO round_barriers (
+                    barrier_id, round_id, phase, input_family_hash,
+                    input_summary_hash, rule_version, rule_hash, outcome,
+                    expected_member_count, payload, payload_hash,
+                    idempotency_key, synthetic, closed_at
+                ) VALUES (
+                    %s, %s, 'search', %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, TRUE, %s
+                )
+                """,
+                (
+                    barrier.barrier_id,
+                    barrier.round_id,
+                    barrier.input_family_hash,
+                    barrier.input_summary_hash,
+                    barrier.rule_version,
+                    barrier.rule_hash,
+                    barrier.outcome.value,
+                    barrier.expected_member_count,
+                    Jsonb(payload),
+                    payload_hash,
+                    barrier.idempotency_key,
+                    barrier.closed_at,
+                ),
+            )
+            for item in barrier.members:
+                connection.execute(
+                    """
+                    UPDATE round_candidates
+                    SET state = %s, updated_at = now()
+                    WHERE round_candidate_id = %s
+                    """,
+                    (item.candidate_state.value, item.round_candidate_id),
+                )
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'search_barrier', holdout_family_hash = %s,
+                    version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (decision.holdout_family_hash, barrier.round_id),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_search_barrier_closed', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(barrier.round_id),
+                            "barrier_id": str(barrier.barrier_id),
+                            "outcome": barrier.outcome.value,
+                            "promoted_candidate_ids": [
+                                str(value) for value in barrier.promoted_candidate_ids
+                            ],
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def record_scripted_holdout_reveal(self, reveal: HoldoutRevealResult) -> dict[str, Any]:
+        """Persist one synthetic reveal only after the Search Barrier is durable."""
+
+        payload = reveal.model_dump(mode="json")
+        payload_hash = self._m2_payload_hash(reveal)
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (reveal.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {reveal.round_id}")
+            existing = connection.execute(
+                "SELECT * FROM round_holdout_reveals WHERE round_id = %s",
+                (reveal.round_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["reveal_lease_id"] != reveal.reveal_lease_id
+                    or existing["payload_hash"] != payload_hash
+                    or existing["payload"] != payload
+                ):
+                    raise Conflict("M2a Holdout Plan was already revealed with other inputs")
+                return round_row
+            search_row = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'search'
+                """,
+                (reveal.round_id,),
+            ).fetchone()
+            if search_row is None:
+                raise Conflict("M2a Holdout reveal requires a durable Search Barrier")
+            search = SearchBarrierDecision.model_validate(search_row["payload"])
+            if (
+                round_row["run_mode"] != SearchRoundRunMode.SCRIPTED.value
+                or round_row["state"] != SearchRoundState.SEARCH_BARRIER.value
+                or search.barrier.outcome is not RoundBarrierOutcome.MEMBERS_PROMOTED
+                or round_row["holdout_family_hash"] != search.holdout_family_hash
+                or reveal.holdout_family_hash != search.holdout_family_hash
+                or reveal.commitment != round_row["holdout_plan_commitment"]
+                or reveal.authority_id != round_row["holdout_plan_authority_id"]
+                or reveal.authority_hash != round_row["holdout_plan_authority_hash"]
+            ):
+                raise Conflict("M2a Holdout reveal changed its frozen Round authority")
+            connection.execute(
+                """
+                INSERT INTO round_holdout_reveals (
+                    reveal_lease_id, round_id, holdout_family_hash,
+                    plan_hash, reveal_evidence_hash, payload, payload_hash,
+                    synthetic, revealed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                """,
+                (
+                    reveal.reveal_lease_id,
+                    reveal.round_id,
+                    reveal.holdout_family_hash,
+                    reveal.plan_hash,
+                    reveal.reveal_evidence_hash,
+                    Jsonb(payload),
+                    payload_hash,
+                    reveal.revealed_at,
+                ),
+            )
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'holdout_measuring', holdout_plan_hash = %s,
+                    holdout_reveal_lease_id = %s,
+                    holdout_reveal_evidence_hash = %s,
+                    version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (
+                    reveal.plan_hash,
+                    reveal.reveal_lease_id,
+                    reveal.reveal_evidence_hash,
+                    reveal.round_id,
+                ),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_holdout_plan_revealed', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(reveal.round_id),
+                            "reveal_lease_id": str(reveal.reveal_lease_id),
+                            "holdout_family_hash": reveal.holdout_family_hash,
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def close_scripted_holdout_barrier(self, barrier: RoundBarrierResult) -> dict[str, Any]:
+        """Persist the exact promoted family after its Holdout members terminate."""
+
+        if (
+            barrier.phase is not RoundPhase.HOLDOUT
+            or barrier.run_mode is not SearchRoundRunMode.SCRIPTED
+            or not barrier.synthetic
+        ):
+            raise Conflict("M2a Holdout Barrier requires scripted Holdout evidence")
+        payload = barrier.model_dump(mode="json")
+        payload_hash = self._m2_payload_hash(barrier)
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (barrier.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {barrier.round_id}")
+            existing = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'holdout'
+                """,
+                (barrier.round_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["barrier_id"] != barrier.barrier_id
+                    or existing["idempotency_key"] != barrier.idempotency_key
+                    or existing["payload_hash"] != payload_hash
+                    or existing["payload"] != payload
+                ):
+                    raise Conflict("M2a Holdout Barrier is already closed with other inputs")
+                return round_row
+            search_row = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'search'
+                """,
+                (barrier.round_id,),
+            ).fetchone()
+            reveal_row = connection.execute(
+                "SELECT * FROM round_holdout_reveals WHERE round_id = %s",
+                (barrier.round_id,),
+            ).fetchone()
+            if search_row is None or reveal_row is None:
+                raise Conflict("M2a Holdout Barrier requires Search and Reveal evidence")
+            search = SearchBarrierDecision.model_validate(search_row["payload"])
+            if (
+                round_row["state"] != SearchRoundState.HOLDOUT_MEASURING.value
+                or search.barrier.outcome is not RoundBarrierOutcome.MEMBERS_PROMOTED
+                or tuple(item.candidate_id for item in barrier.members)
+                != search.barrier.promoted_candidate_ids
+            ):
+                raise Conflict("M2a Holdout Barrier family is not ready")
+            members = connection.execute(
+                """
+                SELECT * FROM round_candidates
+                WHERE round_id = %s FOR UPDATE
+                """,
+                (barrier.round_id,),
+            ).fetchall()
+            member_by_candidate = {row["candidate_id"]: row for row in members}
+            for item in barrier.members:
+                stored = member_by_candidate.get(item.candidate_id)
+                if (
+                    stored is None
+                    or stored["round_candidate_id"] != item.round_candidate_id
+                    or stored["artifact_id"] != item.artifact_id
+                    or stored["artifact_hash"] != item.artifact_hash
+                ):
+                    raise Conflict("M2a Holdout Barrier Candidate or Artifact drifted")
+            authority = self._search_round_authority(round_row).model_copy(
+                update={"state": SearchRoundState.HOLDOUT_BARRIER}
+            )
+            expected = close_scripted_holdout_barrier(
+                round_authority=authority,
+                expected_candidate_ids=search.barrier.promoted_candidate_ids,
+                members=barrier.members,
+                closed_by=barrier.closed_by,
+                closed_at=barrier.closed_at,
+                idempotency_key=barrier.idempotency_key,
+            )
+            if canonical_json_bytes(expected) != canonical_json_bytes(barrier):
+                raise Conflict("M2a Holdout Barrier does not match the D authority")
+            connection.execute(
+                """
+                INSERT INTO round_barriers (
+                    barrier_id, round_id, phase, input_family_hash,
+                    input_summary_hash, rule_version, rule_hash, outcome,
+                    expected_member_count, payload, payload_hash,
+                    idempotency_key, synthetic, closed_at
+                ) VALUES (
+                    %s, %s, 'holdout', %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, TRUE, %s
+                )
+                """,
+                (
+                    barrier.barrier_id,
+                    barrier.round_id,
+                    barrier.input_family_hash,
+                    barrier.input_summary_hash,
+                    barrier.rule_version,
+                    barrier.rule_hash,
+                    barrier.outcome.value,
+                    barrier.expected_member_count,
+                    Jsonb(payload),
+                    payload_hash,
+                    barrier.idempotency_key,
+                    barrier.closed_at,
+                ),
+            )
+            for item in barrier.members:
+                connection.execute(
+                    """
+                    UPDATE round_candidates SET state = %s, updated_at = now()
+                    WHERE round_candidate_id = %s
+                    """,
+                    (item.candidate_state.value, item.round_candidate_id),
+                )
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'holdout_barrier', version = version + 1,
+                    updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (barrier.round_id,),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_holdout_barrier_closed', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(barrier.round_id),
+                            "barrier_id": str(barrier.barrier_id),
+                            "member_count": barrier.expected_member_count,
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def record_scripted_multiple_comparison(
+        self, result: MultipleComparisonResult
+    ) -> MultipleComparisonResult:
+        """Persist one immutable D-owned Bonferroni result after Holdout closes."""
+
+        if (
+            result.run_mode is not SearchRoundRunMode.SCRIPTED
+            or not result.synthetic
+            or result.protocol_hash != m2_fwer_protocol_hash()
+            or result.result_hash != recompute_multiple_comparison_result_hash(result)
+        ):
+            raise Conflict("M2a Multiple Comparison is not a valid scripted FWER result")
+        payload = result.model_dump(mode="json")
+        payload_hash = self._m2_payload_hash(result)
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (result.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {result.round_id}")
+            existing = connection.execute(
+                "SELECT * FROM multiple_comparison_results WHERE round_id = %s",
+                (result.round_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["multiple_comparison_id"] != result.multiple_comparison_id
+                    or existing["result_hash"] != result.result_hash
+                    or existing["payload_hash"] != payload_hash
+                    or existing["payload"] != payload
+                ):
+                    raise Conflict("M2a Multiple Comparison already has other inputs")
+                return result
+            barrier_row = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'holdout'
+                """,
+                (result.round_id,),
+            ).fetchone()
+            if (
+                round_row["state"] != SearchRoundState.HOLDOUT_BARRIER.value
+                or barrier_row is None
+                or barrier_row["barrier_id"] != result.holdout_barrier_id
+                or round_row["holdout_family_hash"] != result.holdout_family_hash
+                or float(round_row["family_alpha"]) != result.family_alpha
+            ):
+                raise Conflict("M2a Multiple Comparison changed its Holdout authority")
+            connection.execute(
+                """
+                INSERT INTO multiple_comparison_results (
+                    multiple_comparison_id, round_id, holdout_barrier_id,
+                    holdout_family_hash, protocol_version, protocol_hash,
+                    result_hash, payload, payload_hash, synthetic, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s)
+                """,
+                (
+                    result.multiple_comparison_id,
+                    result.round_id,
+                    result.holdout_barrier_id,
+                    result.holdout_family_hash,
+                    result.protocol_version,
+                    result.protocol_hash,
+                    result.result_hash,
+                    Jsonb(payload),
+                    payload_hash,
+                    result.created_at,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE search_rounds
+                SET version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                """,
+                (result.round_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_multiple_comparison_recorded', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(result.round_id),
+                            "multiple_comparison_id": str(result.multiple_comparison_id),
+                            "result_hash": result.result_hash,
+                        }
+                    ),
+                ),
+            )
+        return result
+
+    def finalize_scripted_search_round(self, evidence: RoundEvidenceBundle) -> dict[str, Any]:
+        """Verify persisted D evidence and enter scripted_completed atomically."""
+
+        if (
+            evidence.run_mode is not SearchRoundRunMode.SCRIPTED
+            or not evidence.synthetic
+            or evidence.automatic_release_allowed
+        ):
+            raise Conflict("M2a Scripted Finalizer accepts only non-releasable synthetic evidence")
+        payload = evidence.model_dump(mode="json")
+        payload_hash = self._m2_payload_hash(evidence)
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (evidence.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {evidence.round_id}")
+            existing = connection.execute(
+                "SELECT * FROM round_evidence_bundles WHERE round_id = %s",
+                (evidence.round_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["round_evidence_bundle_id"] != evidence.round_evidence_bundle_id
+                    or existing["payload_hash"] != payload_hash
+                    or existing["payload"] != payload
+                ):
+                    raise Conflict("M2a Scripted Round already finalized with other evidence")
+                if round_row["state"] != SearchRoundState.SCRIPTED_COMPLETED.value:
+                    raise Conflict("M2a Scripted Evidence exists without its terminal state")
+                return round_row
+            if self.m2_scripted_finalizer is None:
+                raise Conflict("M2a Scripted Finalizer is not configured")
+            search_row = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'search'
+                """,
+                (evidence.round_id,),
+            ).fetchone()
+            if search_row is None:
+                raise Conflict("M2a Scripted Finalizer requires a durable Search Barrier")
+            search = SearchBarrierDecision.model_validate(search_row["payload"])
+            holdout_row = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s AND phase = 'holdout'
+                """,
+                (evidence.round_id,),
+            ).fetchone()
+            comparison_row = connection.execute(
+                "SELECT * FROM multiple_comparison_results WHERE round_id = %s",
+                (evidence.round_id,),
+            ).fetchone()
+            holdout = (
+                RoundBarrierResult.model_validate(holdout_row["payload"])
+                if holdout_row is not None
+                else None
+            )
+            comparison = (
+                MultipleComparisonResult.model_validate(comparison_row["payload"])
+                if comparison_row is not None
+                else None
+            )
+            if evidence.terminal_reason is RoundTerminalReason.NO_PROMOTABLE_CANDIDATE:
+                if (
+                    round_row["state"] != SearchRoundState.SEARCH_BARRIER.value
+                    or search.barrier.outcome is not RoundBarrierOutcome.NO_PROMOTABLE_CANDIDATE
+                    or holdout is not None
+                    or comparison is not None
+                ):
+                    raise Conflict("M2a zero-promotion terminal path is incomplete")
+            elif (
+                round_row["state"] != SearchRoundState.HOLDOUT_BARRIER.value
+                or search.barrier.outcome is not RoundBarrierOutcome.MEMBERS_PROMOTED
+                or holdout is None
+                or comparison is None
+            ):
+                raise Conflict("M2a Holdout terminal path is incomplete")
+            reservations = connection.execute(
+                """
+                SELECT * FROM round_budget_reservations
+                WHERE round_id = %s ORDER BY reservation_id
+                FOR SHARE
+                """,
+                (evidence.round_id,),
+            ).fetchall()
+            if any(
+                row["state"] == RoundBudgetReservationState.RESERVED.value for row in reservations
+            ):
+                raise Conflict("M2a Scripted Finalizer requires every Budget reservation terminal")
+            ledger = connection.execute(
+                """
+                SELECT * FROM round_budget_ledger
+                WHERE round_id = %s ORDER BY ledger_entry_id
+                FOR SHARE
+                """,
+                (evidence.round_id,),
+            ).fetchall()
+            from hcuopt.orchestrator.search_round import round_budget_ledger_hash
+
+            budget_hash = round_budget_ledger_hash(evidence.round_id, reservations, ledger)
+            if evidence.budget_ledger_hash != budget_hash:
+                raise Conflict("M2a Round Evidence changed the durable Budget Ledger")
+            authority = self._search_round_authority(round_row)
+            try:
+                self.m2_scripted_finalizer.verify(
+                    round_authority=authority,
+                    search_decision=search,
+                    evidence_bundle=evidence,
+                    holdout_barrier=holdout,
+                    multiple_comparison=comparison,
+                )
+            except M2RoundEvidenceError as error:
+                raise Conflict(f"{error.code}: {error}") from error
+            connection.execute(
+                """
+                INSERT INTO round_evidence_bundles (
+                    round_evidence_bundle_id, round_id, terminal_reason,
+                    evidence_index_uri, evidence_index_hash, budget_ledger_hash,
+                    payload, payload_hash, synthetic,
+                    automatic_release_allowed, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE, FALSE, %s)
+                """,
+                (
+                    evidence.round_evidence_bundle_id,
+                    evidence.round_id,
+                    evidence.terminal_reason.value,
+                    evidence.evidence_index_uri,
+                    evidence.evidence_index_hash,
+                    evidence.budget_ledger_hash,
+                    Jsonb(payload),
+                    payload_hash,
+                    evidence.created_at,
+                ),
+            )
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'scripted_completed', version = version + 1,
+                    updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (evidence.round_id,),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_scripted_round_completed', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(evidence.round_id),
+                            "round_evidence_bundle_id": str(evidence.round_evidence_bundle_id),
+                            "terminal_reason": evidence.terminal_reason.value,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
     def get_search_round(self, round_id: UUID) -> dict[str, Any]:
         with self.connection() as connection:
             row = connection.execute(
@@ -911,11 +1610,39 @@ class PostgresRepository:
                 """,
                 (round_id,),
             ).fetchall()
+            barriers = connection.execute(
+                """
+                SELECT * FROM round_barriers
+                WHERE round_id = %s
+                ORDER BY CASE phase WHEN 'search' THEN 0 ELSE 1 END, barrier_id
+                """,
+                (round_id,),
+            ).fetchall()
+            holdout_reveal = connection.execute(
+                "SELECT * FROM round_holdout_reveals WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            multiple_comparison = connection.execute(
+                "SELECT * FROM multiple_comparison_results WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            evidence_bundle = connection.execute(
+                "SELECT * FROM round_evidence_bundles WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
         return {
             "round": round_row,
             "candidates": members,
             "budget_reservations": reservations,
             "budget_ledger": ledger,
+            "barriers": [row["payload"] for row in barriers],
+            "holdout_reveal": (holdout_reveal["payload"] if holdout_reveal is not None else None),
+            "multiple_comparison": (
+                multiple_comparison["payload"] if multiple_comparison is not None else None
+            ),
+            "evidence_bundle": (
+                evidence_bundle["payload"] if evidence_bundle is not None else None
+            ),
             "automatic_release_allowed": False,
         }
 

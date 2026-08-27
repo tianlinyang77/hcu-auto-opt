@@ -73,6 +73,13 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.m2_authority import HoldoutRevealResult
+from hcuopt.evaluation.m2_models import (
+    MultipleComparisonResult,
+    RoundBarrierResult,
+    RoundEvidenceBundle,
+)
+from hcuopt.evaluation.m2_statistics import SearchBarrierDecision
 from hcuopt.evaluation.stage0_finalizer import FileStage0Finalizer
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
@@ -290,6 +297,71 @@ def create_app(
         if reservation_id != entry.reservation_id:
             raise Conflict("path reservation_id does not match Budget ledger reservation_id")
         return repo(request).finalize_round_budget(entry)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/barriers/search:close",
+        response_model=SearchRoundView,
+    )
+    def close_scripted_search_barrier(
+        round_id: UUID,
+        payload: SearchBarrierDecision,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.barrier.round_id:
+            raise Conflict("path round_id does not match Search Barrier round_id")
+        return repo(request).close_scripted_search_barrier(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/holdout-plan:reveal",
+        response_model=SearchRoundView,
+    )
+    def record_scripted_holdout_reveal(
+        round_id: UUID,
+        payload: HoldoutRevealResult,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Holdout Reveal round_id")
+        return repo(request).record_scripted_holdout_reveal(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/barriers/holdout:close",
+        response_model=SearchRoundView,
+    )
+    def close_scripted_holdout_barrier(
+        round_id: UUID,
+        payload: RoundBarrierResult,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Holdout Barrier round_id")
+        return repo(request).close_scripted_holdout_barrier(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/multiple-comparison",
+        response_model=MultipleComparisonResult,
+    )
+    def record_scripted_multiple_comparison(
+        round_id: UUID,
+        payload: MultipleComparisonResult,
+        request: Request,
+    ) -> MultipleComparisonResult:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Multiple Comparison round_id")
+        return repo(request).record_scripted_multiple_comparison(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/scripted:finalize",
+        response_model=SearchRoundView,
+    )
+    def finalize_scripted_search_round(
+        round_id: UUID,
+        payload: RoundEvidenceBundle,
+        request: Request,
+    ) -> dict[str, Any]:
+        if round_id != payload.round_id:
+            raise Conflict("path round_id does not match Round Evidence round_id")
+        return repo(request).finalize_scripted_search_round(payload)
 
     @application.post(
         "/v1/framework-smoke/tasks",

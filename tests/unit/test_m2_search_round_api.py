@@ -225,6 +225,11 @@ def test_search_round_api_is_declared_in_openapi() -> None:
         "/v1/search-rounds/{round_id}/budget-reservations/"
         "{reservation_id}/finalize"
     ) in paths
+    assert "/v1/search-rounds/{round_id}/barriers/search:close" in paths
+    assert "/v1/search-rounds/{round_id}/holdout-plan:reveal" in paths
+    assert "/v1/search-rounds/{round_id}/barriers/holdout:close" in paths
+    assert "/v1/search-rounds/{round_id}/multiple-comparison" in paths
+    assert "/v1/search-rounds/{round_id}/scripted:finalize" in paths
 
 
 def test_search_round_budget_api_preserves_atomic_pairs() -> None:
