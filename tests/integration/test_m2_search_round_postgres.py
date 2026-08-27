@@ -18,7 +18,11 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     SearchRound,
 )
-from hcuopt.domain.enums import RoundCandidateState, SearchRoundState
+from hcuopt.domain.enums import (
+    RoundBudgetEntryType,
+    RoundCandidateState,
+    SearchRoundState,
+)
 from hcuopt.domain.errors import Conflict
 from hcuopt.evaluation.m2_authority import SyntheticHoldoutPlanAuthority
 from hcuopt.evaluation.m2_finalizer import M2ScriptedRoundFinalizer
@@ -624,7 +628,7 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         release = settle.model_copy(
             update={
                 "ledger_entry_id": uuid4(),
-                "entry_type": "release",
+                "entry_type": RoundBudgetEntryType.RELEASE,
                 "actual": BudgetUsage(),
                 "lease_held_seconds": 0,
                 "harness_active_seconds": 0,
@@ -1021,7 +1025,7 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         release = reserve.model_copy(
             update={
                 "ledger_entry_id": uuid4(),
-                "entry_type": "release",
+                "entry_type": RoundBudgetEntryType.RELEASE,
                 "idempotency_key": f"m2-cancel-release-{request.round_id}",
                 "created_at": datetime.now(timezone.utc),
             }
