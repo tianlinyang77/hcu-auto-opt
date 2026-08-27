@@ -1555,6 +1555,14 @@ class PostgresRepository:
             assert round_row is not None
             connection.execute(
                 """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.COMPLETED.value, round_row["task_id"]),
+            )
+            connection.execute(
+                """
                 INSERT INTO task_events (task_id, event_type, details)
                 VALUES (%s, 'm2_scripted_round_completed', %s)
                 """,
@@ -1571,6 +1579,292 @@ class PostgresRepository:
                 ),
             )
         return round_row
+
+    def cancel_scripted_search_round(
+        self, round_id: UUID, reason: str
+    ) -> dict[str, Any]:
+        """Stop an idle Scripted Round without inventing cleanup or Budget evidence."""
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {round_id}")
+            if round_row["run_mode"] != SearchRoundRunMode.SCRIPTED.value:
+                raise Conflict("M2a cancel accepts only a Scripted Round")
+            if round_row["state"] == SearchRoundState.CANCELLED.value:
+                return round_row
+            if round_row["state"] in {
+                SearchRoundState.SCRIPTED_COMPLETED.value,
+                SearchRoundState.COMPLETED.value,
+                SearchRoundState.REJECTED.value,
+            }:
+                raise Conflict("terminal M2a SearchRound cannot be cancelled")
+            finalized_evidence = connection.execute(
+                "SELECT 1 FROM round_evidence_bundles WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            if finalized_evidence is not None:
+                raise Conflict("M2a Round Evidence exists without a terminal Round state")
+            outstanding = connection.execute(
+                """
+                SELECT reservation_id FROM round_budget_reservations
+                WHERE round_id = %s AND state = 'reserved'
+                FOR UPDATE
+                """,
+                (round_id,),
+            ).fetchall()
+            active_jobs = connection.execute(
+                """
+                SELECT job_id, state FROM jobs
+                WHERE task_id = %s AND state IN ('queued', 'running')
+                ORDER BY job_id
+                FOR UPDATE
+                """,
+                (round_row["task_id"],),
+            ).fetchall()
+            if outstanding or any(
+                job["state"] == JobState.RUNNING.value for job in active_jobs
+            ):
+                raise Conflict(
+                    "M2a cancel requires running Jobs cleaned and Budget reservations terminal"
+                )
+            queued_jobs = connection.execute(
+                """
+                UPDATE jobs
+                SET state = 'cancelled',
+                    last_error = %s,
+                    finished_at = now(), updated_at = now()
+                WHERE task_id = %s AND state = 'queued'
+                RETURNING job_id
+                """,
+                (
+                    Jsonb({"code": "round_cancelled", "message": reason}),
+                    round_row["task_id"],
+                ),
+            ).fetchall()
+            for job in queued_jobs:
+                connection.execute(
+                    """
+                    INSERT INTO job_events (job_id, event_type, details)
+                    VALUES (%s, 'cancelled', %s)
+                    """,
+                    (job["job_id"], Jsonb({"reason": reason, "scope": "search_round"})),
+                )
+            connection.execute(
+                """
+                UPDATE candidates SET state = %s, updated_at = now()
+                WHERE round_id = %s
+                  AND state NOT IN (%s, %s)
+                """,
+                (
+                    CandidateState.REJECTED.value,
+                    round_id,
+                    CandidateState.REJECTED.value,
+                    CandidateState.BUILD_FAILED.value,
+                ),
+            )
+            round_row = connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'cancelled', version = version + 1,
+                    updated_at = now()
+                WHERE round_id = %s
+                RETURNING *
+                """,
+                (round_id,),
+            ).fetchone()
+            assert round_row is not None
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.CANCELLED.value, round_row["task_id"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_search_round_cancelled', %s)
+                """,
+                (
+                    round_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(round_id),
+                            "reason": reason,
+                            "queued_job_count": len(queued_jobs),
+                        }
+                    ),
+                ),
+            )
+        return round_row
+
+    def reconcile_scripted_search_round(self, round_id: UUID) -> dict[str, Any]:
+        """Audit durable M2 state and return the only safe next control-plane action."""
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR SHARE",
+                (round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {round_id}")
+            if round_row["run_mode"] != SearchRoundRunMode.SCRIPTED.value:
+                raise Conflict("M2a reconcile accepts only a Scripted Round")
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR SHARE",
+                (round_row["task_id"],),
+            ).fetchone()
+            if task_row is None:
+                raise Conflict("M2a SearchRound lost its durable Task")
+            if round_row["state"] == SearchRoundState.CANCELLED.value:
+                if task_row["state"] != TaskState.CANCELLED.value:
+                    raise Conflict("cancelled M2a Round has a non-cancelled Task")
+                return {
+                    "round": round_row,
+                    "consistent": True,
+                    "next_action": "none",
+                    "reason": "cancelled Round is terminal",
+                    "automatic_release_allowed": False,
+                }
+            members = connection.execute(
+                "SELECT * FROM round_candidates WHERE round_id = %s",
+                (round_id,),
+            ).fetchall()
+            barrier_rows = connection.execute(
+                "SELECT * FROM round_barriers WHERE round_id = %s",
+                (round_id,),
+            ).fetchall()
+            barriers = {row["phase"]: row for row in barrier_rows}
+            reveal_row = connection.execute(
+                "SELECT * FROM round_holdout_reveals WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            comparison_row = connection.execute(
+                "SELECT * FROM multiple_comparison_results WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            evidence_row = connection.execute(
+                "SELECT * FROM round_evidence_bundles WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+
+        search = (
+            SearchBarrierDecision.model_validate(barriers["search"]["payload"])
+            if "search" in barriers
+            else None
+        )
+        holdout = (
+            RoundBarrierResult.model_validate(barriers["holdout"]["payload"])
+            if "holdout" in barriers
+            else None
+        )
+        reveal = (
+            HoldoutRevealResult.model_validate(reveal_row["payload"])
+            if reveal_row is not None
+            else None
+        )
+        comparison = (
+            MultipleComparisonResult.model_validate(comparison_row["payload"])
+            if comparison_row is not None
+            else None
+        )
+        evidence = (
+            RoundEvidenceBundle.model_validate(evidence_row["payload"])
+            if evidence_row is not None
+            else None
+        )
+        if (
+            (holdout is not None and (search is None or reveal is None))
+            or (
+                reveal is not None
+                and (search is None or not search.barrier.promoted_candidate_ids)
+            )
+            or (comparison is not None and holdout is None)
+            or (evidence is not None and search is None)
+        ):
+            raise Conflict("M2a durable authority graph is incomplete")
+
+        if evidence is not None:
+            expected_state = SearchRoundState.SCRIPTED_COMPLETED
+            next_action = "none"
+            reason = "Scripted Round Evidence is finalized"
+        elif comparison is not None:
+            expected_state = SearchRoundState.HOLDOUT_BARRIER
+            next_action = "finalize_scripted_round"
+            reason = "FWER is durable; Round Evidence can be finalized"
+        elif holdout is not None:
+            expected_state = SearchRoundState.HOLDOUT_BARRIER
+            next_action = "record_multiple_comparison"
+            reason = "Holdout Barrier is durable; FWER is required"
+        elif reveal is not None:
+            expected_state = SearchRoundState.HOLDOUT_MEASURING
+            next_action = "close_holdout_barrier"
+            reason = "Holdout Plan is revealed; wait for every Holdout member"
+        elif search is not None:
+            expected_state = SearchRoundState.SEARCH_BARRIER
+            if search.barrier.promoted_candidate_ids:
+                next_action = "record_holdout_reveal"
+                reason = "Search promoted Candidates; reveal Holdout Plan"
+            else:
+                next_action = "finalize_scripted_round"
+                reason = "Search promoted no Candidate; finalize without Holdout"
+        elif round_row["artifact_family_hash"] is not None:
+            expected_state = SearchRoundState.CORRECTNESS
+            next_action = "close_search_barrier"
+            reason = "Artifact Family is frozen; Search Barrier evidence is required"
+        elif round_row["candidate_family_hash"] is not None:
+            build_terminal = {
+                RoundCandidateState.BUILT.value,
+                RoundCandidateState.BUILD_FAILED.value,
+                RoundCandidateState.INVALID.value,
+            }
+            terminal_count = sum(row["state"] in build_terminal for row in members)
+            if terminal_count:
+                expected_state = SearchRoundState.BUILDING
+            else:
+                expected_state = SearchRoundState.INTAKE_CLOSED
+            if terminal_count == round_row["declared_candidate_count"]:
+                next_action = "freeze_artifact_family"
+                reason = "all Build members are terminal; freeze Artifact Family"
+            else:
+                next_action = "await_build_terminals"
+                reason = "Candidate Family is frozen; wait for Build terminals"
+        else:
+            expected_state = SearchRoundState.INTAKE_OPEN
+            if len(members) == round_row["declared_candidate_count"]:
+                next_action = "close_intake"
+                reason = "declared Candidate count is present; close Intake"
+            else:
+                next_action = "await_candidate_intake"
+                reason = "Candidate Intake is still incomplete"
+
+        if round_row["state"] != expected_state.value:
+            raise Conflict(
+                "M2a Round state disagrees with its durable authority graph: "
+                f"state={round_row['state']}, expected={expected_state.value}"
+            )
+        expected_task_state = (
+            TaskState.COMPLETED
+            if expected_state is SearchRoundState.SCRIPTED_COMPLETED
+            else TaskState.CREATED
+        )
+        if task_row["state"] != expected_task_state.value:
+            raise Conflict(
+                "M2a Task state disagrees with its Round authority: "
+                f"state={task_row['state']}, expected={expected_task_state.value}"
+            )
+        return {
+            "round": round_row,
+            "consistent": True,
+            "next_action": next_action,
+            "reason": reason,
+            "automatic_release_allowed": False,
+        }
 
     def get_search_round(self, round_id: UUID) -> dict[str, Any]:
         with self.connection() as connection:

@@ -423,7 +423,7 @@ StartIntent 直接串联这些接口：
 | GET | `/v1/search-rounds/{round_id}/summary` | 读取成员、Job、Barrier、Budget、Evidence、Signoff |
 | POST | `/v1/search-rounds/{round_id}/candidates` | 仅 StartIntent Reconciler 在 Intake Open 时按冻结成员登记 Candidate |
 | POST | `/v1/search-rounds/{round_id}/intake-close` | 原子关闭 Intake 并冻结 Candidate Family |
-| POST | `/v1/search-rounds/{round_id}/cancel` | 停止排新 Job，保留已有证据并执行清理 |
+| POST | `/v1/search-rounds/{round_id}/cancel` | 仅在运行 Job 已清理、Budget 已终态时取消排队 Job；不补造清理证据 |
 | POST | `/v1/search-rounds/{round_id}/signoff` | 仅 Formal：创建/重放 durable Signoff Intent；不提前推进终态 |
 
 面向权威组件，不提供给 Candidate Generator：
@@ -438,6 +438,7 @@ StartIntent 直接串联这些接口：
 | POST | `/v1/search-rounds/{round_id}/evidence-bundles` | D Round Evidence 组件 |
 | POST | `/v1/search-rounds/{round_id}/scripted:finalize` | A Scripted Finalizer；只接受 synthetic Bundle，不创建 Signoff |
 | POST | `/v1/search-rounds/{round_id}/signoff:finalize` | A Signoff Finalizer；只接受已发布且复核的 Artifact |
+| POST | `/v1/search-rounds/{round_id}/reconcile` | A 只读恢复审计；核对 Authority 图并返回唯一安全的下一动作 |
 
 是否保留这些内部 HTTP 路径由实现评审决定；即使改为 Repository 方法，调用权限和幂等语义
 不变。Worker 仍通过通用 Claim/Complete/Fail API 提交原始 Job 结果，不能直接推进 Round、

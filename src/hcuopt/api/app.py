@@ -20,6 +20,7 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     RoundCandidateView,
     SearchRound,
+    SearchRoundReconcileResult,
     SearchRoundSummary,
     SearchRoundView,
 )
@@ -362,6 +363,27 @@ def create_app(
         if round_id != payload.round_id:
             raise Conflict("path round_id does not match Round Evidence round_id")
         return repo(request).finalize_scripted_search_round(payload)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/cancel",
+        response_model=SearchRoundView,
+    )
+    def cancel_scripted_search_round(
+        round_id: UUID,
+        payload: FrameworkSmokeAction,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).cancel_scripted_search_round(round_id, payload.reason)
+
+    @application.post(
+        "/v1/search-rounds/{round_id}/reconcile",
+        response_model=SearchRoundReconcileResult,
+    )
+    def reconcile_scripted_search_round(
+        round_id: UUID,
+        request: Request,
+    ) -> dict[str, Any]:
+        return repo(request).reconcile_scripted_search_round(round_id)
 
     @application.post(
         "/v1/framework-smoke/tasks",

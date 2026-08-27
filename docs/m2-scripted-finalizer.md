@@ -34,6 +34,15 @@ Phase 下不同内容、Candidate/Artifact 漂移或提前调用均拒绝。`rou
 `round_holdout_reveals`、`multiple_comparison_results` 和 `round_evidence_bundles` 都由数据库触发器
 保持 append-only。
 
+`POST /v1/search-rounds/{round_id}/reconcile` 不猜测或补造外部证据。它重新读取持久化 Authority
+图，核对数据库状态，并返回唯一安全的 `next_action`，例如 `close_intake`、
+`freeze_artifact_family`、`record_holdout_reveal` 或 `finalize_scripted_round`。状态与 Authority 图
+不一致时 fail-closed。
+
+`POST /v1/search-rounds/{round_id}/cancel` 只允许取消空闲的非终态 Scripted Round。仍有运行 Job
+或 `reserved` Budget 时拒绝，必须先由执行侧完成清理并 `settle/release`；A 不会为了让取消成功而
+伪造清理或 Budget Evidence。取消会停止仍在排队的 Job，并把 Round/Task 推进到 `cancelled`。
+
 ## Finalizer 检查
 
 最终化事务会重新读取 Search/Holdout Barrier、FWER 和 Budget Ledger，并要求所有 Budget
