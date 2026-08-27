@@ -41,9 +41,11 @@ class BarrierMemberResult(FrozenEvaluationModel):
         default=None, pattern=SHA256_PATTERN
     )
     round_measurement_ref_id: UUID | None = None
+    scripted_phase_receipt_id: UUID | None = None
     failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     budget_usage_evidence_hash: str = Field(pattern=SHA256_PATTERN)
     cleanup_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    synthetic: bool
 
     @model_validator(mode="after")
     def require_terminal_evidence_shape(self) -> BarrierMemberResult:
@@ -62,19 +64,37 @@ class BarrierMemberResult(FrozenEvaluationModel):
         }
         if not measured and not failed:
             raise ValueError("Barrier member must be in a measurement or failure terminal")
+        evidence_ids = (
+            self.round_measurement_ref_id,
+            self.scripted_phase_receipt_id,
+        )
         if measured and (
             self.artifact_id is None
             or self.correctness_evidence_hash is None
-            or self.round_measurement_ref_id is None
             or self.cleanup_evidence_hash is None
             or self.failure_evidence_hash is not None
+            or sum(value is not None for value in evidence_ids) != 1
         ):
             raise ValueError("measured Barrier member requires complete success evidence")
+        if measured and (
+            (self.synthetic and self.scripted_phase_receipt_id is None)
+            or (not self.synthetic and self.round_measurement_ref_id is None)
+        ):
+            raise ValueError("Barrier member evidence authority disagrees with synthetic mode")
         if failed and (
             self.failure_evidence_hash is None
-            or self.round_measurement_ref_id is not None
+            or any(value is not None for value in evidence_ids)
         ):
-            raise ValueError("failed Barrier member requires failure evidence and no Ref")
+            raise ValueError("failed Barrier member requires failure evidence and no success ID")
+        if self.candidate_state in {
+            RoundCandidateState.SEARCH_FAILED,
+            RoundCandidateState.HOLDOUT_FAILED,
+        } and (
+            self.artifact_id is None or self.correctness_evidence_hash is None
+        ):
+            raise ValueError(
+                "phase measurement failure requires Artifact and correctness evidence"
+            )
         return self
 
 
@@ -82,6 +102,8 @@ class RoundBarrierResult(FrozenEvaluationModel):
     schema_version: Literal["m2a-round-barrier-v1"] = M2_BARRIER_SCHEMA_VERSION
     barrier_id: UUID
     round_id: UUID
+    run_mode: SearchRoundRunMode
+    synthetic: bool
     phase: RoundPhase
     input_family_hash: str = Field(pattern=SHA256_PATTERN)
     expected_member_count: int = Field(ge=1, le=4)
@@ -104,6 +126,10 @@ class RoundBarrierResult(FrozenEvaluationModel):
     def require_complete_phase_barrier(self) -> RoundBarrierResult:
         if self.closed_at.tzinfo is None or self.closed_at.utcoffset() is None:
             raise ValueError("Barrier close time must be timezone-aware")
+        if (self.run_mode is SearchRoundRunMode.SCRIPTED) != self.synthetic:
+            raise ValueError("Barrier run mode and synthetic flag disagree")
+        if any(item.synthetic != self.synthetic for item in self.members):
+            raise ValueError("Barrier members and batch authority use different modes")
         if len(self.members) != self.expected_member_count:
             raise ValueError("Barrier requires every frozen family member")
         candidate_ids = tuple(item.candidate_id for item in self.members)
@@ -152,17 +178,28 @@ class RoundBarrierResult(FrozenEvaluationModel):
             }
             if any(item.candidate_state not in allowed for item in self.members):
                 raise ValueError("Holdout Barrier contains a non-Holdout terminal")
+            if any(
+                item.artifact_id is None or item.correctness_evidence_hash is None
+                for item in self.members
+            ):
+                raise ValueError(
+                    "Holdout Barrier members require Artifact and correctness evidence"
+                )
             if (
                 self.outcome is not RoundBarrierOutcome.COMPLETED
                 or self.promoted_candidate_ids
             ):
                 raise ValueError("Holdout Barrier must complete without promotions")
+            if self.expected_member_count > 2:
+                raise ValueError("Holdout Barrier supports at most two frozen members")
         return self
 
 
 class AdjustedCandidateResult(FrozenEvaluationModel):
     candidate_id: UUID
     round_measurement_ref_id: UUID | None = None
+    scripted_phase_receipt_id: UUID | None = None
+    synthetic: bool
     correctness_evidence_hash: str = Field(pattern=SHA256_PATTERN)
     verdict: ManualCandidateVerdict
     adjusted_ci_lower: float | None = None
@@ -179,6 +216,15 @@ class AdjustedCandidateResult(FrozenEvaluationModel):
 
     @model_validator(mode="after")
     def require_adjusted_verdict_evidence(self) -> AdjustedCandidateResult:
+        evidence_ids = (
+            self.round_measurement_ref_id,
+            self.scripted_phase_receipt_id,
+        )
+        if sum(value is not None for value in evidence_ids) > 1 or (
+            (self.synthetic and self.round_measurement_ref_id is not None)
+            or (not self.synthetic and self.scripted_phase_receipt_id is not None)
+        ):
+            raise ValueError("adjusted result evidence authority disagrees with synthetic mode")
         values = (
             self.adjusted_ci_lower,
             self.adjusted_ci_upper,
@@ -192,7 +238,7 @@ class AdjustedCandidateResult(FrozenEvaluationModel):
             if any(value is not None for value in values):
                 raise ValueError("invalid adjusted result cannot claim a confidence interval")
             return self
-        if self.round_measurement_ref_id is None or any(
+        if sum(value is not None for value in evidence_ids) != 1 or any(
             value is None for value in values
         ):
             raise ValueError("adjusted conclusion requires complete verified evidence")
@@ -227,11 +273,15 @@ class AdjustedCandidateResult(FrozenEvaluationModel):
 
 
 class MultipleComparisonResult(FrozenEvaluationModel):
+    """Batch verdicts whose run_mode/synthetic fields define evidence authority."""
+
     schema_version: Literal["m2a-bonferroni-fwer-v1"] = (
         M2_MULTIPLE_COMPARISON_SCHEMA_VERSION
     )
     multiple_comparison_id: UUID
     round_id: UUID
+    run_mode: SearchRoundRunMode
+    synthetic: bool
     holdout_barrier_id: UUID
     holdout_family_hash: str = Field(pattern=SHA256_PATTERN)
     method: Literal["bonferroni_fwer"] = "bonferroni_fwer"
@@ -256,6 +306,10 @@ class MultipleComparisonResult(FrozenEvaluationModel):
     def require_frozen_bonferroni_family(self) -> MultipleComparisonResult:
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise ValueError("Multiple Comparison time must be timezone-aware")
+        if (self.run_mode is SearchRoundRunMode.SCRIPTED) != self.synthetic:
+            raise ValueError("Multiple Comparison mode and synthetic flag disagree")
+        if any(item.synthetic != self.synthetic for item in self.candidate_results):
+            raise ValueError("Multiple Comparison members use another evidence mode")
         if not math.isclose(
             self.alpha_candidate,
             self.family_alpha / self.m,

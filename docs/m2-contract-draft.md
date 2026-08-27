@@ -202,6 +202,7 @@ Barrier 是批级权威，单个 Worker 不能自行宣告关闭。
 | --- | --- | --- |
 | `barrier_id` | UUID | Barrier ID |
 | `round_id` | UUID | 所属 Round |
+| `run_mode` / `synthetic` | discriminated pair | Scripted/true 与 Formal/false 不得混用 |
 | `phase` | `search` 或 `holdout` | 每轮每 Phase 唯一 |
 | `input_family_hash` | SHA256 | Search 用 Artifact Family；Holdout 用 Holdout Family |
 | `expected_member_count` | int | 冻结成员数 |
@@ -214,9 +215,11 @@ Barrier 是批级权威，单个 Worker 不能自行宣告关闭。
 | `closed_at` | datetime | 关闭时间 |
 | `idempotency_key` | string | 并发关闭返回同一对象 |
 
-`BarrierMemberResult` 必须为每个冻结成员保存 Candidate/Artifact、正确性、Measurement Ref 或
-失败证据、预算状态和终态。成员缺失、仍在运行、Family Hash 不符或迟到写回时，Barrier
-保持未关闭并返回稳定错误。
+`BarrierMemberResult` 必须为每个冻结成员保存 Candidate/Artifact、正确性、预算状态和终态。
+Formal 成功成员只接受 `RoundMeasurementRef`，Scripted 成功成员只接受独立的
+`M2ScriptedPhaseReceipt`；两种 ID 不得同时存在，Receipt 也不得冒充正式性能证据。失败成员保存
+失败证据且不创建成功 ID。Holdout 成员即使测量失败也必须保留此前通过的正确性证据。成员缺失、
+仍在运行、Family Hash 不符或迟到写回时，Barrier 保持未关闭并返回稳定错误。
 
 Search Barrier 的 `promoted_candidate_ids=[]` 时 outcome 必须为 `no_promotable_candidate`，
 控制面直接生成失败家族 Evidence；不得创建 Holdout Barrier 或 MultipleComparison。
@@ -235,6 +238,7 @@ M2a 固定使用 Bonferroni FWER，不允许同轮临时切换 FDR。
 | --- | --- | --- |
 | `multiple_comparison_id` | UUID | 批级裁决 ID |
 | `round_id` / `holdout_barrier_id` | UUID | 绑定已关闭 Holdout Barrier |
+| `run_mode` / `synthetic` | discriminated pair | Scripted 结果仅验证统计控制流，不是真实性能结论 |
 | `holdout_family_hash` | SHA256 | 冻结最终比较家族 |
 | `method` | literal `bonferroni_fwer` | 协议方法 |
 | `protocol_version` / `protocol_hash` | string/SHA256 | D 规则 |
@@ -249,6 +253,10 @@ M2a 固定使用 Bonferroni FWER，不允许同轮临时切换 FDR。
 每个 `AdjustedCandidateResult` 保存 Measurement Ref、正确性、adjusted CI、Stage 0 MDE、当前
 Holdout Workload MDE、可信门限和 `faster|slower|inconclusive|invalid`。没有有效区间的失败
 成员仍保留，且仍计入 `m`。
+
+Scripted 可以使用显式 synthetic Fixture 重放选择、CI、FWER 和失败路径，但其成员只绑定
+`M2ScriptedPhaseReceipt(status=not_measured)`，批级结果固定 `run_mode=scripted`、
+`synthetic=true`。这些 verdict 是算法夹具输出，不得作为 HCU 性能结论、Formal Signoff 或发布依据。
 
 若存在 `faster`，`recommended_candidate_id` 必须是 adjusted CI lower 最大的成员；lower 相同按
 Candidate UUID 小写连字符字符串升序破同分。全部 `faster` 仍保留在 `candidate_results` 和
