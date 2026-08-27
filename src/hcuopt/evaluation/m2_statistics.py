@@ -79,12 +79,52 @@ class ScriptedCandidateStatisticsInput(FrozenEvaluationModel):
         return self
 
 
+class SearchBarrierInputSummary(FrozenEvaluationModel):
+    schema_version: Literal["m2a-scripted-search-input-v1"] = (
+        "m2a-scripted-search-input-v1"
+    )
+    round_id: UUID
+    artifact_family_hash: str = Field(pattern=SHA256_PATTERN)
+    selection_rule_hash: str = Field(pattern=SHA256_PATTERN)
+    members: tuple[BarrierMemberResult, ...] = Field(min_length=1, max_length=4)
+    statistics: tuple[ScriptedCandidateStatisticsInput, ...] = Field(
+        default=(), max_length=4
+    )
+    promoted_candidate_ids: tuple[UUID, ...] = Field(default=(), max_length=2)
+
+    @field_validator(
+        "members", "statistics", "promoted_candidate_ids", mode="before"
+    )
+    @classmethod
+    def freeze_summary_sequences(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def require_deterministic_summary_order(self) -> SearchBarrierInputSummary:
+        if tuple(item.candidate_id for item in self.members) != tuple(
+            sorted((item.candidate_id for item in self.members), key=str)
+        ):
+            raise ValueError("Search summary members must use deterministic order")
+        if tuple(item.candidate_id for item in self.statistics) != tuple(
+            sorted((item.candidate_id for item in self.statistics), key=str)
+        ):
+            raise ValueError("Search summary statistics must use deterministic order")
+        if self.promoted_candidate_ids != tuple(
+            sorted(self.promoted_candidate_ids, key=str)
+        ):
+            raise ValueError("Search summary promotions must use deterministic order")
+        return self
+
+
 class SearchBarrierDecision(FrozenEvaluationModel):
     barrier: RoundBarrierResult
+    input_summary: SearchBarrierInputSummary
     holdout_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
     def bind_conditional_holdout_family(self) -> SearchBarrierDecision:
+        if _digest(self.input_summary) != self.barrier.input_summary_hash:
+            raise ValueError("Search input summary does not match Barrier input hash")
         promoted = bool(self.barrier.promoted_candidate_ids)
         if promoted != (self.holdout_family_hash is not None):
             raise ValueError("Holdout Family must exist exactly when Search promotes members")
@@ -155,15 +195,15 @@ def close_scripted_search_barrier(
         ]
     )
     promoted = tuple(sorted(selected, key=str))
-    input_payload = {
-        "round_id": str(round_authority.round_id),
-        "artifact_family_hash": round_authority.artifact_family_hash,
-        "selection_rule_hash": round_authority.selection_rule_hash,
-        "members": [item.model_dump(mode="json") for item in member_items],
-        "statistics": [stats[key].model_dump(mode="json") for key in sorted(stats, key=str)],
-        "promoted_candidate_ids": [str(item) for item in promoted],
-    }
-    input_hash = _digest(input_payload)
+    input_summary = SearchBarrierInputSummary(
+        round_id=round_authority.round_id,
+        artifact_family_hash=round_authority.artifact_family_hash,
+        selection_rule_hash=round_authority.selection_rule_hash,
+        members=member_items,
+        statistics=tuple(stats[key] for key in sorted(stats, key=str)),
+        promoted_candidate_ids=promoted,
+    )
+    input_hash = _digest(input_summary)
     barrier = RoundBarrierResult(
         barrier_id=uuid5(NAMESPACE_URL, f"hcuopt:m2-search-barrier:{input_hash}"),
         round_id=round_authority.round_id,
@@ -193,7 +233,11 @@ def close_scripted_search_barrier(
             round_authority=round_authority,
             members=tuple(by_id[candidate_id] for candidate_id in promoted),
         )
-    return SearchBarrierDecision(barrier=barrier, holdout_family_hash=holdout_family_hash)
+    return SearchBarrierDecision(
+        barrier=barrier,
+        input_summary=input_summary,
+        holdout_family_hash=holdout_family_hash,
+    )
 
 
 def close_scripted_holdout_barrier(
@@ -342,6 +386,8 @@ def bonferroni_fwer(
                     scripted_phase_receipt_id=item.scripted_phase_receipt_id,
                     synthetic=True,
                     correctness_evidence_hash=item.correctness_evidence_hash,
+                    raw_evidence_hash=item.raw_evidence_hash,
+                    baseline_sample_set_hash=item.baseline_sample_set_hash,
                     verdict=ManualCandidateVerdict.INVALID,
                     failure_codes=item.failure_codes,
                 )
@@ -373,6 +419,8 @@ def bonferroni_fwer(
                 scripted_phase_receipt_id=item.scripted_phase_receipt_id,
                 synthetic=True,
                 correctness_evidence_hash=item.correctness_evidence_hash,
+                raw_evidence_hash=item.raw_evidence_hash,
+                baseline_sample_set_hash=item.baseline_sample_set_hash,
                 verdict=verdict,
                 adjusted_ci_lower=lower,
                 adjusted_ci_upper=upper,
@@ -389,26 +437,20 @@ def bonferroni_fwer(
             faster,
             key=lambda item: (-float(item.adjusted_ci_lower), str(item.candidate_id)),
         ).candidate_id
-    protocol_hash = _digest(
-        {
-            "protocol_version": M2_FWER_PROTOCOL_VERSION,
-            "bootstrap_resamples": M2_FWER_BOOTSTRAP_RESAMPLES,
-            "power": M2_FWER_POWER,
-            "method": "bonferroni_fwer",
-        }
+    protocol_hash = m2_fwer_protocol_hash()
+
+    result_payload = _multiple_comparison_payload(
+        round_id=round_authority.round_id,
+        holdout_barrier_id=holdout_barrier.barrier_id,
+        holdout_family_hash=round_authority.holdout_family_hash,
+        protocol_hash=protocol_hash,
+        family_alpha=round_authority.family_alpha,
+        m=m,
+        alpha_candidate=alpha_candidate,
+        candidate_results=adjusted_items,
+        recommended_candidate_id=recommended,
+        synthetic=True,
     )
-    result_payload = {
-        "round_id": str(round_authority.round_id),
-        "holdout_barrier_id": str(holdout_barrier.barrier_id),
-        "holdout_family_hash": round_authority.holdout_family_hash,
-        "protocol_hash": protocol_hash,
-        "family_alpha": round_authority.family_alpha,
-        "m": m,
-        "alpha_candidate": alpha_candidate,
-        "candidate_results": [item.model_dump(mode="json") for item in adjusted_items],
-        "recommended_candidate_id": str(recommended) if recommended else None,
-        "synthetic": True,
-    }
     result_hash = _digest(result_payload)
     return MultipleComparisonResult(
         multiple_comparison_id=uuid5(NAMESPACE_URL, f"hcuopt:m2-bonferroni:{result_hash}"),
@@ -427,6 +469,65 @@ def bonferroni_fwer(
         result_hash=result_hash,
         created_at=created_at,
     )
+
+
+def m2_fwer_protocol_hash() -> str:
+    return _digest(
+        {
+            "protocol_version": M2_FWER_PROTOCOL_VERSION,
+            "bootstrap_resamples": M2_FWER_BOOTSTRAP_RESAMPLES,
+            "power": M2_FWER_POWER,
+            "method": "bonferroni_fwer",
+        }
+    )
+
+
+def recompute_multiple_comparison_result_hash(
+    result: MultipleComparisonResult,
+) -> str:
+    return _digest(
+        _multiple_comparison_payload(
+            round_id=result.round_id,
+            holdout_barrier_id=result.holdout_barrier_id,
+            holdout_family_hash=result.holdout_family_hash,
+            protocol_hash=result.protocol_hash,
+            family_alpha=result.family_alpha,
+            m=result.m,
+            alpha_candidate=result.alpha_candidate,
+            candidate_results=result.candidate_results,
+            recommended_candidate_id=result.recommended_candidate_id,
+            synthetic=result.synthetic,
+        )
+    )
+
+
+def _multiple_comparison_payload(
+    *,
+    round_id: UUID,
+    holdout_barrier_id: UUID,
+    holdout_family_hash: str,
+    protocol_hash: str,
+    family_alpha: float,
+    m: int,
+    alpha_candidate: float,
+    candidate_results: tuple[AdjustedCandidateResult, ...],
+    recommended_candidate_id: UUID | None,
+    synthetic: bool,
+) -> dict[str, object]:
+    return {
+        "round_id": str(round_id),
+        "holdout_barrier_id": str(holdout_barrier_id),
+        "holdout_family_hash": holdout_family_hash,
+        "protocol_hash": protocol_hash,
+        "family_alpha": family_alpha,
+        "m": m,
+        "alpha_candidate": alpha_candidate,
+        "candidate_results": [item.model_dump(mode="json") for item in candidate_results],
+        "recommended_candidate_id": str(recommended_candidate_id)
+        if recommended_candidate_id
+        else None,
+        "synthetic": synthetic,
+    }
 
 
 def _require_scripted_round(round_authority: SearchRound, state: SearchRoundState) -> None:

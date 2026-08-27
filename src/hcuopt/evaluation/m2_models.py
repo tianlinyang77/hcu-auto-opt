@@ -201,6 +201,8 @@ class AdjustedCandidateResult(FrozenEvaluationModel):
     scripted_phase_receipt_id: UUID | None = None
     synthetic: bool
     correctness_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    raw_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    baseline_sample_set_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     verdict: ManualCandidateVerdict
     adjusted_ci_lower: float | None = None
     adjusted_ci_upper: float | None = None
@@ -237,11 +239,24 @@ class AdjustedCandidateResult(FrozenEvaluationModel):
                 raise ValueError("invalid adjusted result requires failure codes")
             if any(value is not None for value in values):
                 raise ValueError("invalid adjusted result cannot claim a confidence interval")
+            measured_identity = sum(value is not None for value in evidence_ids) == 1
+            raw_identity = (
+                self.raw_evidence_hash is not None
+                and self.baseline_sample_set_hash is not None
+            )
+            if measured_identity != raw_identity:
+                raise ValueError(
+                    "invalid measured result must retain raw and Baseline identities"
+                )
             return self
         if sum(value is not None for value in evidence_ids) != 1 or any(
             value is None for value in values
         ):
             raise ValueError("adjusted conclusion requires complete verified evidence")
+        if self.raw_evidence_hash is None or self.baseline_sample_set_hash is None:
+            raise ValueError(
+                "adjusted conclusion requires raw and Baseline evidence identities"
+            )
         assert self.adjusted_ci_lower is not None
         assert self.adjusted_ci_upper is not None
         assert self.stage0_mde_ratio is not None
@@ -405,6 +420,13 @@ class RoundEvidenceBundle(FrozenEvaluationModel):
             raise ValueError("Round Evidence time must be timezone-aware")
         if (self.run_mode is SearchRoundRunMode.SCRIPTED) != self.synthetic:
             raise ValueError("Round Evidence run mode and synthetic flag disagree")
+        if self.synthetic and (
+            self.summary.get("performance_conclusion") != "not_measured"
+            or self.summary.get("evidence_authority") != "synthetic_fixture_only"
+        ):
+            raise ValueError(
+                "synthetic Round Evidence cannot claim a performance conclusion"
+            )
         candidate_ids = tuple(item.candidate_id for item in self.candidate_evidence)
         if len(set(candidate_ids)) != len(candidate_ids):
             raise ValueError("Round Evidence Candidates must be unique")
