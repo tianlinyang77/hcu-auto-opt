@@ -43,6 +43,10 @@ def _member(
         RoundCandidateState.SEARCH_MEASURED,
         RoundCandidateState.HOLDOUT_MEASURED,
     }
+    phase_failed = state in {
+        RoundCandidateState.SEARCH_FAILED,
+        RoundCandidateState.HOLDOUT_FAILED,
+    }
     return BarrierMemberResult(
         round_candidate_id=_uuid(100 + ordinal),
         candidate_id=_uuid(200 + ordinal),
@@ -51,11 +55,12 @@ def _member(
         artifact_hash=_hash(str(ordinal + 1))
         if state is not RoundCandidateState.BUILD_FAILED
         else None,
-        correctness_evidence_hash=_hash("a") if measured else None,
-        round_measurement_ref_id=_uuid(400 + ordinal) if measured else None,
+        correctness_evidence_hash=_hash("a") if measured or phase_failed else None,
+        scripted_phase_receipt_id=_uuid(400 + ordinal) if measured else None,
         failure_evidence_hash=None if measured else _hash("b"),
         budget_usage_evidence_hash=_hash("c"),
         cleanup_evidence_hash=_hash("d") if measured else None,
+        synthetic=True,
     )
 
 
@@ -70,6 +75,8 @@ def _barrier(
     values: dict[str, object] = {
         "barrier_id": _uuid(1),
         "round_id": _uuid(2),
+        "run_mode": "scripted",
+        "synthetic": True,
         "phase": phase,
         "input_family_hash": _hash("1"),
         "expected_member_count": len(members),
@@ -102,7 +109,8 @@ def _adjusted(
     invalid = verdict is ManualCandidateVerdict.INVALID
     return AdjustedCandidateResult(
         candidate_id=_uuid(200 + ordinal),
-        round_measurement_ref_id=None if invalid else _uuid(400 + ordinal),
+        scripted_phase_receipt_id=None if invalid else _uuid(400 + ordinal),
+        synthetic=True,
         correctness_evidence_hash=_hash(str(ordinal + 4)),
         verdict=verdict,
         adjusted_ci_lower=None if invalid else lower,
@@ -123,6 +131,8 @@ def _multiple(
     values: dict[str, object] = {
         "multiple_comparison_id": _uuid(10),
         "round_id": _uuid(2),
+        "run_mode": "scripted",
+        "synthetic": True,
         "holdout_barrier_id": _uuid(11),
         "holdout_family_hash": _hash("4"),
         "protocol_version": "m2-bonferroni-bootstrap-v1",
@@ -227,6 +237,32 @@ def test_barrier_rejects_missing_duplicate_and_non_terminal_members() -> None:
         _barrier((member, member))
     with pytest.raises(ValidationError, match="measurement or failure terminal"):
         _member(0, RoundCandidateState.CORRECTNESS_PASSED)
+    with pytest.raises(ValidationError, match="run mode and synthetic"):
+        _barrier((member,), run_mode="formal")
+
+
+def test_barrier_rejects_authority_mix_and_incomplete_holdout_failure() -> None:
+    measured = _member(0)
+    values = measured.model_dump(mode="python")
+    values["round_measurement_ref_id"] = _uuid(999)
+    with pytest.raises(ValidationError, match="complete success evidence"):
+        BarrierMemberResult.model_validate(values)
+
+    failed = _member(1, RoundCandidateState.HOLDOUT_FAILED)
+    values = failed.model_dump(mode="python")
+    values["correctness_evidence_hash"] = None
+    with pytest.raises(ValidationError, match="correctness evidence"):
+        BarrierMemberResult.model_validate(values)
+
+    holdout_members = tuple(
+        _member(index, RoundCandidateState.HOLDOUT_MEASURED) for index in range(3)
+    )
+    with pytest.raises(ValidationError, match="at most two"):
+        _barrier(
+            holdout_members,
+            phase=RoundPhase.HOLDOUT,
+            outcome=RoundBarrierOutcome.COMPLETED,
+        )
 
 
 def test_adjusted_verdict_uses_conservative_threshold() -> None:
@@ -271,6 +307,8 @@ def test_bonferroni_preserves_all_faster_and_uses_uuid_tie_break() -> None:
     assert len(result.candidate_results) == 2
     with pytest.raises(ValidationError, match="UUID tie-break"):
         _multiple((first, second), recommended=second.candidate_id)
+    with pytest.raises(ValidationError, match="mode and synthetic"):
+        _multiple((first, second), recommended=first.candidate_id, run_mode="formal")
 
 
 def test_round_evidence_discriminates_zero_promotion_and_holdout_paths() -> None:
