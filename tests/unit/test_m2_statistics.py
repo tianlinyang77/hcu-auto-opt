@@ -434,12 +434,24 @@ def test_fwer_keeps_all_faster_and_recommends_deterministically() -> None:
         statistics=reversed(statistics),
         created_at=NOW + timedelta(seconds=1),
     )
+    changed_statistics = (
+        statistics[0].model_copy(update={"raw_evidence_hash": _hash("changed-raw")}),
+        statistics[1],
+    )
+    changed = bonferroni_fwer(
+        round_authority=holdout_round,
+        holdout_barrier=barrier,
+        statistics=changed_statistics,
+        created_at=NOW,
+    )
 
     assert all(item.verdict is ManualCandidateVerdict.FASTER for item in first.candidate_results)
     assert first.recommended_candidate_id == holdout_members[0].candidate_id
     assert repeated.recommended_candidate_id == first.recommended_candidate_id
     assert repeated.result_hash == first.result_hash
     assert repeated.multiple_comparison_id == first.multiple_comparison_id
+    assert changed.result_hash != first.result_hash
+    assert changed.multiple_comparison_id != first.multiple_comparison_id
 
 
 def test_barrier_and_fwer_reject_wrong_authority_naive_time_and_zero_m() -> None:

@@ -99,7 +99,30 @@ class HoldoutRevealResult(FrozenEvaluationModel):
             raise ValueError("revealed canonical Plan does not match plan_hash")
         if _sha256(bytes.fromhex(self.nonce_hex) + encoded) != self.commitment:
             raise ValueError("revealed nonce and Plan do not match commitment")
+        if _sha256(canonical_json_bytes(self.evidence_payload())) != (
+            self.reveal_evidence_hash
+        ):
+            raise ValueError("Holdout reveal evidence does not match its payload Hash")
         return self
+
+    def evidence_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "reveal_lease_id": str(self.reveal_lease_id),
+            "round_id": str(self.round_id),
+            "holdout_family_hash": self.holdout_family_hash,
+            "commitment": self.commitment,
+            "plan_hash": self.plan_hash,
+            "nonce_hex": self.nonce_hex,
+            "authorized_worker_id": self.authorized_worker_id,
+            "execution_lease_id": str(self.execution_lease_id),
+            "resource_id": self.resource_id,
+            "fencing_token": self.fencing_token,
+            "authority_id": self.authority_id,
+            "authority_hash": self.authority_hash,
+            "revealed_at": self.revealed_at.isoformat(),
+            "synthetic": True,
+        }
 
 
 @dataclass(frozen=True, slots=True)

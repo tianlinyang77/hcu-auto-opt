@@ -298,6 +298,12 @@ invalid bindings / correctness / cleanup / evidence → invalid
 Evidence Index 必须列出每个外部 URI、内容 Hash、类型、生产者、保留责任和可访问性检查结果。
 递归验证任何缺失或 Hash 不一致时 Bundle 为 `invalid`，不能只复制赢家摘要后签核。
 
+Scripted 实现使用 `m2a-evidence-index-v1`。条目以稳定 role 标识 Search/Holdout Plan、Barrier、
+Candidate/Artifact、正确性、原始输入、同时期 Baseline、预算、清理、失败和 FWER 证据；子条目
+允许递归分组，但全树 role、URI 和跨角色 Hash 必须唯一。Verifier 实际重读全部条目并独立复算
+SHA256，索引声明的 `accessibility_status=verified` 不能代替真实读取。实现与运行方式见
+[`m2-round-evidence.md`](m2-round-evidence.md)。
+
 `terminal_reason=no_promotable_candidate` 时 Holdout Family/Plan reveal、Holdout Barrier 和 FWER
 引用必须全部为空；其他 Candidate、Search、失败、预算与清理证据仍必须完整。
 `terminal_reason=holdout_completed` 时这四类引用必须全部非空。`run_mode=scripted` 与

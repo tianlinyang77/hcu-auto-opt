@@ -112,6 +112,8 @@ def _adjusted(
         scripted_phase_receipt_id=None if invalid else _uuid(400 + ordinal),
         synthetic=True,
         correctness_evidence_hash=_hash(str(ordinal + 4)),
+        raw_evidence_hash=None if invalid else _hash(str(ordinal + 5)),
+        baseline_sample_set_hash=None if invalid else _hash(str(ordinal + 6)),
         verdict=verdict,
         adjusted_ci_lower=None if invalid else lower,
         adjusted_ci_upper=None if invalid else upper,
@@ -189,7 +191,10 @@ def _bundle(*, holdout: bool, synthetic: bool = True, **updates: object) -> Roun
         "budget_ledger_hash": _hash("8"),
         "evidence_index_uri": "file:///evidence/index.json",
         "evidence_index_hash": _hash("9"),
-        "summary": {"performance_conclusion": "not_available"},
+        "summary": {
+            "performance_conclusion": "not_measured",
+            "evidence_authority": "synthetic_fixture_only",
+        },
         "synthetic": synthetic,
         "created_at": NOW,
     }
@@ -277,6 +282,10 @@ def test_adjusted_verdict_uses_conservative_threshold() -> None:
     assert inconclusive.verdict is ManualCandidateVerdict.INCONCLUSIVE
     with pytest.raises(ValidationError, match="does not match"):
         _adjusted(3, ManualCandidateVerdict.FASTER, lower=0.02, upper=0.10)
+    values = faster.model_dump(mode="python")
+    values["baseline_sample_set_hash"] = None
+    with pytest.raises(ValidationError, match="raw and Baseline"):
+        AdjustedCandidateResult.model_validate(values)
 
 
 def test_bonferroni_keeps_invalid_in_m_and_recommends_deterministically() -> None:
@@ -330,3 +339,11 @@ def test_round_evidence_rejects_synthetic_formal_mismatch_and_naive_time() -> No
         _bundle(holdout=False, run_mode="formal", synthetic=True)
     with pytest.raises(ValidationError, match="timezone-aware"):
         _bundle(holdout=False, created_at=datetime(2026, 8, 27))
+    with pytest.raises(ValidationError, match="cannot claim"):
+        _bundle(
+            holdout=False,
+            summary={
+                "performance_conclusion": "faster",
+                "evidence_authority": "synthetic_fixture_only",
+            },
+        )
