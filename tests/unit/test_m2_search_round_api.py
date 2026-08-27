@@ -230,6 +230,8 @@ def test_search_round_api_is_declared_in_openapi() -> None:
     assert "/v1/search-rounds/{round_id}/barriers/holdout:close" in paths
     assert "/v1/search-rounds/{round_id}/multiple-comparison" in paths
     assert "/v1/search-rounds/{round_id}/scripted:finalize" in paths
+    assert "/v1/search-rounds/{round_id}/cancel" in paths
+    assert "/v1/search-rounds/{round_id}/reconcile" in paths
 
 
 def test_search_round_budget_api_preserves_atomic_pairs() -> None:
@@ -380,3 +382,38 @@ def test_search_round_artifact_api_rejects_path_identity_mismatch() -> None:
     assert response.status_code == 409
     assert response.json()["code"] == "conflict"
     repository.record_round_candidate_build.assert_not_called()
+
+
+def test_search_round_cancel_and_reconcile_expose_fail_closed_control_actions() -> None:
+    repository = _repository()
+    payload = _round_payload()
+    cancelled = {
+        **_persisted(payload),
+        "state": "cancelled",
+        "version": 2,
+    }
+    repository.cancel_scripted_search_round.return_value = cancelled
+    repository.reconcile_scripted_search_round.return_value = {
+        "round": cancelled,
+        "consistent": True,
+        "next_action": "none",
+        "reason": "cancelled Round is terminal",
+        "automatic_release_allowed": False,
+    }
+
+    with TestClient(create_app(repository=repository)) as client:
+        cancel = client.post(
+            f"/v1/search-rounds/{payload['round_id']}/cancel",
+            json={"reason": "operator requested stop"},
+        )
+        reconcile = client.post(
+            f"/v1/search-rounds/{payload['round_id']}/reconcile"
+        )
+
+    assert cancel.status_code == 200
+    assert cancel.json()["state"] == "cancelled"
+    assert reconcile.status_code == 200
+    assert reconcile.json()["next_action"] == "none"
+    assert reconcile.json()["automatic_release_allowed"] is False
+    repository.cancel_scripted_search_round.assert_called_once()
+    repository.reconcile_scripted_search_round.assert_called_once()

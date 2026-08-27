@@ -18,7 +18,11 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     SearchRound,
 )
-from hcuopt.domain.enums import RoundCandidateState, SearchRoundState
+from hcuopt.domain.enums import (
+    RoundBudgetEntryType,
+    RoundCandidateState,
+    SearchRoundState,
+)
 from hcuopt.domain.errors import Conflict
 from hcuopt.evaluation.m2_authority import SyntheticHoldoutPlanAuthority
 from hcuopt.evaluation.m2_finalizer import M2ScriptedRoundFinalizer
@@ -624,7 +628,7 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
         release = settle.model_copy(
             update={
                 "ledger_entry_id": uuid4(),
-                "entry_type": "release",
+                "entry_type": RoundBudgetEntryType.RELEASE,
                 "actual": BudgetUsage(),
                 "lease_held_seconds": 0,
                 "harness_active_seconds": 0,
@@ -752,6 +756,13 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                     )
                 self.assertEqual(closed[0]["state"], "search_barrier")
                 self.assertEqual(closed[0]["version"], closed[1]["version"])
+                reconciled = self.repository.reconcile_scripted_search_round(
+                    request.round_id
+                )
+                self.assertEqual(
+                    reconciled["next_action"],
+                    "record_holdout_reveal" if promote else "finalize_scripted_round",
+                )
 
                 holdout_barrier = None
                 multiple_comparison = None
@@ -789,6 +800,12 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                     )
                     revealed = self.repository.record_scripted_holdout_reveal(reveal)
                     self.assertEqual(revealed["state"], "holdout_measuring")
+                    self.assertEqual(
+                        self.repository.reconcile_scripted_search_round(
+                            request.round_id
+                        )["next_action"],
+                        "close_holdout_barrier",
+                    )
                     holdout_authority_row = self._round_authority(revealed).model_copy(
                         update={"state": SearchRoundState.HOLDOUT_BARRIER}
                     )
@@ -854,6 +871,12 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                         holdout_barrier
                     )
                     self.assertEqual(held["state"], "holdout_barrier")
+                    self.assertEqual(
+                        self.repository.reconcile_scripted_search_round(
+                            request.round_id
+                        )["next_action"],
+                        "record_multiple_comparison",
+                    )
                     multiple_comparison = bonferroni_fwer(
                         round_authority=self._round_authority(held),
                         holdout_barrier=holdout_barrier,
@@ -865,6 +888,12 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         replayed.result_hash, multiple_comparison.result_hash
+                    )
+                    self.assertEqual(
+                        self.repository.reconcile_scripted_search_round(
+                            request.round_id
+                        )["next_action"],
+                        "finalize_scripted_round",
                     )
 
                 summary = self.repository.search_round_summary(request.round_id)
@@ -914,7 +943,22 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                 final_summary = self.repository.search_round_summary(request.round_id)
                 self.assertIsNotNone(final_summary["evidence_bundle"])
                 self.assertFalse(final_summary["automatic_release_allowed"])
+                self.assertEqual(
+                    self.repository.reconcile_scripted_search_round(
+                        request.round_id
+                    )["next_action"],
+                    "none",
+                )
+                with self.assertRaises(Conflict):
+                    self.repository.cancel_scripted_search_round(
+                        request.round_id, "too late"
+                    )
                 with self.connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT state FROM tasks WHERE task_id = %s",
+                        (request.task_id,),
+                    )
+                    self.assertEqual(cursor.fetchone()[0], "completed")
                     cursor.execute(
                         """
                         SELECT event_type, count(*) FROM task_events
@@ -937,3 +981,99 @@ class M2SearchRoundPostgresTests(unittest.TestCase):
                     self.assertEqual(
                         event_counts["m2_multiple_comparison_recorded"], 1
                     )
+
+    def test_scripted_round_cancel_is_idempotent_and_requires_idle_budget(self) -> None:
+        request = self._round(
+            task_id=uuid4(),
+            idempotency_key=f"m2-cancel-{uuid4()}",
+        )
+        self.repository.create_search_round(request)
+        self.assertEqual(
+            self.repository.reconcile_scripted_search_round(request.round_id)[
+                "next_action"
+            ],
+            "await_candidate_intake",
+        )
+        for ordinal in range(2):
+            self.repository.add_round_candidate(
+                self._candidate(
+                    request.round_id,
+                    ordinal,
+                    idempotency_key=f"m2-cancel-candidate-{request.round_id}-{ordinal}",
+                )
+            )
+        self.assertEqual(
+            self.repository.reconcile_scripted_search_round(request.round_id)[
+                "next_action"
+            ],
+            "close_intake",
+        )
+        self.repository.close_search_round_intake(request.round_id)
+
+        job_id = self._add_job(request.task_id, f"cancel-{request.round_id}")
+        reservation, reserve = self._reservation(
+            request.round_id,
+            job_id,
+            f"cancel-{request.round_id}",
+            BudgetUsage(search_samples=1),
+        )
+        self.repository.reserve_round_budget(reservation, reserve)
+        with self.assertRaises(Conflict):
+            self.repository.cancel_scripted_search_round(
+                request.round_id, "budget still reserved"
+            )
+        release = reserve.model_copy(
+            update={
+                "ledger_entry_id": uuid4(),
+                "entry_type": RoundBudgetEntryType.RELEASE,
+                "idempotency_key": f"m2-cancel-release-{request.round_id}",
+                "created_at": datetime.now(timezone.utc),
+            }
+        )
+        self.repository.finalize_round_budget(release)
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE jobs SET state = 'running' WHERE job_id = %s",
+                (job_id,),
+            )
+        self.connection.commit()
+        with self.assertRaises(Conflict):
+            self.repository.cancel_scripted_search_round(
+                request.round_id, "job still running"
+            )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE jobs SET state = 'failed' WHERE job_id = %s",
+                (job_id,),
+            )
+        self.connection.commit()
+
+        cancelled = self.repository.cancel_scripted_search_round(
+            request.round_id, "operator requested stop"
+        )
+        replay = self.repository.cancel_scripted_search_round(
+            request.round_id, "replayed reason is ignored"
+        )
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(cancelled["version"], replay["version"])
+        self.assertEqual(
+            self.repository.reconcile_scripted_search_round(request.round_id)[
+                "next_action"
+            ],
+            "none",
+        )
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM tasks WHERE task_id = %s",
+                (request.task_id,),
+            )
+            self.assertEqual(cursor.fetchone()[0], "cancelled")
+            cursor.execute(
+                """
+                SELECT count(*) FROM task_events
+                WHERE task_id = %s AND event_type = 'm2_search_round_cancelled'
+                """,
+                (request.task_id,),
+            )
+            self.assertEqual(cursor.fetchone()[0], 1)

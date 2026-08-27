@@ -351,3 +351,22 @@ class SearchRoundSummary(ContractModel):
     multiple_comparison: dict | None = None
     evidence_bundle: dict | None = None
     automatic_release_allowed: Literal[False] = False
+
+
+class SearchRoundReconcileResult(ContractModel):
+    round: SearchRoundView
+    consistent: Literal[True] = True
+    next_action: Literal[
+        "await_candidate_intake",
+        "close_intake",
+        "await_build_terminals",
+        "freeze_artifact_family",
+        "close_search_barrier",
+        "record_holdout_reveal",
+        "close_holdout_barrier",
+        "record_multiple_comparison",
+        "finalize_scripted_round",
+        "none",
+    ]
+    reason: str = Field(min_length=1, max_length=500)
+    automatic_release_allowed: Literal[False] = False
