@@ -346,4 +346,8 @@ class SearchRoundSummary(ContractModel):
     candidates: list[RoundCandidateView]
     budget_reservations: list[RoundBudgetReservationView]
     budget_ledger: list[RoundBudgetLedgerEntry]
+    barriers: list[dict] = Field(default_factory=list)
+    holdout_reveal: dict | None = None
+    multiple_comparison: dict | None = None
+    evidence_bundle: dict | None = None
     automatic_release_allowed: Literal[False] = False

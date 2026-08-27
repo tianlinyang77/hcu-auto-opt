@@ -103,8 +103,13 @@ M1 专用接口位于 `src/hcuopt/contracts/v1.py`、`src/hcuopt/contracts/m1.py
 Profile 必须由部署方显式组合 A/B/C/D Adapter；默认 Catalog 不提供自动回退。首份真实
 证据已签核，因此 `m1-kernel-performance-evidence-v1` 按只读兼容边界管理。
 
-M2a 当前只处于设计评审，拟新增 `SearchRound`、Phase-aware 测量引用、Barrier、Bonferroni
-FWER 和 Round EvidenceBundle；这些对象尚未进入本页所述的已实现公共接口。草案见
-[M2 Contract 草案](m2-contract-draft.md)。面向 CLI/Web 的 Operator Facade 另以版本化
-Profile、Plan Preview 和可重建 Read Model 提供受控外观，不复制领域状态；其 Non-runnable
-草案见 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
+M2a 的无 HCU Scripted 控制面已经实现 `SearchRound`、2–4 Candidate Intake、Candidate/Artifact
+Family Freeze、原子 Budget Ledger、Search/Holdout Barrier、Holdout Reveal、Bonferroni FWER、
+递归 Round Evidence 和 `scripted_completed`。写入顺序与 Authority 边界见
+[M2 Scripted Round 持久化与最终化](m2-scripted-finalizer.md)，完整字段见
+[M2 Contract 草案](m2-contract-draft.md)。
+
+这些接口仍不是 Formal HCU 入口：默认服务不配置 synthetic Finalizer，必须由部署方或后续
+Scripted Coordinator 显式注入 Evidence Reader；synthetic Evidence 不能进入 Formal Signoff。
+面向 CLI/Web 的 Operator Facade 继续以版本化 Profile、Plan Preview 和可重建 Read Model 提供
+受控外观，不复制领域状态；草案见 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。

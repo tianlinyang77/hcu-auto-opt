@@ -11,6 +11,66 @@ from hcuopt.measurement.evidence import canonical_json_bytes
 BUILD_TERMINAL_STATES = frozenset({"built", "build_failed", "invalid"})
 
 
+def round_budget_ledger_document(
+    round_id: object,
+    reservations: Sequence[Mapping[str, Any]],
+    ledger_entries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Canonical A-owned budget evidence consumed by the D Evidence Index."""
+
+    def reservation(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "reservation_id": str(item["reservation_id"]),
+            "round_id": str(item["round_id"]),
+            "job_id": str(item["job_id"]),
+            "attempt": int(item["attempt"]),
+            "candidate_id": (
+                str(item["candidate_id"]) if item.get("candidate_id") is not None else None
+            ),
+            "phase": item.get("phase"),
+            "planned": item["planned"],
+            "state": item["state"],
+            "idempotency_key": item["idempotency_key"],
+        }
+
+    def ledger(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "ledger_entry_id": str(item["ledger_entry_id"]),
+            "reservation_id": str(item["reservation_id"]),
+            "round_id": str(item["round_id"]),
+            "entry_type": item["entry_type"],
+            "reserved": item["reserved"],
+            "actual": item["actual"],
+            "lease_held_seconds": float(item["lease_held_seconds"]),
+            "harness_active_seconds": float(item["harness_active_seconds"]),
+            "raw_usage_evidence_hash": item["raw_usage_evidence_hash"],
+            "idempotency_key": item["idempotency_key"],
+            "created_at": item["created_at"].isoformat(),
+        }
+
+    return {
+        "schema_version": "m2a-round-budget-ledger-v1",
+        "round_id": str(round_id),
+        "reservations": [
+            reservation(item)
+            for item in sorted(reservations, key=lambda row: str(row["reservation_id"]))
+        ],
+        "ledger_entries": [
+            ledger(item)
+            for item in sorted(ledger_entries, key=lambda row: str(row["ledger_entry_id"]))
+        ],
+    }
+
+
+def round_budget_ledger_hash(
+    round_id: object,
+    reservations: Sequence[Mapping[str, Any]],
+    ledger_entries: Sequence[Mapping[str, Any]],
+) -> str:
+    document = round_budget_ledger_document(round_id, reservations, ledger_entries)
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(document)).hexdigest()
+
+
 def candidate_family_hash(
     round_authority: Mapping[str, Any],
     members: Sequence[Mapping[str, Any]],
