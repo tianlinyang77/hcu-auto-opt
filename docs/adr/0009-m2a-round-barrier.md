@@ -63,6 +63,11 @@ B 的唯一 Harness 产生这份可复算原始证据，并由新的 `RoundMeasu
 M2 不重写或迁移已有 M1 Evidence。D 先复用单次比较验证器重读每份原始证据，再执行轮次级
 选择和多重比较。
 
+无 HCU Scripted 运行只验证编排，生成独立的 synthetic Phase Receipt，状态固定为
+`not_measured`。它不能创建或序列化为 `RoundMeasurementRef`，也不能作为 Barrier 的
+Measurement Ref 输入；正式 Ref 固定绑定 `m1-kernel-performance-evidence-v1` 且
+`synthetic=false`。
+
 ### 4. Search 与 Holdout 在候选测量前冻结并隔离
 
 D 在 Candidate Intake Close 前生成两份独立计划：

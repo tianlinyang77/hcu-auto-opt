@@ -33,6 +33,7 @@ from hcuopt.measurement.m2_models import (
     M2PhaseBudgetReservationPlan,
     M2PhaseExecutionContext,
     M2PhaseMeasurementRequest,
+    M2PhaseUsageEvidence,
     M2ScriptedHarnessResult,
     M2ScriptedPhaseEvidence,
 )
@@ -343,10 +344,11 @@ def test_search_phase_reserves_measures_cleans_and_settles(tmp_path: Path) -> No
         output_dir=tmp_path / "evidence",
     )
 
-    assert outcome.reference.phase is RoundPhase.SEARCH
-    assert outcome.reference.holdout_family_hash is None
-    assert outcome.reference.producer_verdict is None
-    assert outcome.reference.synthetic is True
+    assert outcome.scripted_receipt.phase is RoundPhase.SEARCH
+    assert outcome.scripted_receipt.holdout_family_hash is None
+    assert outcome.scripted_receipt.status == "not_measured"
+    assert outcome.scripted_receipt.synthetic is True
+    assert "producer_verdict" not in outcome.scripted_receipt.model_dump()
     assert harness.payloads[0]["phase"] == "search"
     assert harness.payloads[0]["artifact_hash"] == member.artifact_hash
     settle = budget.finalize_requests[0].ledger_entry
@@ -355,7 +357,11 @@ def test_search_phase_reserves_measures_cleans_and_settles(tmp_path: Path) -> No
     assert settle.actual.holdout_samples == 0
     assert settle.harness_active_seconds == 1
     assert settle.lease_held_seconds == 4
-    assert file_uri_to_path(outcome.usage_evidence_uri).is_file()
+    usage_path = file_uri_to_path(outcome.usage_evidence_uri)
+    assert usage_path.is_file()
+    usage = M2PhaseUsageEvidence.model_validate_json(usage_path.read_bytes())
+    assert usage.status == "not_measured"
+    assert usage.synthetic is True
 
 
 def test_search_and_holdout_use_distinct_phase_and_evidence_identities(
@@ -396,10 +402,13 @@ def test_search_and_holdout_use_distinct_phase_and_evidence_identities(
         output_dir=tmp_path / "holdout",
     )
 
-    assert outcome.reference.phase is RoundPhase.HOLDOUT
-    assert outcome.reference.holdout_family_hash == holdout_round.holdout_family_hash
+    assert outcome.scripted_receipt.phase is RoundPhase.HOLDOUT
     assert (
-        outcome.reference.holdout_reveal_evidence_hash
+        outcome.scripted_receipt.holdout_family_hash
+        == holdout_round.holdout_family_hash
+    )
+    assert (
+        outcome.scripted_receipt.holdout_reveal_evidence_hash
         == holdout_round.holdout_reveal_evidence_hash
     )
     assert outcome.settlement.ledger_entry.actual.holdout_samples == 8
@@ -435,7 +444,7 @@ def test_reused_phase_evidence_identity_fails_closed(
         output_dir=tmp_path / "first",
     )
 
-    # Build a second reference with only one reused identity, leaving all earlier
+    # Build a second receipt with only one reused identity, leaving all earlier
     # uniqueness keys distinct so the stable field-specific rejection is observable.
     second_request = _request(round_authority, member, RoundPhase.SEARCH, suffix="second")
     second_result = _result(tmp_path, second_request, suffix="second")
@@ -447,14 +456,14 @@ def test_reused_phase_evidence_identity_fails_closed(
         request=second_request,
         output_dir=tmp_path / f"candidate-{field}",
     )
-    reused_reference = second_outcome.reference.model_copy(
-        update={field: getattr(first_outcome.reference, field)}
+    reused_receipt = second_outcome.scripted_receipt.model_copy(
+        update={field: getattr(first_outcome.scripted_receipt, field)}
     )
     with pytest.raises(MeasurementSafetyError, match=f"reused {field}"):
-        registry.validate(reused_reference)
+        registry.validate(reused_receipt)
 
 
-def test_partial_sampling_is_settled_but_never_returns_measured_ref(
+def test_partial_sampling_is_settled_but_never_returns_scripted_receipt(
     tmp_path: Path,
 ) -> None:
     round_authority = _round(RoundPhase.SEARCH)

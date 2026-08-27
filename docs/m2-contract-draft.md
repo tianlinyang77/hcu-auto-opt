@@ -187,6 +187,13 @@ Candidate Family Hash 必须直接包含上述 Package/Manifest/Kind 字段，�
 不同。采集、清理或证据生产失败时不创建伪装成完整测量的 Ref，失败证据直接进入
 `BarrierMemberResult`；D 可据此给出 `invalid`，该成员仍保留在冻结家族中。
 
+Scripted 路径不得创建 `RoundMeasurementRef`。它只生成
+`M2ScriptedPhaseReceipt(status=not_measured, synthetic=true)`，用于验证 Phase 隔离、预算、
+Fencing、清理和证据传递控制流。该 Receipt 使用独立 Schema/ID，不能被 D、Barrier 或
+Round Evidence 当成 `m1-kernel-performance-evidence-v1` 的正式测量输入。只有 Real Harness
+产出的 M1 原始证据通过重读与 Hash 校验后，才能建立
+`RoundMeasurementRef(status=measured, synthetic=false)`。
+
 ### 3.4 `RoundBarrierResult`
 
 Barrier 是批级权威，单个 Worker 不能自行宣告关闭。

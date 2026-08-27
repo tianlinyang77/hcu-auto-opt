@@ -38,7 +38,7 @@ from hcuopt.measurement.m2_models import (
     M2PhaseUsageEvidence,
     M2ScriptedHarnessResult,
     M2ScriptedPhaseEvidence,
-    RoundMeasurementRef,
+    M2ScriptedPhaseReceipt,
     utcnow,
 )
 from hcuopt.source_hash import file_uri_to_path
@@ -105,34 +105,34 @@ class M2PhaseIsolationRegistry:
         }
         self._phase_plans: dict[tuple[UUID, RoundPhase], str] = {}
 
-    def validate(self, reference: RoundMeasurementRef) -> None:
+    def validate(self, receipt: M2ScriptedPhaseReceipt) -> None:
         for field in self._UNIQUE_FIELDS:
-            if getattr(reference, field) in self._seen[field]:
+            if getattr(receipt, field) in self._seen[field]:
                 raise MeasurementSafetyError(
                     f"M2 phase isolation rejected reused {field}"
                 )
         other_phase = (
             RoundPhase.HOLDOUT
-            if reference.phase is RoundPhase.SEARCH
+            if receipt.phase is RoundPhase.SEARCH
             else RoundPhase.SEARCH
         )
-        if self._phase_plans.get((reference.round_id, other_phase)) == (
-            reference.phase_plan_hash
+        if self._phase_plans.get((receipt.round_id, other_phase)) == (
+            receipt.phase_plan_hash
         ):
             raise MeasurementSafetyError("Search and Holdout cannot reuse one Phase Plan")
 
-    def commit(self, reference: RoundMeasurementRef) -> None:
-        self.validate(reference)
+    def commit(self, receipt: M2ScriptedPhaseReceipt) -> None:
+        self.validate(receipt)
         for field in self._UNIQUE_FIELDS:
-            self._seen[field].add(getattr(reference, field))
-        self._phase_plans[(reference.round_id, reference.phase)] = (
-            reference.phase_plan_hash
+            self._seen[field].add(getattr(receipt, field))
+        self._phase_plans[(receipt.round_id, receipt.phase)] = (
+            receipt.phase_plan_hash
         )
 
 
 @dataclass(frozen=True, slots=True)
 class M2PhaseMeasurementOutcome:
-    reference: RoundMeasurementRef
+    scripted_receipt: M2ScriptedPhaseReceipt
     reservation: RoundBudgetMutationResult
     settlement: RoundBudgetMutationResult
     usage_evidence_uri: str
@@ -214,12 +214,14 @@ class M2PhaseMeasurementRunner:
         except BaseException as exc:
             failure = exc
 
-        reference: RoundMeasurementRef | None = None
+        scripted_receipt: M2ScriptedPhaseReceipt | None = None
         try:
             if failure is None:
                 assert result is not None
-                reference = self._reference(round_authority, member, request, result)
-                self.isolation_registry.validate(reference)
+                scripted_receipt = self._scripted_receipt(
+                    round_authority, member, request, result
+                )
+                self.isolation_registry.validate(scripted_receipt)
         except BaseException as exc:
             failure = exc
 
@@ -265,10 +267,10 @@ class M2PhaseMeasurementRunner:
 
         if failure is not None:
             raise failure
-        assert reference is not None
-        self.isolation_registry.commit(reference)
+        assert scripted_receipt is not None
+        self.isolation_registry.commit(scripted_receipt)
         return M2PhaseMeasurementOutcome(
-            reference=reference,
+            scripted_receipt=scripted_receipt,
             reservation=reserved,
             settlement=settlement,
             usage_evidence_uri=usage_uri,
@@ -507,20 +509,20 @@ class M2PhaseMeasurementRunner:
             )
 
     @staticmethod
-    def _reference(
+    def _scripted_receipt(
         round_authority: SearchRound,
         member: RoundCandidate,
         request: M2PhaseMeasurementRequest,
         result: M2ScriptedHarnessResult,
-    ) -> RoundMeasurementRef:
+    ) -> M2ScriptedPhaseReceipt:
         assert round_authority.candidate_family_hash is not None
         assert round_authority.artifact_family_hash is not None
         assert member.artifact_id is not None
         assert member.artifact_hash is not None
-        return RoundMeasurementRef(
-            round_measurement_ref_id=uuid5(
+        return M2ScriptedPhaseReceipt(
+            scripted_phase_receipt_id=uuid5(
                 NAMESPACE_URL,
-                "hcuopt:m2-round-measurement:"
+                "hcuopt:m2-scripted-phase-receipt:"
                 f"{round_authority.round_id}:{member.candidate_id}:"
                 f"{request.reservation.phase.value}:{result.measurement_id}",
             ),
@@ -671,7 +673,7 @@ class M2PhaseMeasurementRunner:
             candidate_id=request.reservation.candidate_id,
             phase=request.reservation.phase,
             reservation_id=request.reservation.reservation_id,
-            status="failed" if failure is not None else "measured",
+            status="failed" if failure is not None else "not_measured",
             planned=request.reservation.planned,
             actual=actual,
             lease_held_seconds=lease_seconds,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
@@ -15,8 +16,12 @@ from hcuopt.domain.enums import RoundPhase
 
 M2_PHASE_PLAN_SCHEMA_VERSION = "m2a-phase-measurement-plan-v1"
 M2_SCRIPTED_PHASE_EVIDENCE_SCHEMA_VERSION = "m2a-scripted-phase-evidence-v1"
+M2_SCRIPTED_PHASE_RECEIPT_SCHEMA_VERSION = "m2a-scripted-phase-receipt-v1"
 M2_ROUND_MEASUREMENT_REF_SCHEMA_VERSION = "m2a-round-measurement-ref-v1"
 M2_PHASE_USAGE_EVIDENCE_SCHEMA_VERSION = "m2a-phase-budget-usage-v1"
+M1_KERNEL_PERFORMANCE_EVIDENCE_SCHEMA_VERSION = (
+    "m1-kernel-performance-evidence-v1"
+)
 
 
 def utcnow() -> datetime:
@@ -185,11 +190,9 @@ class M2ScriptedPhaseEvidence(FrozenMeasurementModel):
         return self
 
 
-class RoundMeasurementRef(FrozenMeasurementModel):
-    schema_version: Literal["m2a-round-measurement-ref-v1"] = (
-        M2_ROUND_MEASUREMENT_REF_SCHEMA_VERSION
-    )
-    round_measurement_ref_id: UUID
+class M2PhaseEvidenceBinding(FrozenMeasurementModel):
+    """Fields shared by formal refs and non-authoritative Scripted receipts."""
+
     round_id: UUID
     round_candidate_id: UUID
     candidate_id: UUID
@@ -214,13 +217,9 @@ class RoundMeasurementRef(FrozenMeasurementModel):
     lease_id: UUID
     resource_id: str = Field(min_length=1, max_length=200)
     fencing_token: int = Field(ge=1)
-    status: Literal["measured"] = "measured"
-    synthetic: Literal[True] = True
-    producer_verdict: Literal[None] = None
-    created_at: datetime = Field(default_factory=utcnow)
 
     @model_validator(mode="after")
-    def require_phase_specific_bindings(self) -> RoundMeasurementRef:
+    def require_phase_specific_bindings(self) -> M2PhaseEvidenceBinding:
         if self.phase is RoundPhase.SEARCH:
             if (
                 self.holdout_family_hash is not None
@@ -235,6 +234,99 @@ class RoundMeasurementRef(FrozenMeasurementModel):
         return self
 
 
+class RoundMeasurementRef(M2PhaseEvidenceBinding):
+    """Formal authority over one complete, real M1 comparison evidence file."""
+
+    schema_version: Literal["m2a-round-measurement-ref-v1"] = (
+        M2_ROUND_MEASUREMENT_REF_SCHEMA_VERSION
+    )
+    round_measurement_ref_id: UUID
+    evidence_schema_version: Literal["m1-kernel-performance-evidence-v1"] = (
+        M1_KERNEL_PERFORMANCE_EVIDENCE_SCHEMA_VERSION
+    )
+    status: Literal["measured"] = "measured"
+    synthetic: Literal[False] = False
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def require_formal_timestamp(self) -> RoundMeasurementRef:
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("Round Measurement Ref created_at must be timezone-aware")
+        return self
+
+
+class M2ScriptedPhaseReceipt(M2PhaseEvidenceBinding):
+    """Synthetic control-flow receipt; never a formal measurement authority."""
+
+    schema_version: Literal["m2a-scripted-phase-receipt-v1"] = (
+        M2_SCRIPTED_PHASE_RECEIPT_SCHEMA_VERSION
+    )
+    scripted_phase_receipt_id: UUID
+    evidence_schema_version: Literal["m2a-scripted-phase-evidence-v1"] = (
+        M2_SCRIPTED_PHASE_EVIDENCE_SCHEMA_VERSION
+    )
+    status: Literal["not_measured"] = "not_measured"
+    synthetic: Literal[True] = True
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def require_scripted_timestamp(self) -> M2ScriptedPhaseReceipt:
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("Scripted Phase Receipt created_at must be timezone-aware")
+        return self
+
+
+def validate_round_measurement_refs(
+    references: Iterable[RoundMeasurementRef],
+) -> tuple[RoundMeasurementRef, ...]:
+    """Validate a formal authority view without inventing measurement or verdict state."""
+
+    received = tuple(references)
+    if any(not isinstance(item, RoundMeasurementRef) for item in received):
+        raise TypeError("Formal authority accepts only RoundMeasurementRef")
+    items = tuple(
+        sorted(
+            received,
+            key=lambda item: (
+                str(item.round_id),
+                item.phase.value,
+                str(item.candidate_id),
+            ),
+        )
+    )
+    per_round_families: dict[UUID, tuple[str, str]] = {}
+    seen_member_phases: set[tuple[UUID, UUID, RoundPhase]] = set()
+    unique_values: dict[str, set[object]] = {
+        "round_measurement_ref_id": set(),
+        "measurement_id": set(),
+        "raw_evidence_uri": set(),
+        "raw_evidence_hash": set(),
+        "baseline_sample_set_hash": set(),
+        "process_identity_set_hash": set(),
+        "cache_namespace_set_hash": set(),
+    }
+
+    for item in items:
+        families = (item.candidate_family_hash, item.artifact_family_hash)
+        existing_families = per_round_families.setdefault(item.round_id, families)
+        if existing_families != families:
+            raise ValueError("Round Measurement Refs bind different frozen families")
+
+        member_phase = (item.round_id, item.candidate_id, item.phase)
+        if member_phase in seen_member_phases:
+            raise ValueError("Candidate Phase already has a Round Measurement Ref")
+        seen_member_phases.add(member_phase)
+
+        for field_name, values in unique_values.items():
+            value = getattr(item, field_name)
+            if value in values:
+                raise ValueError(
+                    f"Round Measurement Ref reuses {field_name} across Candidate or Phase"
+                )
+            values.add(value)
+    return items
+
+
 class M2PhaseUsageEvidence(FrozenMeasurementModel):
     schema_version: Literal["m2a-phase-budget-usage-v1"] = (
         M2_PHASE_USAGE_EVIDENCE_SCHEMA_VERSION
@@ -243,7 +335,7 @@ class M2PhaseUsageEvidence(FrozenMeasurementModel):
     candidate_id: UUID
     phase: RoundPhase
     reservation_id: UUID
-    status: Literal["measured", "failed", "released"]
+    status: Literal["not_measured", "failed", "released"]
     planned: BudgetUsage
     actual: BudgetUsage
     lease_held_seconds: float = Field(ge=0)
@@ -272,9 +364,12 @@ class M2PhaseUsageEvidence(FrozenMeasurementModel):
             self.raw_evidence_hash,
             self.cleanup_evidence,
         )
-        if self.status == "measured":
+        if self.status == "not_measured":
             if any(value is None for value in measured_fields) or self.error_code is not None:
-                raise ValueError("measured usage requires complete evidence and no error")
+                raise ValueError(
+                    "not_measured Scripted usage requires complete synthetic evidence "
+                    "and no error"
+                )
         elif self.status == "failed":
             if self.error_code is None:
                 raise ValueError("failed usage requires an error code")
