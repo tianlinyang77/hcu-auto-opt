@@ -257,6 +257,12 @@ class MemoryStartRepository(PreviewRepository):
         assert self.intent is not None and self.intent.round_id == round_id
         return self.intent
 
+    def list_operator_round_ids(self, limit):  # type: ignore[no-untyped-def]
+        assert 1 <= limit <= 100
+        if self.intent is None or self.intent.state != "finalized":
+            return ()
+        return (self.intent.round_id,)
+
     def record_operator_start_plans(
         self, intent_id, plans: FrozenScriptedPlans
     ):  # type: ignore[no-untyped-def]
@@ -699,6 +705,7 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
             json=start_request.model_dump(mode="json"),
         )
         status = client.get(f"/v1/operator/start-intents/{first.intent_id}")
+        round_list = client.get("/v1/operator/search-rounds?limit=10")
         summary = client.get(
             f"/v1/operator/search-rounds/{first.round_id}/summary"
         )
@@ -711,6 +718,8 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
     assert started.headers["location"].endswith(str(first.intent_id))
     assert status.status_code == 200
     assert status.json()["state"] == "finalized"
+    assert round_list.status_code == 200
+    assert [item["round_id"] for item in round_list.json()] == [str(first.round_id)]
     assert summary.status_code == 200
     assert summary.json()["schema_version"] == "m2-operator-read-model-v1"
     assert summary.json()["next_action"] == "await_build_terminals"

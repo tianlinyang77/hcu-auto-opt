@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
@@ -502,6 +502,16 @@ def create_app(
         request: Request,
     ) -> OperatorStartIntentView:
         return start_coordinator.reconcile(intent_id, repo(request))
+
+    @application.get(
+        "/v1/operator/search-rounds",
+        response_model=list[OperatorRoundSummary],
+    )
+    def list_operator_search_rounds(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[OperatorRoundSummary]:
+        return read_models.summaries(repo(request), limit=limit)
 
     @application.get(
         "/v1/operator/search-rounds/{round_id}/summary",

@@ -7,6 +7,7 @@ __pycache__/
 venv/
 dist/
 build/
+node_modules/
 .env
 .idea/
 .vscode/
