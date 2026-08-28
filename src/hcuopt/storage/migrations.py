@@ -10,6 +10,7 @@ MIGRATIONS = {
     7: "0007_m1_hotspot_overlay_pipeline.sql",
     8: "0008_m2_search_round.sql",
     9: "0009_m2_round_authority.sql",
+    10: "0010_operator_plan_preview.sql",
 }
 
 

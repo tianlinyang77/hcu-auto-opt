@@ -223,9 +223,14 @@ Fake、Scripted 和 Formal 使用固定且明显不同的标识；页面不得�
 - Preview 阻塞项、幂等启动、稳定错误和 Scripted 全链；
 - Windows/Linux CLI 契约测试。
 
-当前首个运行时切片已实现 `m2-operator-v1` Service Identity、三类 strict Profile Contract、
-确定性 Profile/Catalog Hash、默认仅允许 synthetic Scripted 的 Profile Registry，以及 Profile
-list/show API。Plan Preview、StartIntent 和 CLI 全链仍未完成，不能据此宣称 OX-1 已退出。
+当前前两个运行时切片已实现 `m2-operator-v1` Service Identity、三类 strict Profile Contract、
+确定性 Profile/Catalog Hash、默认仅允许 synthetic Scripted 的 Profile Registry、Profile
+list/show API，以及 PostgreSQL 持久化的 `round plan` Preview/Preflight。Preview 会重新解析
+Target/Stage 0/Baseline/Hotspot Authority、复核内容寻址 Candidate Package，并显式冻结协议、预算、
+输入集合 Hash、有效期和阻塞/警告；它不占用 HCU，也不创建 Task 或 SearchRound。
+
+StartIntent 和 CLI 全链仍未完成，因此即使 Preview 返回 `start_allowed=true`，当前也只能表示输入
+满足启动前条件，不能据此宣称 Round 已创建、优化已执行或 OX-1 已退出。
 
 退出条件：注册 Scripted Profile 后，一条命令启动、另一条命令查看状态和导出报告，全程无需
 SSH、Docker、数据库写入或复制内部 UUID/Hash。

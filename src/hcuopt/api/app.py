@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -24,7 +26,12 @@ from hcuopt.contracts.m2 import (
     SearchRoundSummary,
     SearchRoundView,
 )
-from hcuopt.contracts.operator_v1 import OperatorProfileDescriptor
+from hcuopt.contracts.operator_v1 import (
+    OperatorProfileDescriptor,
+    OperatorServiceIdentity,
+    RoundPlanPreviewRequest,
+    RoundPlanPreviewView,
+)
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.contracts.v1 import (
     AdapterProfileView,
@@ -85,8 +92,11 @@ from hcuopt.evaluation.m2_statistics import SearchBarrierDecision
 from hcuopt.evaluation.stage0_finalizer import FileStage0Finalizer
 from hcuopt.operator import (
     OperatorProfileCatalog,
+    build_operator_service_identity,
     build_scripted_operator_profile_catalog,
 )
+from hcuopt.operator.errors import OperatorPlanHashMismatch
+from hcuopt.operator.plans import OperatorPlanCompiler, operator_preview_request_digest
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
@@ -98,12 +108,36 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_DATABASE_URL = "postgresql://hcuopt:hcuopt@localhost:5432/hcuopt"
 
 
+@lru_cache(maxsize=1)
+def _operator_source_commit() -> str:
+    configured = os.getenv("HCUOPT_SOURCE_COMMIT")
+    if configured:
+        return configured
+    repository_root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    source_commit = completed.stdout.strip()
+    if completed.returncode != 0 or len(source_commit) != 40:
+        raise RuntimeError(
+            "HCUOPT_SOURCE_COMMIT is required when Git metadata is unavailable"
+        )
+    return source_commit
+
+
 def create_app(
     repository: PostgresRepository | None = None,
     workflow_factory: WorkflowFactory = WorkflowRouter,
     target_catalog: TargetCatalog | None = None,
     adapter_profiles: AdapterProfileCatalog | None = None,
     operator_profiles: OperatorProfileCatalog | None = None,
+    operator_service_identity: OperatorServiceIdentity | None = None,
+    operator_plan_compiler: OperatorPlanCompiler | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -111,6 +145,32 @@ def create_app(
     )
     profiles = adapter_profiles or AdapterProfileCatalog()
     operator_catalog = operator_profiles or build_scripted_operator_profile_catalog()
+    if operator_plan_compiler is not None:
+        operator_identity = operator_service_identity or (
+            operator_plan_compiler.service_identity
+        )
+        if operator_identity != operator_plan_compiler.service_identity:
+            raise ValueError("Operator Plan Compiler service identity does not match the API")
+        plan_compiler = operator_plan_compiler
+    else:
+        source_commit = _operator_source_commit()
+        generation = os.getenv("HCUOPT_SERVER_INSTANCE_ID")
+        server_instance_id = (
+            UUID(generation)
+            if generation
+            else uuid5(
+                NAMESPACE_URL,
+                f"hcuopt:operator-service:{source_commit}:{operator_catalog.catalog_hash}",
+            )
+        )
+        operator_identity = operator_service_identity or build_operator_service_identity(
+            source_commit=source_commit,
+            server_instance_id=server_instance_id,
+            catalog=operator_catalog,
+        )
+        plan_compiler = OperatorPlanCompiler(operator_catalog, operator_identity)
+    if operator_identity.profile_catalog_hash != operator_catalog.catalog_hash:
+        raise ValueError("Operator service identity does not bind the active Profile Catalog")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -213,6 +273,13 @@ def create_app(
         return operator_catalog.list(profile_kind)
 
     @application.get(
+        "/v1/operator/identity",
+        response_model=OperatorServiceIdentity,
+    )
+    def get_operator_service_identity() -> OperatorServiceIdentity:
+        return operator_identity
+
+    @application.get(
         "/v1/operator/profiles/{profile_kind}/{profile_id}/versions/{profile_version}",
         response_model=OperatorProfileDescriptor,
     )
@@ -222,6 +289,31 @@ def create_app(
         profile_version: int,
     ) -> OperatorProfileDescriptor:
         return operator_catalog.get(profile_kind, profile_id, profile_version)
+
+    @application.post(
+        "/v1/operator/round-plans:preview",
+        response_model=RoundPlanPreviewView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_operator_round_plan_preview(
+        payload: RoundPlanPreviewRequest,
+        request: Request,
+        response: Response,
+    ) -> RoundPlanPreviewView:
+        repository = repo(request)
+        request_digest = operator_preview_request_digest(payload)
+        existing = repository.get_operator_plan_preview_by_idempotency(
+            payload.idempotency_key
+        )
+        if existing is not None:
+            if existing.preview_request_digest != request_digest:
+                raise OperatorPlanHashMismatch(
+                    "Operator Preview idempotency key was reused with different inputs"
+                )
+            response.status_code = status.HTTP_200_OK
+            return existing
+        preview = plan_compiler.compile(payload, repository)
+        return repository.create_operator_plan_preview(payload.idempotency_key, preview)
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:

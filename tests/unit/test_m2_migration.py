@@ -6,7 +6,8 @@ from hcuopt.storage.migrations import MIGRATIONS, migration_plan, migration_sql
 def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[8] == "0008_m2_search_round.sql"
     assert MIGRATIONS[9] == "0009_m2_round_authority.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 10))
+    assert MIGRATIONS[10] == "0010_operator_plan_preview.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 11))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -53,3 +54,18 @@ def test_m2_round_authority_migration_is_append_only_and_scripted_safe() -> None
     assert "round_evidence_bundles_append_only" in sql
     assert "round_evidence_never_auto_releases" in sql
     assert "VALUES (9, 'm2_round_authority')" in sql
+
+
+def test_operator_preview_migration_is_immutable_and_scripted_safe() -> None:
+    sql = migration_sql(10)
+
+    assert "CREATE TABLE operator_plan_previews" in sql
+    assert "idempotency_key TEXT NOT NULL UNIQUE" in sql
+    assert "operator_plan_previews_append_only" in sql
+    assert "operator_preview_scripted_only" in sql
+    assert "operator_preview_never_auto_releases" in sql
+    assert "operator_preview_payload_id_matches" in sql
+    assert "operator_preview_payload_request_digest_matches" in sql
+    assert "operator_preview_payload_plan_hash_matches" in sql
+    assert "operator_preview_payload_safety_matches" in sql
+    assert "VALUES (10, 'operator_plan_preview')" in sql

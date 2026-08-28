@@ -114,8 +114,12 @@ Scripted Coordinator 显式注入 Evidence Reader；synthetic Evidence 不能进
 面向 CLI/Web 的 Operator Facade 继续以版本化 Profile、Plan Preview 和可重建 Read Model 提供
 受控外观，不复制领域状态；草案见 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
 
-OX-1 已开始提供 `m2-operator-v1` 的 synthetic Profile Registry。当前默认 Catalog 只注册
-Scripted Target/Workload/Measurement 三类不可变 Profile，并开放
-`GET /v1/operator/profiles` 和精确版本查询；Profile Hash、Catalog Hash 和 Service Identity
-均可确定性重算。该入口尚未实现 Plan/Start，因此只是 Scripted 选择模板层，不是 Formal 或
-一键优化完成声明。
+OX-1 已提供 `m2-operator-v1` 的 synthetic Profile Registry 和持久化 Plan Preview。当前默认
+Catalog 只注册 Scripted Target/Workload/Measurement 三类不可变 Profile；公共接口包括
+`GET /v1/operator/identity`、Profile list/show，以及
+`POST /v1/operator/round-plans:preview`。Preview 只在 PostgreSQL Authority 与 Candidate Package
+全部核验后返回 `start_allowed=true`，否则保存明确阻塞项；它固定 synthetic、禁止自动发布，
+不运行 HCU、不创建 Task/SearchRound，也不生成 Holdout nonce/commitment。
+
+部署若未注入与 Target Profile 完全匹配的 Candidate Package Store，Preview 会安全阻塞。当前
+尚未实现 durable StartIntent 和 CLI，因此这一入口不是 Formal 或一键优化完成声明。

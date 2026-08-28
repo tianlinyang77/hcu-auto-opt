@@ -24,6 +24,14 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     SearchRound,
 )
+from hcuopt.contracts.operator_v1 import (
+    ManualOperatorHotspotRef,
+    OperatorHotspotRef,
+    ResolvedOperatorAuthority,
+    RoundPlanPreviewView,
+    TargetOperatorProfileRefs,
+    WorkloadOperatorProfileRefs,
+)
 from hcuopt.contracts.platform_v1 import (
     SHA256_PATTERN,
     ArtifactManifest,
@@ -103,6 +111,7 @@ from hcuopt.evaluation.stage0_verifier import (
     verification_input_digest,
 )
 from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
@@ -196,6 +205,207 @@ class PostgresRepository:
     @staticmethod
     def _search_round_authority(row: Mapping[str, Any]) -> SearchRound:
         return SearchRound.model_validate({name: row[name] for name in SearchRound.model_fields})
+
+    def resolve_scripted_operator_authority(
+        self,
+        target: TargetOperatorProfileRefs,
+        workload: WorkloadOperatorProfileRefs,
+        hotspot: OperatorHotspotRef,
+    ) -> ResolvedOperatorAuthority:
+        """Resolve the latest fully matching frozen Scripted Authority."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    snapshot.target_snapshot_id,
+                    run.stage0_run_id,
+                    baseline.stage0_protocol_hash,
+                    baseline.baseline_epoch_id,
+                    source.source_hash AS baseline_source_hash,
+                    hotspot.hotspot_id,
+                    hotspot.intake_hash AS hotspot_intake_hash,
+                    hotspot.evidence AS hotspot_evidence,
+                    baseline.workload_id,
+                    baseline.workload_hash,
+                    baseline.configuration_hash,
+                    baseline.image_digest,
+                    baseline.adapter_profile
+                FROM target_snapshots AS snapshot
+                JOIN stage0_runs AS run
+                  ON run.target_snapshot_id = snapshot.target_snapshot_id
+                JOIN tasks AS stage0_task ON stage0_task.task_id = run.task_id
+                JOIN baseline_epochs AS baseline
+                  ON baseline.target_snapshot_id = snapshot.target_snapshot_id
+                 AND baseline.stage0_run_id = run.stage0_run_id
+                JOIN source_snapshots AS source
+                  ON source.snapshot_id = baseline.source_snapshot_id
+                JOIN hotspots AS hotspot
+                  ON hotspot.baseline_epoch_id = baseline.baseline_epoch_id
+                WHERE snapshot.target_id = %s
+                  AND snapshot.target_fingerprint = %s
+                  AND run.adapter_profile = %s
+                  AND run.mode = 'dry_run'
+                  AND run.state = 'finalized'
+                  AND stage0_task.stage0_authority = 'synthetic'
+                  AND baseline.frozen = TRUE
+                  AND baseline.baseline_kind = 'search_round'
+                  AND baseline.stage0_protocol_hash = %s
+                  AND baseline.workload_id = %s
+                  AND baseline.workload_hash = %s
+                  AND baseline.configuration_hash = %s
+                  AND baseline.adapter_profile = %s
+                  AND source.synthetic = TRUE
+                  AND hotspot.hotspot_id = %s
+                  AND hotspot.candidate_kind = 'fixture'
+                ORDER BY baseline.created_at DESC, baseline.baseline_epoch_id DESC
+                LIMIT 1
+                FOR SHARE OF snapshot, run, stage0_task, baseline, source, hotspot
+                """,
+                (
+                    target.target_id,
+                    target.target_spec_hash,
+                    target.adapter_profile,
+                    target.required_stage0_protocol_hash,
+                    workload.workload_id,
+                    workload.workload_hash,
+                    workload.configuration_hash,
+                    target.adapter_profile,
+                    hotspot.hotspot_id,
+                ),
+            ).fetchone()
+        if row is None:
+            raise NotFound("matching Scripted Operator Authority not found")
+        evidence = dict(row["hotspot_evidence"])
+        expected_hotspot = (
+            row["hotspot_id"],
+            row["hotspot_intake_hash"],
+            evidence.get("profiler_raw_output_uri"),
+            evidence.get("profiler_raw_output_hash"),
+            evidence.get("correctness_spec_uri"),
+            evidence.get("correctness_spec_hash"),
+            evidence.get("replacement_point"),
+            row["workload_hash"],
+            tuple(evidence.get("shape", ())),
+            evidence.get("dtype"),
+        )
+        requested_hotspot = (
+            hotspot.hotspot_id,
+            hotspot.hotspot_intake_hash,
+            hotspot.profiler_evidence_uri,
+            hotspot.profiler_evidence_hash,
+            hotspot.correctness_evidence_uri,
+            hotspot.correctness_evidence_hash,
+            hotspot.replacement_point,
+            hotspot.workload_hash,
+            hotspot.shape,
+            hotspot.dtype,
+        )
+        if expected_hotspot != requested_hotspot:
+            raise Conflict("Scripted Hotspot Authority bindings do not match")
+        if isinstance(hotspot, ManualOperatorHotspotRef) and (
+            evidence.get("manual_intake_uri"),
+            evidence.get("manual_intake_hash"),
+        ) != (hotspot.manual_intake_uri, hotspot.manual_intake_hash):
+            raise Conflict("Manual Hotspot Intake Authority bindings do not match")
+        return ResolvedOperatorAuthority(
+            target_snapshot_id=row["target_snapshot_id"],
+            stage0_run_id=row["stage0_run_id"],
+            stage0_protocol_hash=row["stage0_protocol_hash"],
+            baseline_epoch_id=row["baseline_epoch_id"],
+            baseline_source_hash=row["baseline_source_hash"],
+            hotspot_id=row["hotspot_id"],
+            replacement_point=evidence["replacement_point"],
+            workload_id=row["workload_id"],
+            workload_hash=row["workload_hash"],
+            configuration_hash=row["configuration_hash"],
+            image_digest=row["image_digest"],
+            adapter_profile=row["adapter_profile"],
+            profiler_evidence_uri=evidence["profiler_raw_output_uri"],
+            profiler_evidence_hash=evidence["profiler_raw_output_hash"],
+            synthetic=True,
+        )
+
+    def get_operator_plan_preview_by_idempotency(
+        self, idempotency_key: str
+    ) -> RoundPlanPreviewView | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT payload FROM operator_plan_previews
+                WHERE idempotency_key = %s
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return RoundPlanPreviewView.model_validate(row["payload"])
+
+    def get_operator_plan_preview(self, preview_id: UUID) -> RoundPlanPreviewView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT payload FROM operator_plan_previews WHERE preview_id = %s",
+                (preview_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"Operator Plan Preview not found: {preview_id}")
+        return RoundPlanPreviewView.model_validate(row["payload"])
+
+    def create_operator_plan_preview(
+        self,
+        idempotency_key: str,
+        preview: RoundPlanPreviewView,
+    ) -> RoundPlanPreviewView:
+        if not preview.synthetic or preview.automatic_release_allowed:
+            raise Conflict("OX-1 persists only synthetic non-releasing Previews")
+        if preview.preview_id != uuid5(
+            NAMESPACE_URL, f"hcuopt:operator-preview:{idempotency_key}"
+        ) or preview.resolved_plan_hash != self._m2_payload_hash(preview.resolved_plan):
+            raise OperatorPlanHashMismatch(
+                "Operator Preview identity or resolved Plan Hash does not match"
+            )
+        payload = preview.model_dump(mode="json")
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO operator_plan_previews (
+                    preview_id, idempotency_key, preview_request_digest,
+                    resolved_plan_hash, payload, expires_at, synthetic,
+                    automatic_release_allowed, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, TRUE, FALSE, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    preview.preview_id,
+                    idempotency_key,
+                    preview.preview_request_digest,
+                    preview.resolved_plan_hash,
+                    Jsonb(payload),
+                    preview.expires_at,
+                    preview.created_at,
+                ),
+            ).fetchone()
+            if row is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM operator_plan_previews
+                    WHERE preview_id = %s OR idempotency_key = %s
+                    FOR SHARE
+                    """,
+                    (preview.preview_id, idempotency_key),
+                ).fetchall()
+                row = rows[0] if len(rows) == 1 else None
+            if row is None or (
+                row["preview_id"] != preview.preview_id
+                or row["idempotency_key"] != idempotency_key
+                or row["preview_request_digest"] != preview.preview_request_digest
+                or row["resolved_plan_hash"] != preview.resolved_plan_hash
+            ):
+                raise OperatorPlanHashMismatch(
+                    "Operator Preview idempotency key was reused with different inputs"
+                )
+        return RoundPlanPreviewView.model_validate(row["payload"])
 
     def create_search_round(self, request: SearchRound) -> dict[str, Any]:
         """Create or replay one non-executable M2a Scripted Round authority."""
