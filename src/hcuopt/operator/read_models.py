@@ -24,6 +24,8 @@ from hcuopt.operator.errors import OperatorReadModelUnavailable
 
 
 class OperatorReadModelRepository(Protocol):
+    def list_operator_round_ids(self, limit: int) -> tuple[UUID, ...]: ...
+
     def get_operator_start_intent_by_round_id(
         self, round_id: UUID
     ) -> OperatorStartIntentView: ...
@@ -63,6 +65,17 @@ class OperatorReadModelService:
     ) -> OperatorRoundSummary:
         intent, authority, reconciliation = self._authorities(round_id, repository)
         return self._reduce(round_id, intent, authority, reconciliation)
+
+    def summaries(
+        self,
+        repository: OperatorReadModelRepository,
+        *,
+        limit: int,
+    ) -> list[OperatorRoundSummary]:
+        """List recent executable Scripted Rounds through the same reducer."""
+
+        round_ids = repository.list_operator_round_ids(limit)
+        return [self.summary(round_id, repository) for round_id in round_ids]
 
     def report(
         self,

@@ -135,6 +135,7 @@ OX-1 CLI 和 Operator Read Model 使用同一 API：
 
 - `GET /v1/operator/search-rounds/{round_id}/summary`
 - `GET /v1/operator/search-rounds/{round_id}/report`
+- `GET /v1/operator/search-rounds?limit=<1..100>`（只列出 finalized synthetic StartIntent）
 - `hcuopt profile list|show`
 - `GET /v1/operator/workloads`、`GET /v1/operator/workloads/{id}/versions/{version}` 与
   `hcuopt workload list|show`

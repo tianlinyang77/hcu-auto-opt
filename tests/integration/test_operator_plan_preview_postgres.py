@@ -402,6 +402,15 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
         self.assertEqual(hotspot.hotspot.source, "profiler")
         self.assertEqual(hotspot.symbol, "sglang.fixture.layer_norm")
 
+    def test_operator_round_list_reads_only_finalized_intents(self) -> None:
+        coordinator, start = self._startable_suite()
+        started = coordinator.start(start, self.repository)
+
+        self.assertEqual(
+            self.repository.list_operator_round_ids(20),
+            (started.round_id,),
+        )
+
     def test_preview_resolves_authority_and_replays_concurrently(self) -> None:
         request = self._request()
         identity = build_operator_service_identity(

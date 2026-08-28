@@ -1,0 +1,141 @@
+const hash = (seed) => `sha256:${seed.repeat(64).slice(0, 64)}`;
+
+export const demoDashboard = {
+  mode: "demo",
+  identity: {
+    source_commit: "1b592bd9392853103c143c2d248da58cfe3b4ade",
+    operator_contract_version: "m2-operator-v1",
+    profile_catalog_hash: hash("a"),
+  },
+  profiles: [
+    {
+      profile_id: "m2-scripted-target",
+      profile_version: 1,
+      profile_kind: "target",
+      display_name: "SGLang Scripted Target",
+      state: "active",
+      synthetic: true,
+    },
+    {
+      profile_id: "m2-scripted-workload",
+      profile_version: 1,
+      profile_kind: "workload",
+      display_name: "VisionLLM-7B / fixture workload",
+      state: "active",
+      synthetic: true,
+    },
+  ],
+  workloads: [
+    {
+      profile: {
+        profile_id: "m2-scripted-workload",
+        profile_version: 1,
+        profile_kind: "workload",
+        profile_hash: hash("b"),
+      },
+      state: "active",
+      display_name: "VisionLLM-7B / fixture workload",
+      summary: "Synthetic workload for control-flow and UI validation only.",
+      authority_refs: {
+        workload_id: "m2-scripted-workload-v1",
+        workload_hash: hash("c"),
+        configuration_hash: hash("d"),
+        hotspot_scope_id: "m2-scripted-fixture-hotspots",
+      },
+      synthetic: true,
+    },
+  ],
+  hotspots: [
+    {
+      hotspot: {
+        source: "profiler",
+        hotspot_id: "3e62de7d-31f6-47b7-9983-62dedb1d5644",
+        replacement_point: "sglang.fixture.layer_norm",
+        shape: [1, 128],
+        dtype: "float16",
+      },
+      symbol: "sglang.fixture.layer_norm",
+      share_ratio: 0.2,
+      opportunity_score: 0.5,
+      patchability: "python_overlay",
+      candidate_packages: [
+        {
+          candidate_id: "0021d533-5802-43f7-ad61-c214029d7071",
+          replacement_path: "sglang/fixture_kernel.py",
+        },
+        {
+          candidate_id: "eb24fca2-4219-4f63-a99a-b5b0c8bfe976",
+          replacement_path: "sglang/fixture_kernel.py",
+        },
+        {
+          candidate_id: "a359c911-fc41-40d2-867f-503504a4fb36",
+          replacement_path: "sglang/fixture_kernel.py",
+        },
+      ],
+      synthetic: true,
+      automatic_release_allowed: false,
+    },
+  ],
+  rounds: [
+    {
+      schema_version: "m2-operator-read-model-v1",
+      generated_at: "2026-08-28T10:42:00Z",
+      intent_id: "7b93528c-4ef0-45fa-8537-b978611f274b",
+      task_id: "af7735bd-2e5f-47ee-a72d-7eb3a753f6bc",
+      round_id: "250cb54c-f0da-4475-87d8-9618f10232e2",
+      round_version: 4,
+      state: "building",
+      next_action: "await_build_terminals",
+      reason: "Candidate Family is frozen; wait for every Build terminal.",
+      candidates: [
+        {
+          ordinal: 0,
+          round_candidate_id: "3934a9f4-fc90-4749-8d7c-c74609f346ef",
+          candidate_id: "0021d533-5802-43f7-ad61-c214029d7071",
+          state: "built",
+          artifact_id: "91f30676-04da-4af4-89ad-2d9500360a30",
+          artifact_hash: hash("1"),
+          terminal_failure_code: null,
+        },
+        {
+          ordinal: 1,
+          round_candidate_id: "f79033c6-dd7e-49d3-9a97-6c53b2e7f46b",
+          candidate_id: "eb24fca2-4219-4f63-a99a-b5b0c8bfe976",
+          state: "built",
+          artifact_id: "60be7365-f4bb-4390-9621-3c16638436c1",
+          artifact_hash: hash("2"),
+          terminal_failure_code: null,
+        },
+        {
+          ordinal: 2,
+          round_candidate_id: "6572408f-358a-4a44-a94a-018591862181",
+          candidate_id: "a359c911-fc41-40d2-867f-503504a4fb36",
+          state: "build_failed",
+          artifact_id: null,
+          artifact_hash: null,
+          terminal_failure_code: "scripted_build_failure",
+        },
+      ],
+      candidate_count: 3,
+      build_terminal_count: 3,
+      settled_budget_entry_count: 0,
+      evidence_status: "not_available",
+      terminal: false,
+      synthetic: true,
+      automatic_release_allowed: false,
+    },
+  ],
+  reports: {
+    "250cb54c-f0da-4475-87d8-9618f10232e2": {
+      schema_version: "m2-operator-report-v1",
+      generated_at: "2026-08-28T10:42:00Z",
+      report_status: "interim",
+      evidence_bundle: null,
+      conclusion_boundary: "synthetic_only_no_real_performance_claim",
+      synthetic: true,
+      performance_evidence: false,
+      formal_signoff_allowed: false,
+      automatic_release_allowed: false,
+    },
+  },
+};

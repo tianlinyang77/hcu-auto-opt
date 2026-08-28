@@ -695,6 +695,26 @@ class PostgresRepository:
             raise NotFound(f"Operator StartIntent not found for Round: {round_id}")
         return self._operator_start_intent(row)
 
+    def list_operator_round_ids(self, limit: int) -> tuple[UUID, ...]:
+        """List recent executable Scripted Rounds without inventing UI state."""
+
+        if limit < 1 or limit > 100:
+            raise ValueError("Operator Round list limit must be between 1 and 100")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT round_id
+                FROM operator_start_intents
+                WHERE state = 'finalized'
+                  AND synthetic = TRUE
+                  AND automatic_release_allowed = FALSE
+                ORDER BY finalized_at DESC, round_id DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(row["round_id"] for row in rows)
+
     def record_operator_start_plans(
         self,
         intent_id: UUID,
