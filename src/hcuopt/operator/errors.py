@@ -21,3 +21,8 @@ class OperatorProfileModeMismatch(Conflict):
 class OperatorPlanHashMismatch(Conflict):
     code = "operator_plan_hash_mismatch"
     retryable = False
+
+
+class OperatorServiceIdentityMismatch(Conflict):
+    code = "service_identity_mismatch"
+    retryable = False

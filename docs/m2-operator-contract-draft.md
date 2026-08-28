@@ -32,6 +32,10 @@ UUID 小写连字符和 RFC 3339 UTC 时间。公共 View 不返回凭据、内�
 Preview 和所有可写响应都返回该身份。写请求带 `expected_service_identity`；任一字段不匹配返回
 `service_identity_mismatch`，客户端必须重新 Preview，不能自动忽略。
 
+当前 Scripted 实现通过 `GET /v1/operator/identity` 发布该身份。部署必须提供实际 Source Commit
+和稳定 deployment generation；客户端应先读取身份，再将其原样作为 Preview 的 expected
+assertion。
+
 ### 2.2 `OperatorProfileDescriptor`
 
 | 字段 | 类型/约束 | 说明 |
@@ -247,6 +251,7 @@ Signoff 和递归校验结果。Scripted Report 显著标记 synthetic，且不�
 
 | Operator API | CLI |
 | --- | --- |
+| `GET /v1/operator/identity` | 客户端连接/漂移检查 |
 | `GET /v1/operator/profiles` | `hcuopt profile list/show` |
 | `GET /v1/operator/workloads` | `hcuopt workload list/show` |
 | `GET /v1/operator/hotspots` | `hcuopt hotspot list/show` |
