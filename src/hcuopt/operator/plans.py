@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.m2_candidate import (
     ScriptedCandidateIntake,
@@ -45,6 +45,13 @@ class OperatorAuthorityRepository(Protocol):
         workload: WorkloadOperatorProfileRefs,
         hotspot: OperatorHotspotRef,
     ) -> ResolvedOperatorAuthority: ...
+
+    def assert_operator_candidate_ids_available(
+        self,
+        candidate_ids: tuple[UUID, ...],
+        *,
+        allowed_round_id: UUID | None = None,
+    ) -> None: ...
 
 
 def _sha256(value: object) -> str:
@@ -87,6 +94,8 @@ class OperatorPlanCompiler:
         self,
         request: RoundPlanPreviewRequest,
         authority_repository: OperatorAuthorityRepository,
+        *,
+        allowed_round_id: UUID | None = None,
     ) -> RoundPlanPreviewView:
         if request.expected_service_identity.model_dump(mode="json") != (
             self.service_identity.model_dump(mode="json")
@@ -183,8 +192,23 @@ class OperatorPlanCompiler:
                 resolved_candidates = self._resolve_candidates(
                     request.candidates, target, authority
                 )
+                authority_repository.assert_operator_candidate_ids_available(
+                    tuple(item.candidate_id for item in resolved_candidates),
+                    allowed_round_id=allowed_round_id,
+                )
                 candidate_input_set_hash = self._candidate_input_set_hash(
                     resolved_candidates
+                )
+            except Conflict:
+                resolved_candidates = ()
+                checks.append(
+                    self._block(
+                        "operator_candidate_id_conflict",
+                        "candidates",
+                        "Candidate identities are already bound to another workflow.",
+                        retryable=False,
+                        action_code="replace_candidate_packages",
+                    )
                 )
             except (OSError, SourceArtifactError, ValueError):
                 resolved_candidates = ()
@@ -245,6 +269,40 @@ class OperatorPlanCompiler:
             service_identity=self.service_identity,
             synthetic=True,
             created_at=now,
+        )
+
+    def revalidate(
+        self,
+        preview: RoundPlanPreviewView,
+        authority_repository: OperatorAuthorityRepository,
+        *,
+        allowed_round_id: UUID | None = None,
+    ) -> RoundPlanPreviewView:
+        """Re-run safety checks from one immutable Preview before Start."""
+
+        request = RoundPlanPreviewRequest(
+            name="Operator Preview revalidation",
+            run_mode=preview.resolved_plan.run_mode,
+            target_profile=preview.resolved_plan.target_profile,
+            workload_profile=preview.resolved_plan.workload_profile,
+            measurement_profile=preview.resolved_plan.measurement_profile,
+            hotspot=preview.resolved_plan.hotspot,
+            candidates=tuple(
+                OperatorCandidateInput(
+                    ordinal=item.ordinal,
+                    source_package_ref=item.source_package_ref,
+                    optimization_intent=item.optimization_intent,
+                )
+                for item in preview.resolved_plan.candidates
+            ),
+            max_promoted=preview.resolved_plan.max_promoted,
+            idempotency_key=f"revalidate-{preview.preview_id}",
+            expected_service_identity=self.service_identity.model_dump(mode="json"),
+        )
+        return self.compile(
+            request,
+            authority_repository,
+            allowed_round_id=allowed_round_id,
         )
 
     def _resolve_candidates(

@@ -121,5 +121,11 @@ Catalog 只注册 Scripted Target/Workload/Measurement 三类不可变 Profile�
 全部核验后返回 `start_allowed=true`，否则保存明确阻塞项；它固定 synthetic、禁止自动发布，
 不运行 HCU、不创建 Task/SearchRound，也不生成 Holdout nonce/commitment。
 
-部署若未注入与 Target Profile 完全匹配的 Candidate Package Store，Preview 会安全阻塞。当前
-尚未实现 durable StartIntent 和 CLI，因此这一入口不是 Formal 或一键优化完成声明。
+部署若未注入与 Target Profile 完全匹配的 Candidate Package Store，Preview 会安全阻塞。
+
+OX-1 的 durable Scripted StartIntent 通过
+`POST /v1/operator/round-plans/{preview_id}:start` 和
+`GET /v1/operator/start-intents/{intent_id}` 提供。它只消费不可变 Preview，并复用现有
+SearchRound/Candidate/Intake Close 权威接口；D-owned Scripted Plan Authority 由部署显式注入，
+未配置时安全失败。StartIntent finalized 只允许后续控制面继续处理，不代表已经执行 Build、
+测量或裁决。当前仍未实现 CLI 和 Summary/Report，因此不是 Formal 或一键优化完成声明。

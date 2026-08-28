@@ -318,3 +318,138 @@ class RoundPlanPreviewView(ReadModel):
         if self.expires_at <= self.created_at:
             raise ValueError("Operator Preview must expire after it is created")
         return self
+
+
+class OperatorRoundStartRequest(ContractModel):
+    preview_id: UUID
+    resolved_plan_hash: str = Field(pattern=SHA256_PATTERN)
+    actor: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    acknowledged_warning_codes: tuple[str, ...] = ()
+    expected_service_identity: OperatorServiceIdentityAssertion
+
+    @model_validator(mode="after")
+    def require_canonical_acknowledgements(self) -> OperatorRoundStartRequest:
+        if self.acknowledged_warning_codes != tuple(
+            sorted(set(self.acknowledged_warning_codes))
+        ):
+            raise ValueError("acknowledged warning codes must be unique and sorted")
+        return self
+
+
+class OperatorStartCandidateMember(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    candidate_input_digest: str = Field(pattern=SHA256_PATTERN)
+    candidate_id: UUID
+    round_candidate_id: UUID
+    intake_idempotency_key: str = Field(min_length=8, max_length=300)
+    source_package_store_id: str = Field(min_length=1, max_length=200)
+    source_package_store_version: int = Field(ge=1)
+    source_package_store_hash: str = Field(pattern=SHA256_PATTERN)
+    source_package_ref: CandidateSourcePackageRef
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    hotspot_id: UUID
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    candidate_kind: Literal["fixture"]
+    optimization_intent: str = Field(min_length=1, max_length=2000)
+    state: Literal["pending", "round_member_bound", "failed"] = "pending"
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+
+    @model_validator(mode="after")
+    def bind_member_error_to_failure(self) -> OperatorStartCandidateMember:
+        if (self.state == "failed") != (self.error_code is not None):
+            raise ValueError("failed Start member requires exactly one error code")
+        return self
+
+
+class OperatorStartIntentView(ReadModel):
+    schema_version: Literal["m2-operator-start-v1"] = "m2-operator-start-v1"
+    intent_id: UUID
+    preview_id: UUID
+    resolved_plan_hash: str = Field(pattern=SHA256_PATTERN)
+    request_digest: str = Field(pattern=SHA256_PATTERN)
+    task_id: UUID
+    round_id: UUID
+    actor: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    state: Literal[
+        "preparing",
+        "plans_frozen",
+        "round_created",
+        "intake_closed",
+        "finalized",
+        "failed",
+    ]
+    candidate_members: tuple[OperatorStartCandidateMember, ...] = Field(
+        min_length=2, max_length=4
+    )
+    search_plan_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    holdout_plan_commitment: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    holdout_commitment_scheme: Literal["sha256-nonce-v1"] | None = None
+    holdout_plan_authority_id: str | None = Field(
+        default=None, min_length=1, max_length=300
+    )
+    holdout_plan_authority_hash: str | None = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+    family_alpha: float | None = Field(default=None, gt=0.0, lt=1.0)
+    candidate_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+    error_message: str | None = Field(default=None, min_length=1, max_length=1000)
+    service_identity: OperatorServiceIdentity
+    synthetic: Literal[True] = True
+    automatic_release_allowed: Literal[False] = False
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+    finalized_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_atomic_start_progress(self) -> OperatorStartIntentView:
+        ordinals = tuple(member.ordinal for member in self.candidate_members)
+        if ordinals != tuple(range(len(self.candidate_members))):
+            raise ValueError("Start members must remain canonically ordered")
+        plan_values = (
+            self.search_plan_hash,
+            self.holdout_plan_commitment,
+            self.holdout_commitment_scheme,
+            self.holdout_plan_authority_id,
+            self.holdout_plan_authority_hash,
+            self.family_alpha,
+        )
+        has_plans = all(value is not None for value in plan_values)
+        if any(value is not None for value in plan_values) != has_plans:
+            raise ValueError("Start Plan Authority fields must resolve atomically")
+        if self.state not in {"preparing", "failed"} and not has_plans:
+            raise ValueError("advanced StartIntent requires frozen Plan Authority")
+        all_bound = all(
+            member.state == "round_member_bound" for member in self.candidate_members
+        )
+        if self.state in {"intake_closed", "finalized"} and (
+            not all_bound or self.candidate_family_hash is None
+        ):
+            raise ValueError("closed StartIntent requires its complete Candidate Family")
+        if self.state == "finalized" and self.finalized_at is None:
+            raise ValueError("finalized StartIntent requires finalized_at")
+        if self.state != "finalized" and self.finalized_at is not None:
+            raise ValueError("only finalized StartIntent may set finalized_at")
+        if (self.error_code is None) != (self.error_message is None):
+            raise ValueError("StartIntent error code and message must be written together")
+        if (self.state == "failed") != (self.error_code is not None):
+            raise ValueError("failed StartIntent requires exactly one safe error")
+        return self
+
+
+class OperatorStartView(OperatorStartIntentView):
+    replayed: bool
+    executable: bool
+
+    @model_validator(mode="after")
+    def bind_executable_to_finalized_intent(self) -> OperatorStartView:
+        if self.executable != (self.state == "finalized"):
+            raise ValueError("only finalized StartIntent is executable")
+        return self

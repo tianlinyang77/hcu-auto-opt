@@ -27,6 +27,8 @@ from hcuopt.contracts.m2 import (
 from hcuopt.contracts.operator_v1 import (
     ManualOperatorHotspotRef,
     OperatorHotspotRef,
+    OperatorStartCandidateMember,
+    OperatorStartIntentView,
     ResolvedOperatorAuthority,
     RoundPlanPreviewView,
     TargetOperatorProfileRefs,
@@ -112,6 +114,7 @@ from hcuopt.evaluation.stage0_verifier import (
 )
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator.errors import OperatorPlanHashMismatch
+from hcuopt.operator.start import FrozenScriptedPlans
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
@@ -326,6 +329,26 @@ class PostgresRepository:
             synthetic=True,
         )
 
+    def assert_operator_candidate_ids_available(
+        self,
+        candidate_ids: tuple[UUID, ...],
+        *,
+        allowed_round_id: UUID | None = None,
+    ) -> None:
+        if not candidate_ids:
+            return
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT candidate_id, round_id FROM candidates
+                WHERE candidate_id = ANY(%s)
+                FOR SHARE
+                """,
+                (list(candidate_ids),),
+            ).fetchall()
+        if any(row["round_id"] != allowed_round_id for row in rows):
+            raise Conflict("Operator Candidate identity is already bound")
+
     def get_operator_plan_preview_by_idempotency(
         self, idempotency_key: str
     ) -> RoundPlanPreviewView | None:
@@ -406,6 +429,367 @@ class PostgresRepository:
                     "Operator Preview idempotency key was reused with different inputs"
                 )
         return RoundPlanPreviewView.model_validate(row["payload"])
+
+    @staticmethod
+    def _operator_start_intent(row: Mapping[str, Any]) -> OperatorStartIntentView:
+        return OperatorStartIntentView.model_validate(
+            {
+                name: row[name]
+                for name in OperatorStartIntentView.model_fields
+                if name not in {"schema_version", "candidate_members"}
+            }
+            | {
+                "schema_version": "m2-operator-start-v1",
+                "candidate_members": row["candidate_members"],
+            }
+        )
+
+    def create_operator_start_intent(
+        self,
+        intent: OperatorStartIntentView,
+    ) -> tuple[OperatorStartIntentView, bool]:
+        if intent.state != "preparing" or not intent.synthetic:
+            raise Conflict("new Operator StartIntent must be synthetic and preparing")
+        members = [item.model_dump(mode="json") for item in intent.candidate_members]
+        service_identity = intent.service_identity.model_dump(mode="json")
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO operator_start_intents (
+                    intent_id, preview_id, resolved_plan_hash, request_digest,
+                    task_id, round_id, actor, idempotency_key, state,
+                    candidate_members, service_identity, synthetic,
+                    automatic_release_allowed, version, created_at, updated_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, 'preparing',
+                    %s, %s, TRUE, FALSE, 1, %s, %s
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    intent.intent_id,
+                    intent.preview_id,
+                    intent.resolved_plan_hash,
+                    intent.request_digest,
+                    intent.task_id,
+                    intent.round_id,
+                    intent.actor,
+                    intent.idempotency_key,
+                    Jsonb(members),
+                    Jsonb(service_identity),
+                    intent.created_at,
+                    intent.updated_at,
+                ),
+            ).fetchone()
+            created = row is not None
+            if row is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM operator_start_intents
+                    WHERE intent_id = %s OR preview_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (intent.intent_id, intent.preview_id, intent.idempotency_key),
+                ).fetchall()
+                row = rows[0] if len(rows) == 1 else None
+            expected = {
+                "intent_id": intent.intent_id,
+                "preview_id": intent.preview_id,
+                "resolved_plan_hash": intent.resolved_plan_hash,
+                "request_digest": intent.request_digest,
+                "task_id": intent.task_id,
+                "round_id": intent.round_id,
+                "actor": intent.actor,
+                "idempotency_key": intent.idempotency_key,
+                "candidate_members": members,
+                "service_identity": service_identity,
+                "synthetic": True,
+                "automatic_release_allowed": False,
+            }
+            if row is None or any(row[name] != value for name, value in expected.items()):
+                raise OperatorPlanHashMismatch(
+                    "Operator Start idempotency or Preview identity was reused"
+                )
+        return self._operator_start_intent(row), created
+
+    def get_operator_start_intent(self, intent_id: UUID) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s",
+                (intent_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"Operator StartIntent not found: {intent_id}")
+        return self._operator_start_intent(row)
+
+    def get_operator_start_intent_by_idempotency(
+        self,
+        idempotency_key: str,
+    ) -> OperatorStartIntentView | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE idempotency_key = %s",
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._operator_start_intent(row)
+
+    def record_operator_start_plans(
+        self,
+        intent_id: UUID,
+        plans: FrozenScriptedPlans,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            expected = {
+                "search_plan_hash": plans.search_plan_hash,
+                "holdout_plan_commitment": plans.holdout_plan_commitment,
+                "holdout_commitment_scheme": plans.holdout_commitment_scheme,
+                "holdout_plan_authority_id": plans.holdout_plan_authority_id,
+                "holdout_plan_authority_hash": plans.holdout_plan_authority_hash,
+                "family_alpha": plans.family_alpha,
+            }
+            if row["state"] != "preparing":
+                if any(row[name] != value for name, value in expected.items()):
+                    raise Conflict("Operator Start Plan Authority changed during replay")
+                return self._operator_start_intent(row)
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET state = 'plans_frozen', search_plan_hash = %s,
+                    holdout_plan_commitment = %s, holdout_commitment_scheme = %s,
+                    holdout_plan_authority_id = %s,
+                    holdout_plan_authority_hash = %s, family_alpha = %s,
+                    version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (
+                    plans.search_plan_hash,
+                    plans.holdout_plan_commitment,
+                    plans.holdout_commitment_scheme,
+                    plans.holdout_plan_authority_id,
+                    plans.holdout_plan_authority_hash,
+                    plans.family_alpha,
+                    intent_id,
+                ),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
+
+    def record_operator_start_round_created(
+        self, intent_id: UUID
+    ) -> OperatorStartIntentView:
+        return self._advance_operator_start_state(
+            intent_id, expected="plans_frozen", target="round_created"
+        )
+
+    def record_operator_start_member_bound(
+        self,
+        intent_id: UUID,
+        ordinal: int,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            members = tuple(
+                OperatorStartCandidateMember.model_validate(item)
+                for item in row["candidate_members"]
+            )
+            if not 0 <= ordinal < len(members) or members[ordinal].ordinal != ordinal:
+                raise Conflict("Operator Start member ordinal is invalid")
+            if members[ordinal].state == "round_member_bound":
+                return self._operator_start_intent(row)
+            if row["state"] != "round_created":
+                raise Conflict("Operator StartIntent is not binding Candidate members")
+            if members[ordinal].state != "pending":
+                raise Conflict("Operator Start member is not pending")
+            updated_members = list(members)
+            updated_members[ordinal] = OperatorStartCandidateMember.model_validate(
+                {**members[ordinal].model_dump(mode="json"), "state": "round_member_bound"}
+            )
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET candidate_members = %s, version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (
+                    Jsonb([item.model_dump(mode="json") for item in updated_members]),
+                    intent_id,
+                ),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
+
+    def record_operator_start_intake_closed(
+        self,
+        intent_id: UUID,
+        candidate_family_hash: str,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            if row["state"] in {"intake_closed", "finalized"}:
+                if row["candidate_family_hash"] != candidate_family_hash:
+                    raise Conflict("Operator Start Candidate Family changed during replay")
+                return self._operator_start_intent(row)
+            if row["state"] != "round_created" or any(
+                item["state"] != "round_member_bound"
+                for item in row["candidate_members"]
+            ):
+                raise Conflict("Operator Start Intake cannot close before all members bind")
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET state = 'intake_closed', candidate_family_hash = %s,
+                    version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (candidate_family_hash, intent_id),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
+
+    def finalize_operator_start_intent(
+        self,
+        intent_id: UUID,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            if row["state"] == "finalized":
+                return self._operator_start_intent(row)
+            if row["state"] != "intake_closed":
+                raise Conflict("Operator StartIntent cannot finalize before Intake Close")
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET state = 'finalized', finalized_at = now(),
+                    version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (intent_id,),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
+
+    def fail_operator_start_intent(
+        self,
+        intent_id: UUID,
+        *,
+        error_code: str,
+        error_message: str,
+        member_ordinal: int | None = None,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            if row["state"] == "failed":
+                if (row["error_code"], row["error_message"]) != (
+                    error_code,
+                    error_message,
+                ):
+                    raise Conflict("Operator StartIntent failed with another error")
+                return self._operator_start_intent(row)
+            if row["state"] in {"intake_closed", "finalized"}:
+                raise Conflict("closed Operator StartIntent cannot be marked failed")
+            members = tuple(
+                OperatorStartCandidateMember.model_validate(item)
+                for item in row["candidate_members"]
+            )
+            if member_ordinal is not None:
+                if not 0 <= member_ordinal < len(members):
+                    raise Conflict("Operator Start failure member ordinal is invalid")
+                updated_members = list(members)
+                updated_members[member_ordinal] = OperatorStartCandidateMember.model_validate(
+                    {
+                        **members[member_ordinal].model_dump(mode="json"),
+                        "state": "failed",
+                        "error_code": error_code,
+                    }
+                )
+                members = tuple(updated_members)
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET state = 'failed', error_code = %s, error_message = %s,
+                    candidate_members = %s, version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (
+                    error_code,
+                    error_message,
+                    Jsonb([item.model_dump(mode="json") for item in members]),
+                    intent_id,
+                ),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
+
+    def _advance_operator_start_state(
+        self,
+        intent_id: UUID,
+        *,
+        expected: str,
+        target: str,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE intent_id = %s FOR UPDATE",
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Operator StartIntent not found: {intent_id}")
+            progress = {
+                "preparing": 0,
+                "plans_frozen": 1,
+                "round_created": 2,
+                "intake_closed": 3,
+                "finalized": 4,
+            }
+            if row["state"] != "failed" and progress.get(row["state"], -1) >= progress[target]:
+                return self._operator_start_intent(row)
+            if row["state"] != expected:
+                raise Conflict(f"Operator StartIntent cannot advance from {row['state']}")
+            row = connection.execute(
+                """
+                UPDATE operator_start_intents
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (target, intent_id),
+            ).fetchone()
+        assert row is not None
+        return self._operator_start_intent(row)
 
     def create_search_round(self, request: SearchRound) -> dict[str, Any]:
         """Create or replay one non-executable M2a Scripted Round authority."""

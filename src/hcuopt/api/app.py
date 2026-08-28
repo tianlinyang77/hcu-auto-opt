@@ -28,7 +28,10 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileDescriptor,
+    OperatorRoundStartRequest,
     OperatorServiceIdentity,
+    OperatorStartIntentView,
+    OperatorStartView,
     RoundPlanPreviewRequest,
     RoundPlanPreviewView,
 )
@@ -97,6 +100,7 @@ from hcuopt.operator import (
 )
 from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.operator.plans import OperatorPlanCompiler, operator_preview_request_digest
+from hcuopt.operator.start import OperatorStartCoordinator
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
@@ -138,6 +142,7 @@ def create_app(
     operator_profiles: OperatorProfileCatalog | None = None,
     operator_service_identity: OperatorServiceIdentity | None = None,
     operator_plan_compiler: OperatorPlanCompiler | None = None,
+    operator_start_coordinator: OperatorStartCoordinator | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -171,6 +176,11 @@ def create_app(
         plan_compiler = OperatorPlanCompiler(operator_catalog, operator_identity)
     if operator_identity.profile_catalog_hash != operator_catalog.catalog_hash:
         raise ValueError("Operator service identity does not bind the active Profile Catalog")
+    start_coordinator = operator_start_coordinator or OperatorStartCoordinator(
+        plan_compiler
+    )
+    if start_coordinator.service_identity != operator_identity:
+        raise ValueError("Operator Start Coordinator service identity does not match the API")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -314,6 +324,47 @@ def create_app(
             return existing
         preview = plan_compiler.compile(payload, repository)
         return repository.create_operator_plan_preview(payload.idempotency_key, preview)
+
+    @application.post(
+        "/v1/operator/round-plans/{preview_id}:start",
+        response_model=OperatorStartView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def start_operator_round_plan(
+        preview_id: UUID,
+        payload: OperatorRoundStartRequest,
+        request: Request,
+        response: Response,
+    ) -> OperatorStartView:
+        if preview_id != payload.preview_id:
+            raise OperatorPlanHashMismatch(
+                "path preview_id does not match Operator Start request"
+            )
+        result = start_coordinator.start(payload, repo(request))
+        response.headers["Location"] = (
+            f"/v1/operator/start-intents/{result.intent_id}"
+        )
+        return result
+
+    @application.get(
+        "/v1/operator/start-intents/{intent_id}",
+        response_model=OperatorStartIntentView,
+    )
+    def get_operator_start_intent(
+        intent_id: UUID,
+        request: Request,
+    ) -> OperatorStartIntentView:
+        return repo(request).get_operator_start_intent(intent_id)
+
+    @application.post(
+        "/v1/operator/start-intents/{intent_id}:reconcile",
+        response_model=OperatorStartIntentView,
+    )
+    def reconcile_operator_start_intent(
+        intent_id: UUID,
+        request: Request,
+    ) -> OperatorStartIntentView:
+        return start_coordinator.reconcile(intent_id, repo(request))
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:

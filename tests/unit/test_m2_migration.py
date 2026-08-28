@@ -7,7 +7,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[8] == "0008_m2_search_round.sql"
     assert MIGRATIONS[9] == "0009_m2_round_authority.sql"
     assert MIGRATIONS[10] == "0010_operator_plan_preview.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 11))
+    assert MIGRATIONS[11] == "0011_operator_start_intent.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 12))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -69,3 +70,15 @@ def test_operator_preview_migration_is_immutable_and_scripted_safe() -> None:
     assert "operator_preview_payload_plan_hash_matches" in sql
     assert "operator_preview_payload_safety_matches" in sql
     assert "VALUES (10, 'operator_plan_preview')" in sql
+
+
+def test_operator_start_migration_is_durable_and_scripted_safe() -> None:
+    sql = migration_sql(11)
+
+    assert "CREATE TABLE operator_start_intents" in sql
+    assert "preview_id UUID NOT NULL UNIQUE" in sql
+    assert "idempotency_key TEXT NOT NULL UNIQUE" in sql
+    assert "operator_start_plan_fields_atomic" in sql
+    assert "operator_start_family_matches_state" in sql
+    assert "operator_start_never_auto_releases" in sql
+    assert "VALUES (11, 'operator_start_intent')" in sql

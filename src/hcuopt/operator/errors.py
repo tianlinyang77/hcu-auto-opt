@@ -26,3 +26,23 @@ class OperatorPlanHashMismatch(Conflict):
 class OperatorServiceIdentityMismatch(Conflict):
     code = "service_identity_mismatch"
     retryable = False
+
+
+class OperatorPreviewBlocked(Conflict):
+    code = "operator_preview_blocked"
+    retryable = True
+
+
+class OperatorPreviewExpired(Conflict):
+    code = "operator_preview_expired"
+    retryable = True
+
+
+class OperatorWarningAcknowledgementRequired(Conflict):
+    code = "operator_warning_ack_required"
+    retryable = True
+
+
+class OperatorStartFailed(Conflict):
+    code = "operator_start_failed"
+    retryable = True

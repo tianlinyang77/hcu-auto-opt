@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid5
 
@@ -16,23 +16,40 @@ from hcuopt.adapters.m2_candidate import (
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.api.app import create_app
 from hcuopt.contracts.m1 import CandidateSourcePackageManifest
+from hcuopt.contracts.m2 import RoundCandidate, SearchRound
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileContent,
     OperatorProfileRef,
+    OperatorRoundStartRequest,
+    OperatorStartCandidateMember,
+    OperatorStartIntentView,
+    PreflightCheckResult,
     ResolvedOperatorAuthority,
     RoundPlanPreviewRequest,
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
+from hcuopt.domain.errors import Conflict
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
+    HmacScriptedPlanAuthority,
     OperatorPlanCompiler,
+    OperatorStartCoordinator,
     build_operator_service_identity,
     build_scripted_operator_profile_catalog,
     publish_operator_profile,
 )
-from hcuopt.operator.errors import OperatorServiceIdentityMismatch
+from hcuopt.operator.errors import (
+    OperatorPlanHashMismatch,
+    OperatorPreviewBlocked,
+    OperatorPreviewExpired,
+    OperatorServiceIdentityMismatch,
+    OperatorStartFailed,
+    OperatorWarningAcknowledgementRequired,
+)
 from hcuopt.operator.profiles import OperatorProfileCatalog
+from hcuopt.operator.start import FrozenScriptedPlans
+from hcuopt.orchestrator.search_round import candidate_family_hash
 
 REPLACEMENT_POINT = "sglang.fixture.layer_norm"
 OVERLAY_PATH = "sglang/fixture_kernel.py"
@@ -112,6 +129,14 @@ class AuthorityRepository:
         assert hotspot.hotspot_id == self.authority.hotspot_id
         return self.authority
 
+    def assert_operator_candidate_ids_available(
+        self,
+        _candidate_ids,
+        *,
+        allowed_round_id=None,
+    ) -> None:  # type: ignore[no-untyped-def]
+        del allowed_round_id
+
 
 class PreviewRepository(AuthorityRepository):
     def __init__(self, authority: ResolvedOperatorAuthority) -> None:
@@ -127,6 +152,157 @@ class PreviewRepository(AuthorityRepository):
     def create_operator_plan_preview(self, _key, preview):  # type: ignore[no-untyped-def]
         self.preview = preview
         return preview
+
+    def get_operator_plan_preview(self, preview_id):  # type: ignore[no-untyped-def]
+        assert self.preview is not None and self.preview.preview_id == preview_id
+        return self.preview
+
+
+class MemoryStartRepository(PreviewRepository):
+    def __init__(self, authority: ResolvedOperatorAuthority) -> None:
+        super().__init__(authority)
+        self.intent: OperatorStartIntentView | None = None
+        self.round: dict | None = None
+        self.members: dict[int, dict] = {}
+        self.candidate_owner: UUID | None = None
+
+    def assert_operator_candidate_ids_available(
+        self,
+        _candidate_ids,
+        *,
+        allowed_round_id=None,
+    ) -> None:  # type: ignore[no-untyped-def]
+        if self.candidate_owner is not None and self.candidate_owner != allowed_round_id:
+            raise Conflict("Operator Candidate identity is already bound")
+
+    @staticmethod
+    def _intent_update(intent, **updates):  # type: ignore[no-untyped-def]
+        return OperatorStartIntentView.model_validate(
+            {
+                **intent.model_dump(mode="json"),
+                **updates,
+                "version": intent.version + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+
+    def create_operator_start_intent(self, intent):  # type: ignore[no-untyped-def]
+        if self.intent is None:
+            self.intent = intent
+            return intent, True
+        assert self.intent.request_digest == intent.request_digest
+        return self.intent, False
+
+    def get_operator_start_intent(self, intent_id):  # type: ignore[no-untyped-def]
+        assert self.intent is not None and self.intent.intent_id == intent_id
+        return self.intent
+
+    def get_operator_start_intent_by_idempotency(
+        self, idempotency_key
+    ):  # type: ignore[no-untyped-def]
+        if self.intent is None or self.intent.idempotency_key != idempotency_key:
+            return None
+        return self.intent
+
+    def record_operator_start_plans(
+        self, intent_id, plans: FrozenScriptedPlans
+    ):  # type: ignore[no-untyped-def]
+        intent = self.get_operator_start_intent(intent_id)
+        if intent.state != "preparing":
+            expected = {
+                "search_plan_hash": plans.search_plan_hash,
+                "holdout_plan_commitment": plans.holdout_plan_commitment,
+                "holdout_commitment_scheme": plans.holdout_commitment_scheme,
+                "holdout_plan_authority_id": plans.holdout_plan_authority_id,
+                "holdout_plan_authority_hash": plans.holdout_plan_authority_hash,
+                "family_alpha": plans.family_alpha,
+            }
+            if any(getattr(intent, name) != value for name, value in expected.items()):
+                raise Conflict("Operator Start Plan Authority changed during replay")
+            return intent
+        self.intent = self._intent_update(
+            intent,
+            state="plans_frozen",
+            search_plan_hash=plans.search_plan_hash,
+            holdout_plan_commitment=plans.holdout_plan_commitment,
+            holdout_commitment_scheme=plans.holdout_commitment_scheme,
+            holdout_plan_authority_id=plans.holdout_plan_authority_id,
+            holdout_plan_authority_hash=plans.holdout_plan_authority_hash,
+            family_alpha=plans.family_alpha,
+        )
+        return self.intent
+
+    def record_operator_start_round_created(self, intent_id):  # type: ignore[no-untyped-def]
+        intent = self.get_operator_start_intent(intent_id)
+        if intent.state == "plans_frozen":
+            self.intent = self._intent_update(intent, state="round_created")
+        return self.intent
+
+    def record_operator_start_member_bound(
+        self, intent_id, ordinal
+    ):  # type: ignore[no-untyped-def]
+        intent = self.get_operator_start_intent(intent_id)
+        members = list(intent.candidate_members)
+        members[ordinal] = OperatorStartCandidateMember.model_validate(
+            {**members[ordinal].model_dump(mode="json"), "state": "round_member_bound"}
+        )
+        self.intent = self._intent_update(
+            intent,
+            candidate_members=[item.model_dump(mode="json") for item in members],
+        )
+        return self.intent
+
+    def record_operator_start_intake_closed(
+        self, intent_id, candidate_family_hash
+    ):  # type: ignore[no-untyped-def]
+        intent = self.get_operator_start_intent(intent_id)
+        self.intent = self._intent_update(
+            intent,
+            state="intake_closed",
+            candidate_family_hash=candidate_family_hash,
+        )
+        return self.intent
+
+    def finalize_operator_start_intent(self, intent_id):  # type: ignore[no-untyped-def]
+        intent = self.get_operator_start_intent(intent_id)
+        if intent.state == "finalized":
+            return intent
+        self.intent = self._intent_update(
+            intent,
+            state="finalized",
+            finalized_at=datetime.now(timezone.utc),
+        )
+        return self.intent
+
+    def fail_operator_start_intent(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("the successful memory fixture must not fail")
+
+    def create_search_round(self, request: SearchRound) -> dict:
+        payload = request.model_dump(mode="python")
+        payload["updated_at"] = request.created_at
+        if self.round is None:
+            self.round = payload
+        else:
+            assert self.round["round_id"] == request.round_id
+        return self.round
+
+    def add_round_candidate(self, request: RoundCandidate) -> dict:
+        payload = request.model_dump(mode="python")
+        existing = self.members.setdefault(request.ordinal, payload)
+        assert existing == payload
+        return existing
+
+    def close_search_round_intake(self, round_id: UUID) -> dict:
+        assert self.round is not None and self.round["round_id"] == round_id
+        family_hash = candidate_family_hash(
+            self.round,
+            [self.members[index] for index in sorted(self.members)],
+        )
+        self.round.update(
+            state="intake_closed",
+            candidate_family_hash=family_hash,
+        )
+        return self.round
 
 
 def _suite(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -221,6 +397,33 @@ def _suite(tmp_path: Path):  # type: ignore[no-untyped-def]
         clock=lambda: NOW,
     )
     return compiler, request, AuthorityRepository(authority)
+
+
+def _startable_suite(tmp_path: Path):  # type: ignore[no-untyped-def]
+    compiler, request, authority_repository = _suite(tmp_path)
+    live_compiler = OperatorPlanCompiler(
+        compiler.profiles,
+        compiler.service_identity,
+        candidate_intake=compiler.candidate_intake,
+    )
+    repository = MemoryStartRepository(authority_repository.authority)
+    preview = live_compiler.compile(request, repository)
+    repository.create_operator_plan_preview(request.idempotency_key, preview)
+    coordinator = OperatorStartCoordinator(
+        live_compiler,
+        plan_authority=HmacScriptedPlanAuthority(
+            b"operator-test-secret-32-bytes!!!!"
+        ),
+    )
+    start_request = OperatorRoundStartRequest(
+        preview_id=preview.preview_id,
+        resolved_plan_hash=preview.resolved_plan_hash,
+        actor="operator-test",
+        idempotency_key="operator-start-scripted",
+        acknowledged_warning_codes=preview.required_ack_codes,
+        expected_service_identity=compiler.service_identity.model_dump(mode="json"),
+    )
+    return live_compiler, repository, preview, coordinator, start_request
 
 
 def test_scripted_plan_compiler_resolves_a_startable_immutable_preview(
@@ -377,3 +580,206 @@ def test_operator_preview_api_exposes_identity_and_idempotent_plan_creation(
     assert replayed.json()["preview_id"] == created.json()["preview_id"]
     assert changed.status_code == 409
     assert changed.json()["code"] == "operator_plan_hash_mismatch"
+
+
+def test_operator_start_finalizes_and_replays_one_scripted_intent(
+    tmp_path: Path,
+) -> None:
+    live_compiler, repository, preview, coordinator, start_request = (
+        _startable_suite(tmp_path)
+    )
+
+    first = coordinator.start(start_request, repository)
+    replay = coordinator.start(start_request, repository)
+
+    assert first.state == "finalized"
+    assert first.executable is True
+    assert first.replayed is False
+    assert replay.replayed is True
+    assert replay.intent_id == first.intent_id
+    assert repository.round is not None
+    assert repository.round["state"] == "intake_closed"
+    assert len(repository.members) == 2
+    serialized = first.model_dump_json()
+    assert "nonce_hex" not in serialized
+    assert "operator-test-secret" not in serialized
+
+    app = create_app(
+        repository=repository,  # type: ignore[arg-type]
+        operator_profiles=live_compiler.profiles,
+        operator_plan_compiler=live_compiler,
+        operator_start_coordinator=coordinator,
+    )
+    with TestClient(app) as client:
+        started = client.post(
+            f"/v1/operator/round-plans/{preview.preview_id}:start",
+            json=start_request.model_dump(mode="json"),
+        )
+        status = client.get(f"/v1/operator/start-intents/{first.intent_id}")
+
+    assert started.status_code == 202
+    assert started.json()["replayed"] is True
+    assert started.headers["location"].endswith(str(first.intent_id))
+    assert status.status_code == 200
+    assert status.json()["state"] == "finalized"
+
+
+def test_operator_start_rejects_expired_blocked_and_unacknowledged_preview(
+    tmp_path: Path,
+) -> None:
+    _compiler, repository, preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    current = datetime.now(timezone.utc)
+    repository.preview = type(preview).model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "created_at": current - timedelta(minutes=2),
+            "expires_at": current - timedelta(minutes=1),
+        }
+    )
+    with pytest.raises(OperatorPreviewExpired):
+        coordinator.start(start_request, repository)
+
+    blocked = type(preview).model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "checks": [
+                *preview.checks,
+                PreflightCheckResult(
+                    code="operator_test_block",
+                    scope="test",
+                    status="block",
+                    message="injected blocking Preflight result",
+                    retryable=False,
+                    action_code="replace_preview",
+                ),
+            ],
+            "start_allowed": False,
+        }
+    )
+    repository.preview = blocked
+    with pytest.raises(OperatorPreviewBlocked):
+        coordinator.start(start_request, repository)
+
+    warning_code = "operator_test_warning"
+    warned = type(preview).model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "checks": [
+                *preview.checks,
+                PreflightCheckResult(
+                    code=warning_code,
+                    scope="test",
+                    status="warn",
+                    message="injected warning",
+                    retryable=True,
+                    action_code="acknowledge_warning",
+                ),
+            ],
+            "required_ack_codes": [warning_code],
+        }
+    )
+    repository.preview = warned
+    with pytest.raises(OperatorWarningAcknowledgementRequired):
+        coordinator.start(start_request, repository)
+
+
+def test_operator_start_rejects_stale_identity_and_missing_plan_authority(
+    tmp_path: Path,
+) -> None:
+    compiler, repository, preview, _coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    stale = start_request.model_copy(
+        update={
+            "expected_service_identity": start_request.expected_service_identity.model_copy(
+                update={"source_commit": "b" * 40}
+            )
+        }
+    )
+    without_authority = OperatorStartCoordinator(compiler)
+
+    with pytest.raises(OperatorServiceIdentityMismatch):
+        without_authority.start(stale, repository)
+    with pytest.raises(OperatorStartFailed, match="not configured"):
+        without_authority.start(start_request, repository)
+    assert repository.get_operator_plan_preview(preview.preview_id) == preview
+
+
+def test_operator_start_revalidates_candidate_identity_and_idempotency_inputs(
+    tmp_path: Path,
+) -> None:
+    _compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    repository.candidate_owner = UUID("00000000-0000-0000-0000-000000000099")
+    with pytest.raises(OperatorPreviewBlocked, match="Preflight"):
+        coordinator.start(start_request, repository)
+
+    repository.candidate_owner = None
+    first = coordinator.start(start_request, repository)
+    changed_actor = start_request.model_copy(update={"actor": "another-operator"})
+    with pytest.raises(OperatorPlanHashMismatch, match="different inputs"):
+        coordinator.start(changed_actor, repository)
+    assert first.state == "finalized"
+
+
+def test_existing_start_replays_after_preview_expiry(tmp_path: Path) -> None:
+    compiler, repository, preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    first = coordinator.start(start_request, repository)
+    current = datetime.now(timezone.utc)
+    repository.preview = type(preview).model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "created_at": current - timedelta(minutes=2),
+            "expires_at": current - timedelta(minutes=1),
+        }
+    )
+
+    replay = OperatorStartCoordinator(compiler).start(start_request, repository)
+
+    assert replay.intent_id == first.intent_id
+    assert replay.state == "finalized"
+    assert replay.replayed is True
+
+
+def test_plan_authority_key_rotation_stops_nonterminal_reconcile(
+    tmp_path: Path,
+) -> None:
+    compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+
+    class FailAfterPlansFrozen:
+        def __init__(self, wrapped):  # type: ignore[no-untyped-def]
+            self.wrapped = wrapped
+            self.failed = False
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self.wrapped, name)
+
+        def record_operator_start_plans(
+            self, intent_id, plans
+        ):  # type: ignore[no-untyped-def]
+            result = self.wrapped.record_operator_start_plans(intent_id, plans)
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("injected crash after frozen Plans")
+            return result
+
+    with pytest.raises(RuntimeError, match="injected crash"):
+        coordinator.start(start_request, FailAfterPlansFrozen(repository))
+    assert repository.intent is not None
+    assert repository.intent.state == "plans_frozen"
+
+    rotated_authority = HmacScriptedPlanAuthority(
+        b"rotated-operator-secret-32-bytes!!"
+    )
+    assert isinstance(coordinator.plan_authority, HmacScriptedPlanAuthority)
+    assert rotated_authority.authority_hash != coordinator.plan_authority.authority_hash
+    rotated = OperatorStartCoordinator(compiler, plan_authority=rotated_authority)
+    with pytest.raises(Conflict, match="Authority changed"):
+        rotated.reconcile(repository.intent.intent_id, repository)

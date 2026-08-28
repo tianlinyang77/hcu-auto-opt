@@ -205,7 +205,7 @@ StartIntent 至少保存 `intent_id`、Preview/Plan Hash、确定性 Task/Round 
 | `candidate_id` | UUID | 从已验证 M1 Manifest 读取，不在 Reconcile 时随机生成 |
 | `round_candidate_id` | UUID | UUIDv5(round ID、ordinal、Candidate ID、input digest) |
 | `intake_idempotency_key` | string | 由 Intent ID、ordinal、input digest 确定性生成 |
-| `state` | `pending|candidate_created|round_member_bound|failed` | 逐成员恢复进度 |
+| `state` | `pending|round_member_bound|failed` | 逐成员恢复进度；Candidate 与 Round membership 由同一权威接入原子建立 |
 | `error_code` | string/null | 稳定、脱敏；失败时保留 |
 
 Reconcile 可在创建任意第 1～N 个成员后重启，但只能重放同一组 ID 与幂等键。所有成员达到
@@ -215,12 +215,21 @@ Reconcile 依赖数据库唯一约束和行锁收敛，任何部分成功、成�
 
 同一 Preview 只能启动一个逻辑 Round；完全相同重放返回相同 Round 并标记 `replayed=true`。
 同一幂等键配不同 Hash、Preview 已由不同输入启动或服务身份漂移均返回冲突。
+首次 Start 已持久化 Intent 后，完全相同的重放不再受 Preview 后续过期影响；尚未创建 Intent 的
+过期 Preview 仍必须重新 Plan。非终态 Reconcile 必须继续匹配创建 Intent 时的 Service Identity
+和 Plan Authority，部署误换 Authority 密钥时在创建更多 Round 权威前安全停止。
 
 Start 首次返回 `202 Accepted` 和 `OperatorStartView`，至少包含 Intent ID/state、Preview/Plan
 Hash、run mode、可空 Task/Round ID、可空的实际 Search Plan Hash/Holdout commitment/Candidate
 Family Hash、`replayed`、service identity、错误摘要和 `automatic_release_allowed=false`，并通过
 `Location` 指向 Intent 查询接口。只有 finalized 时上述 Round/计划/Family 字段全部非空且
 `executable=true`；其他状态不能伪装成可执行 Round。
+
+当前 Scripted 实现已落地上述 durable StartIntent、逐成员进度和 Reconcile，并额外提供内部恢复
+入口 `POST /v1/operator/start-intents/{intent_id}:reconcile`。Scripted Plan Authority 使用部署侧
+至少 256-bit 密钥对 Round ID 派生 restart-stable Holdout nonce，只向 Operator 返回 commitment
+和绑定密钥指纹的 Authority Hash；密钥与 nonce 不进入 Preview、StartIntent、API 或日志。未显式注入该 D-owned
+Adapter 时 Start 安全失败。该实现只推进到 Candidate Intake Close，不排 Job、不运行 HCU。
 
 ## 6. 只读 Summary 与 Report
 
