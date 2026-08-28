@@ -223,6 +223,10 @@ Fake、Scripted 和 Formal 使用固定且明显不同的标识；页面不得�
 - Preview 阻塞项、幂等启动、稳定错误和 Scripted 全链；
 - Windows/Linux CLI 契约测试。
 
+当前首个运行时切片已实现 `m2-operator-v1` Service Identity、三类 strict Profile Contract、
+确定性 Profile/Catalog Hash、默认仅允许 synthetic Scripted 的 Profile Registry，以及 Profile
+list/show API。Plan Preview、StartIntent 和 CLI 全链仍未完成，不能据此宣称 OX-1 已退出。
+
 退出条件：注册 Scripted Profile 后，一条命令启动、另一条命令查看状态和导出报告，全程无需
 SSH、Docker、数据库写入或复制内部 UUID/Hash。
 

@@ -4,7 +4,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import FastAPI, Request, Response, status
@@ -24,6 +24,7 @@ from hcuopt.contracts.m2 import (
     SearchRoundSummary,
     SearchRoundView,
 )
+from hcuopt.contracts.operator_v1 import OperatorProfileDescriptor
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.contracts.v1 import (
     AdapterProfileView,
@@ -82,6 +83,10 @@ from hcuopt.evaluation.m2_models import (
 )
 from hcuopt.evaluation.m2_statistics import SearchBarrierDecision
 from hcuopt.evaluation.stage0_finalizer import FileStage0Finalizer
+from hcuopt.operator import (
+    OperatorProfileCatalog,
+    build_scripted_operator_profile_catalog,
+)
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
@@ -98,12 +103,14 @@ def create_app(
     workflow_factory: WorkflowFactory = WorkflowRouter,
     target_catalog: TargetCatalog | None = None,
     adapter_profiles: AdapterProfileCatalog | None = None,
+    operator_profiles: OperatorProfileCatalog | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
         Path(os.getenv("HCUOPT_TARGET_ROOT", str(default_target_root)))
     )
     profiles = adapter_profiles or AdapterProfileCatalog()
+    operator_catalog = operator_profiles or build_scripted_operator_profile_catalog()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -133,11 +140,25 @@ def create_app(
 
     @application.exception_handler(NotFound)
     async def not_found_handler(_request: Request, exc: NotFound) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"code": "not_found", "message": str(exc)})
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": getattr(exc, "code", "not_found"),
+                "message": str(exc),
+                "retryable": getattr(exc, "retryable", False),
+            },
+        )
 
     @application.exception_handler(Conflict)
     async def conflict_handler(_request: Request, exc: Conflict) -> JSONResponse:
-        return JSONResponse(status_code=409, content={"code": "conflict", "message": str(exc)})
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": getattr(exc, "code", "conflict"),
+                "message": str(exc),
+                "retryable": getattr(exc, "retryable", False),
+            },
+        )
 
     @application.exception_handler(ContractError)
     async def contract_handler(_request: Request, exc: ContractError) -> JSONResponse:
@@ -181,6 +202,26 @@ def create_app(
     @application.get("/v1/adapter-profiles", response_model=list[AdapterProfileView])
     def list_adapter_profiles() -> list[AdapterProfileView]:
         return profiles.list()
+
+    @application.get(
+        "/v1/operator/profiles",
+        response_model=list[OperatorProfileDescriptor],
+    )
+    def list_operator_profiles(
+        profile_kind: Literal["target", "workload", "measurement"] | None = None,
+    ) -> list[OperatorProfileDescriptor]:
+        return operator_catalog.list(profile_kind)
+
+    @application.get(
+        "/v1/operator/profiles/{profile_kind}/{profile_id}/versions/{profile_version}",
+        response_model=OperatorProfileDescriptor,
+    )
+    def get_operator_profile(
+        profile_kind: Literal["target", "workload", "measurement"],
+        profile_id: str,
+        profile_version: int,
+    ) -> OperatorProfileDescriptor:
+        return operator_catalog.get(profile_kind, profile_id, profile_version)
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:
