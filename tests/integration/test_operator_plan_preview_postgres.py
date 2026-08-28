@@ -5,18 +5,30 @@ import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 
+from hcuopt.adapters.m2_candidate import (
+    ScriptedCandidateIntake,
+    candidate_source_package_hash,
+)
+from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
+from hcuopt.contracts.m1 import CandidateSourcePackageManifest
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileRef,
+    OperatorRoundStartRequest,
     RoundPlanPreviewRequest,
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
+from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
+    HmacScriptedPlanAuthority,
     OperatorPlanCompiler,
+    OperatorStartCoordinator,
     build_operator_service_identity,
     build_scripted_operator_profile_catalog,
 )
@@ -35,6 +47,8 @@ DATABASE_URL = os.getenv("HCUOPT_DATABASE_URL")
 PROFILER_URI = "fixture:///operator/profiler.json"
 CORRECTNESS_URI = "fixture:///operator/correctness.json"
 REPLACEMENT_POINT = "sglang.fixture.layer_norm"
+OVERLAY_PATH = "sglang/fixture_kernel.py"
+MOUNT_TARGET = "/opt/hcuopt/overlay/sglang/fixture_kernel.py"
 
 
 def _hash(value: str) -> str:
@@ -68,6 +82,7 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
             self.profiles["workload"].authority_refs
         )
         self.connection = psycopg.connect(DATABASE_URL)
+        self.temporary_directory = TemporaryDirectory()
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -80,6 +95,7 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.connection.close()
+        self.temporary_directory.cleanup()
 
     def _create_authority(self) -> dict[str, UUID]:
         ids = {
@@ -280,6 +296,95 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
             expected_service_identity=identity.model_dump(mode="json"),
         )
 
+    def _publish_package(self, ordinal: int) -> dict[str, str]:
+        candidate_id = uuid5(self.ids["hotspot_id"], f"operator-candidate-{ordinal}")
+        candidate_source_hash = _hash(f"operator-candidate-source-{ordinal}")
+        content = f"CANDIDATE = '{candidate_id}'\n".encode()
+        content_hash = "sha256:" + hashlib.sha256(content).hexdigest()
+        manifest = CandidateSourcePackageManifest(
+            candidate_id=candidate_id,
+            hotspot_id=self.ids["hotspot_id"],
+            baseline_source_hash=_hash("baseline-source"),
+            candidate_source_hash=candidate_source_hash,
+            replacement_point=REPLACEMENT_POINT,
+            candidate_kind="fixture",
+            overlay_mount_target=MOUNT_TARGET,
+            files=[{"path": OVERLAY_PATH, "content_hash": content_hash}],
+            profiler_evidence_uri=PROFILER_URI,
+            profiler_evidence_hash=_hash("profiler"),
+            reviewed_by="operator-scripted-fixture",
+            reviewed_at=datetime.now(timezone.utc),
+        )
+        manifest_bytes = canonical_json_bytes(manifest)
+        manifest_hash = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        package_hash = candidate_source_package_hash(manifest_hash, manifest.files)
+        digest = candidate_source_hash.removeprefix("sha256:")
+        package_root = (
+            Path(self.temporary_directory.name) / "sha256" / digest[:2] / digest[2:]
+        )
+        source = package_root / "files" / OVERLAY_PATH
+        source.parent.mkdir(parents=True)
+        source.write_bytes(content)
+        (package_root / "manifest.json").write_bytes(manifest_bytes)
+        return {
+            "candidate_source_hash": candidate_source_hash,
+            "source_package_hash": package_hash,
+            "manifest_hash": manifest_hash,
+            "manifest_schema_version": "m1-candidate-source-v1",
+        }
+
+    def _startable_suite(self):  # type: ignore[no-untyped-def]
+        identity = build_operator_service_identity(
+            source_commit="a" * 40,
+            server_instance_id=UUID("00000000-0000-0000-0000-000000000087"),
+            catalog=self.catalog,
+        )
+        store = CandidateSourcePackageStore(
+            Path(self.temporary_directory.name),
+            profile="m2-scripted-v1",
+            allowed_overlay_roots=("sglang",),
+            approved_mount_targets={REPLACEMENT_POINT: MOUNT_TARGET},
+        )
+        intake = ScriptedCandidateIntake(
+            store,
+            store_id=self.target.candidate_package_store_id,
+            store_hash=self.target.candidate_package_store_hash,
+        )
+        compiler = OperatorPlanCompiler(
+            self.catalog,
+            identity,
+            candidate_intake=intake,
+        )
+        payload = self._request().model_dump(mode="json")
+        payload["candidates"] = [
+            {
+                "ordinal": ordinal,
+                "source_package_ref": self._publish_package(ordinal),
+                "optimization_intent": f"exercise Candidate {ordinal}",
+            }
+            for ordinal in range(2)
+        ]
+        payload["expected_service_identity"] = identity.model_dump(mode="json")
+        request = RoundPlanPreviewRequest.model_validate(payload)
+        preview = compiler.compile(request, self.repository)
+        self.assertTrue(preview.start_allowed)
+        preview = self.repository.create_operator_plan_preview(
+            request.idempotency_key, preview
+        )
+        coordinator = OperatorStartCoordinator(
+            compiler,
+            plan_authority=HmacScriptedPlanAuthority(b"postgres-operator-secret-32-bytes!!!!"),
+        )
+        start = OperatorRoundStartRequest(
+            preview_id=preview.preview_id,
+            resolved_plan_hash=preview.resolved_plan_hash,
+            actor="postgres-operator",
+            idempotency_key="operator-start-postgres",
+            acknowledged_warning_codes=preview.required_ack_codes,
+            expected_service_identity=identity.model_dump(mode="json"),
+        )
+        return coordinator, start
+
     def test_preview_resolves_authority_and_replays_concurrently(self) -> None:
         request = self._request()
         identity = build_operator_service_identity(
@@ -348,4 +453,68 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
         self.assertIn(
             "operator_authority_unavailable",
             {item.code for item in preview.checks},
+        )
+
+    def test_start_intent_finalizes_and_concurrent_replay_converges(self) -> None:
+        coordinator, start = self._startable_suite()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _index: coordinator.start(start, self.repository),
+                    range(2),
+                )
+            )
+
+        self.assertTrue(all(item.state == "finalized" for item in results))
+        self.assertEqual({item.intent_id for item in results}, {results[0].intent_id})
+        self.assertEqual({item.replayed for item in results}, {False, True})
+        stored = self.repository.get_operator_start_intent(results[0].intent_id)
+        self.assertEqual(stored.state, "finalized")
+        round_row = self.repository.get_search_round(stored.round_id)
+        self.assertEqual(round_row["state"], "intake_closed")
+        with self.connection.cursor() as cursor:
+            candidate_count = cursor.execute(
+                "SELECT count(*) AS count FROM round_candidates WHERE round_id = %s",
+                (stored.round_id,),
+            ).fetchone()[0]
+        self.assertEqual(candidate_count, 2)
+
+    def test_start_intent_recovers_after_candidate_insert_before_progress(self) -> None:
+        coordinator, start = self._startable_suite()
+
+        class FailAfterFirstCandidate:
+            def __init__(self, repository):  # type: ignore[no-untyped-def]
+                self.repository = repository
+                self.failed = False
+
+            def __getattr__(self, name):  # type: ignore[no-untyped-def]
+                return getattr(self.repository, name)
+
+            def add_round_candidate(self, request):  # type: ignore[no-untyped-def]
+                result = self.repository.add_round_candidate(request)
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("injected crash after durable Candidate insert")
+                return result
+
+        wrapper = FailAfterFirstCandidate(self.repository)
+        with self.assertRaisesRegex(RuntimeError, "injected crash"):
+            coordinator.start(start, wrapper)
+        intent_id = uuid5(
+            UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8"),
+            f"hcuopt:operator-start:{start.idempotency_key}",
+        )
+        interrupted = self.repository.get_operator_start_intent(intent_id)
+        self.assertEqual(interrupted.state, "round_created")
+        self.assertEqual(interrupted.candidate_members[0].state, "pending")
+
+        recovered = coordinator.reconcile(intent_id, self.repository)
+
+        self.assertEqual(recovered.state, "finalized")
+        self.assertTrue(
+            all(
+                member.state == "round_member_bound"
+                for member in recovered.candidate_members
+            )
         )

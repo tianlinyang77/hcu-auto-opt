@@ -229,8 +229,14 @@ list/show API，以及 PostgreSQL 持久化的 `round plan` Preview/Preflight。
 Target/Stage 0/Baseline/Hotspot Authority、复核内容寻址 Candidate Package，并显式冻结协议、预算、
 输入集合 Hash、有效期和阻塞/警告；它不占用 HCU，也不创建 Task 或 SearchRound。
 
-StartIntent 和 CLI 全链仍未完成，因此即使 Preview 返回 `start_allowed=true`，当前也只能表示输入
-满足启动前条件，不能据此宣称 Round 已创建、优化已执行或 OX-1 已退出。
+第三个运行时切片进一步实现了 durable synthetic StartIntent/Reconcile：Start 只接收 Preview
+ID/Plan Hash、warning 确认、actor、幂等键和 Service Identity；服务端确定性冻结 Task/Round/成员
+身份，消费 D-owned Scripted Plan Authority，幂等创建 Round、逐成员接入并完成 Intake Close。
+StartIntent 未 finalized 前不排 Job，崩溃后可从持久化进度重放；同一 Preview 只能绑定一个逻辑
+Round。该切片仍不运行 HCU，也不生成性能结论。
+
+CLI、Summary/Report Read Model 和一条命令全链仍未完成，因此 finalized 目前只表示 Round Authority
+及 Candidate Family 已安全建立，不表示优化已执行，也不能据此宣称 OX-1 已退出。
 
 退出条件：注册 Scripted Profile 后，一条命令启动、另一条命令查看状态和导出报告，全程无需
 SSH、Docker、数据库写入或复制内部 UUID/Hash。
