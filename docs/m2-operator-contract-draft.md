@@ -233,6 +233,14 @@ Adapter 时 Start 安全失败。该实现只推进到 Candidate Intake Close，
 
 ## 6. 只读 Summary 与 Report
 
+OX-1 当前实现的是 `m2-operator-read-model-v1` 基础切片：它从已有 StartIntent、SearchRound、
+Candidate、Budget Ledger 和 Evidence Bundle 权威对象读取 Round 状态、Candidate Build 终态计数、
+settled Budget 条目数、Evidence 是否可用，以及
+`reconcile_scripted_search_round()` 给出的唯一 `next_action`。它不复制状态机，也不重新计算 verdict、
+CI、MDE、FWER 或性能结论。CLI 默认输出适合人阅读；`--json` 输出版本化 Contract。
+
+以下完整模型仍属于 OX-2，不能从 OX-1 基础 Report 的存在推断已经实现：
+
 `OperatorRoundSummary` 由版本化 `m2-operator-read-model-v1` reducer 从权威对象/事件重建：
 
 - Round：模式、状态、版本、阶段、进度计数和当前 Barrier；
@@ -246,6 +254,11 @@ Cleanup 使用 `not_started|running|verified|failed|unknown`；Lease 过期不�
 
 `OperatorRoundReport` 引用最终 Round Evidence、全部 Candidate 结果、Budget、Cleanup、适用的
 Signoff 和递归校验结果。Scripted Report 显著标记 synthetic，且不提供 Formal Signoff action。
+
+OX-1 Scripted Report 固定
+`conclusion_boundary=synthetic_only_no_real_performance_claim`、
+`formal_signoff_allowed=false` 和 `automatic_release_allowed=false`；终态只跟随 Round Authority，
+不能被展示层或 CLI 自行推进。
 
 ## 7. Cancel、Signoff 与通知
 

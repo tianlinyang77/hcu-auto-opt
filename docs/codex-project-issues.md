@@ -114,3 +114,21 @@
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。
 - Last updated: 2026-08-26
+
+## Windows 可编辑安装可能指向同项目的旧 checkout
+
+- Scope: project-local
+- Symptom: 当前工作树已新增 CLI 命令，`python -m hcuopt.cli --help` 却仍显示旧命令集；
+  pytest 从当前 `src/` 运行时正常。
+- Evidence: Python 实际导入路径指向同一父目录下的旧 `dcu-auto-opt/src/hcuopt`，而当前工作树
+  为 `work/hcu-auto-opt-m1-real`；显式设置 `PYTHONPATH=src` 后立即显示 `profile` 和 `round`。
+- Cause: 用户环境中的 editable install 仍绑定旧 checkout。项目的 pytest `pythonpath`
+  只约束测试收集，不会改变普通 `python -m` 的 site-packages 链接。
+- Proven workaround: 开发验证先打印 `hcuopt.__file__`；优先使用项目独立虚拟环境。一次性源码
+  验证可显式设置 `PYTHONPATH=src`。如果确认旧 `dcu-auto-opt` editable 项目已废弃，再单独卸载
+  它；仅重新安装当前 `hcu-auto-opt` 不会自动删除另一个发行名留下的 `.pth`。
+- Validation: `PYTHONPATH=src python -m hcuopt.cli round run --help` 正确显示 OX-1 参数。
+- Applies to: 同一 Windows 用户环境中并存多个 hcu-auto-opt checkout 的本地 CLI 验证。
+- Do not repeat: 不要把旧 checkout 的帮助输出判成当前分支代码未生效，也不要在未核对
+  `__file__` 前修改 parser。
+- Last updated: 2026-08-28

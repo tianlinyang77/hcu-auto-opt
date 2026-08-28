@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -12,6 +13,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
+from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
@@ -28,12 +31,15 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileDescriptor,
+    OperatorRoundReport,
     OperatorRoundStartRequest,
+    OperatorRoundSummary,
     OperatorServiceIdentity,
     OperatorStartIntentView,
     OperatorStartView,
     RoundPlanPreviewRequest,
     RoundPlanPreviewView,
+    TargetOperatorProfileRefs,
 )
 from hcuopt.contracts.platform_v1 import TargetSpec
 from hcuopt.contracts.v1 import (
@@ -100,7 +106,8 @@ from hcuopt.operator import (
 )
 from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.operator.plans import OperatorPlanCompiler, operator_preview_request_digest
-from hcuopt.operator.start import OperatorStartCoordinator
+from hcuopt.operator.read_models import OperatorReadModelService
+from hcuopt.operator.start import HmacScriptedPlanAuthority, OperatorStartCoordinator
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.stage0 import evaluate_stage0
@@ -134,6 +141,60 @@ def _operator_source_commit() -> str:
     return source_commit
 
 
+def _operator_scripted_candidate_intake(
+    catalog: OperatorProfileCatalog,
+) -> ScriptedCandidateIntake | None:
+    values = {
+        "package_root": os.getenv("HCUOPT_OPERATOR_PACKAGE_ROOT"),
+        "overlay_roots": os.getenv("HCUOPT_OPERATOR_OVERLAY_ROOTS_JSON"),
+        "mount_targets": os.getenv("HCUOPT_OPERATOR_MOUNT_TARGETS_JSON"),
+    }
+    if all(value is None for value in values.values()):
+        return None
+    if any(value is None for value in values.values()):
+        raise ValueError(
+            "Operator Package Store requires package root, overlay roots, and mount targets"
+        )
+    try:
+        overlay_roots = json.loads(values["overlay_roots"] or "")
+        mount_targets = json.loads(values["mount_targets"] or "")
+    except json.JSONDecodeError as error:
+        raise ValueError("Operator Package Store allowlists must be valid JSON") from error
+    if not isinstance(overlay_roots, list) or not all(
+        isinstance(item, str) for item in overlay_roots
+    ):
+        raise ValueError("Operator overlay roots must be a JSON string array")
+    if not isinstance(mount_targets, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in mount_targets.items()
+    ):
+        raise ValueError("Operator mount targets must be a JSON string map")
+    target_profile = catalog.get("target", "m2-scripted-target", 1)
+    target = TargetOperatorProfileRefs.model_validate(target_profile.authority_refs)
+    source_packages = CandidateSourcePackageStore(
+        Path(values["package_root"] or ""),
+        profile=target.adapter_profile,
+        allowed_overlay_roots=tuple(overlay_roots),
+        approved_mount_targets=mount_targets,
+    )
+    return ScriptedCandidateIntake(
+        source_packages,
+        store_id=target.candidate_package_store_id,
+        store_hash=target.candidate_package_store_hash,
+    )
+
+
+def _operator_scripted_plan_authority() -> HmacScriptedPlanAuthority | None:
+    encoded = os.getenv("HCUOPT_OPERATOR_PLAN_SECRET_HEX")
+    if encoded is None:
+        return None
+    try:
+        secret = bytes.fromhex(encoded)
+    except ValueError as error:
+        raise ValueError("Operator Plan Authority secret must be hexadecimal") from error
+    return HmacScriptedPlanAuthority(secret)
+
+
 def create_app(
     repository: PostgresRepository | None = None,
     workflow_factory: WorkflowFactory = WorkflowRouter,
@@ -143,6 +204,7 @@ def create_app(
     operator_service_identity: OperatorServiceIdentity | None = None,
     operator_plan_compiler: OperatorPlanCompiler | None = None,
     operator_start_coordinator: OperatorStartCoordinator | None = None,
+    operator_read_models: OperatorReadModelService | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -173,14 +235,20 @@ def create_app(
             server_instance_id=server_instance_id,
             catalog=operator_catalog,
         )
-        plan_compiler = OperatorPlanCompiler(operator_catalog, operator_identity)
+        plan_compiler = OperatorPlanCompiler(
+            operator_catalog,
+            operator_identity,
+            candidate_intake=_operator_scripted_candidate_intake(operator_catalog),
+        )
     if operator_identity.profile_catalog_hash != operator_catalog.catalog_hash:
         raise ValueError("Operator service identity does not bind the active Profile Catalog")
     start_coordinator = operator_start_coordinator or OperatorStartCoordinator(
-        plan_compiler
+        plan_compiler,
+        plan_authority=_operator_scripted_plan_authority(),
     )
     if start_coordinator.service_identity != operator_identity:
         raise ValueError("Operator Start Coordinator service identity does not match the API")
+    read_models = operator_read_models or OperatorReadModelService()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -365,6 +433,26 @@ def create_app(
         request: Request,
     ) -> OperatorStartIntentView:
         return start_coordinator.reconcile(intent_id, repo(request))
+
+    @application.get(
+        "/v1/operator/search-rounds/{round_id}/summary",
+        response_model=OperatorRoundSummary,
+    )
+    def get_operator_round_summary(
+        round_id: UUID,
+        request: Request,
+    ) -> OperatorRoundSummary:
+        return read_models.summary(round_id, repo(request))
+
+    @application.get(
+        "/v1/operator/search-rounds/{round_id}/report",
+        response_model=OperatorRoundReport,
+    )
+    def get_operator_round_report(
+        round_id: UUID,
+        request: Request,
+    ) -> OperatorRoundReport:
+        return read_models.report(round_id, repo(request))
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:

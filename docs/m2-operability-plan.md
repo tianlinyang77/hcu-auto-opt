@@ -235,8 +235,11 @@ ID/Plan Hash、warning 确认、actor、幂等键和 Service Identity；服务�
 StartIntent 未 finalized 前不排 Job，崩溃后可从持久化进度重放；同一 Preview 只能绑定一个逻辑
 Round。该切片仍不运行 HCU，也不生成性能结论。
 
-CLI、Summary/Report Read Model 和一条命令全链仍未完成，因此 finalized 目前只表示 Round Authority
-及 Candidate Family 已安全建立，不表示优化已执行，也不能据此宣称 OX-1 已退出。
+最后一个 OX-1 运行时切片提供版本化只读 Summary/Report，以及
+`profile list|show`、`round plan|start|status|report|run` CLI。命令从 Preview/Start 文件自动
+传递 ID 与 Hash；显式部署 Package Store、allowlist 和 D-owned Plan Authority 后可形成无 SSH、
+无手工数据库写入的 synthetic 操作闭环。finalized 仍只表示 Round Authority 及 Candidate Family
+已安全建立，不表示优化已执行。
 
 退出条件：注册 Scripted Profile 后，一条命令启动、另一条命令查看状态和导出报告，全程无需
 SSH、Docker、数据库写入或复制内部 UUID/Hash。

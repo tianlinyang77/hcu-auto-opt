@@ -46,3 +46,8 @@ class OperatorWarningAcknowledgementRequired(Conflict):
 class OperatorStartFailed(Conflict):
     code = "operator_start_failed"
     retryable = True
+
+
+class OperatorReadModelUnavailable(Conflict):
+    code = "operator_read_model_unavailable"
+    retryable = True
