@@ -25,6 +25,12 @@ Package Store 中已有经审核的 fixture Candidate。CLI 不绕过这些前�
 hcuopt profile list
 hcuopt profile show target m2-scripted-target --version 1
 
+hcuopt workload list
+hcuopt workload show m2-scripted-workload --version 1
+hcuopt hotspot list
+hcuopt hotspot show 1
+hcuopt round draft --output operator-plan.json
+
 hcuopt round plan operator-plan.json --output preview.json
 hcuopt round start preview.json --actor operator-a --output start.json
 hcuopt round status start.json --output summary.json
@@ -42,20 +48,28 @@ code 集合。Start 的默认幂等键由 Preview ID 确定，重复命令返回
 hcuopt round run operator-plan.json --actor operator-a --output-dir results/operator
 ```
 
-该命令保存 `preview.json`、`start.json`、`summary.json` 和 `report.json`。用户不需要从输出中复制
-Preview ID、Plan Hash、Intent ID 或 Round ID。当前 Start finalized 只表示 Round Authority 与
+`round draft` 从 Profile Registry、PostgreSQL Hotspot Authority 和部署侧内容寻址 Package Store
+选择唯一匹配热点及 2～4 个已验证候选，生成可审查的 `operator-plan.json`。如果存在多个热点或
+候选，先通过 `hotspot show` 查看稳定编号，再用 `--hotspot-index` 和重复的
+`--candidate-index` 显式选择；用户不需要手抄完整 UUID、Evidence URI 或 Hash。
+
+`round run` 保存 `preview.json`、`start.json`、`summary.json`、`report.json` 和 `metrics.json`。
+用户不需要从输出中复制 Preview ID、Plan Hash、Intent ID 或 Round ID。当前 Start finalized 只表示 Round Authority 与
 Candidate Family 已安全建立；刚启动后的 Report 通常是 `interim`，下一动作通常是
 `await_build_terminals`，不表示优化已经执行。
 
-四个交接文件使用原子写入。输出目录会绑定首个 `preview.json`：相同 Preview 可安全幂等重放；
-如果目录已属于另一 Preview，或缺少 Preview 却残留 Start/Summary/Report，命令会安全失败，避免
-把不同逻辑 Round 的文件混在一起。新 Plan 应选择新的 `--output-dir`。
+五个交接文件使用原子写入。输出目录会绑定首个 `preview.json`：相同 Preview 可安全幂等重放；
+如果目录已属于另一 Preview，或缺少 Preview 却残留 Start/Summary/Report/Metrics，命令会安全
+失败，避免把不同逻辑 Round 的文件混在一起。新 Plan 应选择新的 `--output-dir`。
 
 ## Plan Spec
 
 `operator-plan.json` 是人类可保存和审查的输入。Profile 只写 ID/Version，CLI 从当前服务读取
 精确 Profile Hash 与 Service Identity；Hotspot 和 Candidate Package 仍必须引用上游可信 Intake
 已产生的内容寻址证据。
+
+日常 Scripted 操作优先使用 `round draft` 自动生成本文件。下面的完整 JSON 仍保留为高级审查、
+契约测试和故障复现入口，不能把其中的占位符直接当成可信 Authority。
 
 ```json
 {
@@ -113,3 +127,16 @@ Candidate Family 已安全建立；刚启动后的 Report 通常是 `interim`，
 - Candidate state、Artifact、失败证据和 Budget ledger 只从权威表读取；
 - `conclusion_boundary=synthetic_only_no_real_performance_claim`；
 - Scripted Report 永远不提供 Formal Signoff。
+
+## 操作成本指标
+
+`round run` 使用单调时钟记录真实命令执行过程，并把结果写入独立的 `metrics.json`：
+
+- `operator_active_seconds`：本次 CLI 调用的真实活动墙钟时间；
+- `manual_intervention_count`：本次显式确认的 warning 数量；
+- `preflight_blocked_before_hcu_count`：在任何 HCU 动作前被 Preview 阻塞的次数；
+- `report_generation_seconds`：请求并生成 Report 的真实时间。
+
+这些指标固定 `performance_evidence=false`，只评价易用性，不进入 Candidate 性能裁决、MDE、
+FWER、EvidenceBundle 或 Signoff。即使 Preview 被阻塞，CLI 也保存一份 `outcome=blocked` 的指标
+文件；Preview 已建立后的 Start/Status/Report 失败也保存 `outcome=failed`，不把中途失败隐藏掉。

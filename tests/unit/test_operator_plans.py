@@ -23,10 +23,12 @@ from hcuopt.cli import build_parser
 from hcuopt.contracts.m1 import CandidateSourcePackageManifest
 from hcuopt.contracts.m2 import RoundCandidate, SearchRound
 from hcuopt.contracts.operator_v1 import (
+    OperatorHotspotAuthorityView,
     OperatorProfileContent,
     OperatorProfileRef,
     OperatorRoundPlanSpec,
     OperatorRoundStartRequest,
+    OperatorRunMetrics,
     OperatorStartCandidateMember,
     OperatorStartIntentView,
     PreflightCheckResult,
@@ -36,10 +38,11 @@ from hcuopt.contracts.operator_v1 import (
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
-from hcuopt.domain.errors import Conflict
+from hcuopt.domain.errors import Conflict, SourceArtifactError
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
     HmacScriptedPlanAuthority,
+    OperatorDiscoveryService,
     OperatorPlanCompiler,
     OperatorReadModelService,
     OperatorStartCoordinator,
@@ -50,9 +53,11 @@ from hcuopt.operator import (
 from hcuopt.operator.cli import (
     OperatorCliError,
     OperatorHttpClient,
+    _prepare_round_run_output_dir,
     run_operator_command,
 )
 from hcuopt.operator.errors import (
+    OperatorCandidatePackageInvalid,
     OperatorPlanHashMismatch,
     OperatorPreviewBlocked,
     OperatorPreviewExpired,
@@ -142,6 +147,34 @@ class AuthorityRepository:
         assert workload.workload_hash == self.authority.workload_hash
         assert hotspot.hotspot_id == self.authority.hotspot_id
         return self.authority
+
+    def list_scripted_operator_hotspots(
+        self,
+        _target: TargetOperatorProfileRefs,
+        workload: WorkloadOperatorProfileRefs,
+    ) -> tuple[OperatorHotspotAuthorityView, ...]:
+        return (
+            OperatorHotspotAuthorityView(
+                hotspot={
+                    "source": "profiler",
+                    "hotspot_id": self.authority.hotspot_id,
+                    "hotspot_intake_hash": _hash("hotspot"),
+                    "profiler_evidence_uri": self.authority.profiler_evidence_uri,
+                    "profiler_evidence_hash": self.authority.profiler_evidence_hash,
+                    "correctness_evidence_uri": CORRECTNESS_URI,
+                    "correctness_evidence_hash": _hash("correctness"),
+                    "replacement_point": self.authority.replacement_point,
+                    "workload_hash": workload.workload_hash,
+                    "shape": [1, 128],
+                    "dtype": "float16",
+                },
+                authority=self.authority,
+                symbol="fixture_layer_norm",
+                share_ratio=0.25,
+                opportunity_score=0.8,
+                patchability="python_overlay",
+            ),
+        )
 
     def assert_operator_candidate_ids_available(
         self,
@@ -862,6 +895,9 @@ def test_operator_cli_parser_exposes_profile_and_round_workflow() -> None:
     run = build_parser().parse_args(
         ["round", "run", "operator-plan.json", "--actor", "operator-test"]
     )
+    workload = build_parser().parse_args(["workload", "list"])
+    hotspot = build_parser().parse_args(["hotspot", "show", "1"])
+    draft = build_parser().parse_args(["round", "draft"])
 
     assert profile.command == "profile"
     assert profile.profile_command == "show"
@@ -870,6 +906,10 @@ def test_operator_cli_parser_exposes_profile_and_round_workflow() -> None:
     assert run.round_command == "run"
     assert run.spec == Path("operator-plan.json")
     assert run.output_dir == Path("results/operator")
+    assert workload.workload_command == "list"
+    assert hotspot.index == 1
+    assert draft.round_command == "draft"
+    assert draft.output == Path("operator-plan.json")
 
 
 def test_operator_deployment_configuration_is_explicit_and_fail_closed(
@@ -991,11 +1031,318 @@ def test_operator_round_run_writes_complete_handoff_without_manual_ids(
     assert run_operator_command(args) == 0
     assert {
         path.name for path in output_dir.iterdir()
-    } == {"preview.json", "start.json", "summary.json", "report.json"}
+    } == {"preview.json", "start.json", "summary.json", "report.json", "metrics.json"}
     saved_start = OperatorStartIntentView.model_validate_json(
         (output_dir / "start.json").read_text(encoding="utf-8")
     )
     assert saved_start.round_id == started.round_id
+    metrics = OperatorRunMetrics.model_validate_json(
+        (output_dir / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics.outcome == "succeeded"
+    assert metrics.performance_evidence is False
+
+
+def test_operator_discovery_drafts_plan_without_manual_uuid_or_hash(
+    tmp_path: Path,
+) -> None:
+    compiler, repository, preview, coordinator, _start_request = _startable_suite(
+        tmp_path
+    )
+    app = create_app(
+        repository=repository,  # type: ignore[arg-type]
+        operator_profiles=compiler.profiles,
+        operator_plan_compiler=compiler,
+        operator_start_coordinator=coordinator,
+    )
+
+    with TestClient(app) as transport:
+        client = OperatorHttpClient("http://testserver", client=transport)
+        workloads = client.workloads()
+        hotspots = client.hotspots(
+            target_profile_id="m2-scripted-target",
+            target_profile_version=1,
+            workload_profile_id="m2-scripted-workload",
+            workload_profile_version=1,
+        )
+        hotspot_detail = transport.get(
+            f"/v1/operator/hotspots/{hotspots[0].hotspot.hotspot_id}",
+            params={
+                "target_profile_id": "m2-scripted-target",
+                "target_profile_version": 1,
+                "workload_profile_id": "m2-scripted-workload",
+                "workload_profile_version": 1,
+            },
+        )
+        spec = client.draft(
+            name="Discovered Scripted Round",
+            target_profile_id="m2-scripted-target",
+            target_profile_version=1,
+            workload_profile_id="m2-scripted-workload",
+            workload_profile_version=1,
+            measurement_profile_id="m2-scripted-standard",
+            measurement_profile_version=1,
+            hotspot_index=1,
+            candidate_indexes=(),
+            max_promoted=1,
+            idempotency_key=None,
+        )
+        replay = client.draft(
+            name="Discovered Scripted Round",
+            target_profile_id="m2-scripted-target",
+            target_profile_version=1,
+            workload_profile_id="m2-scripted-workload",
+            workload_profile_version=1,
+            measurement_profile_id="m2-scripted-standard",
+            measurement_profile_version=1,
+            hotspot_index=1,
+            candidate_indexes=(),
+            max_promoted=1,
+            idempotency_key=None,
+        )
+        renamed = client.draft(
+            name="Another Scripted Round",
+            target_profile_id="m2-scripted-target",
+            target_profile_version=1,
+            workload_profile_id="m2-scripted-workload",
+            workload_profile_version=1,
+            measurement_profile_id="m2-scripted-standard",
+            measurement_profile_version=1,
+            hotspot_index=1,
+            candidate_indexes=(),
+            max_promoted=1,
+            idempotency_key=None,
+        )
+
+    assert len(workloads) == 1
+    assert len(hotspots) == 1
+    assert hotspot_detail.status_code == 200
+    assert hotspot_detail.json() == hotspots[0].model_dump(mode="json")
+    assert len(hotspots[0].candidate_packages) == 2
+    assert spec.hotspot.hotspot_id == preview.resolved_plan.hotspot.hotspot_id
+    assert tuple(item.ordinal for item in spec.candidates) == (0, 1)
+    assert spec.idempotency_key.startswith("operator-draft-")
+    assert replay.idempotency_key == spec.idempotency_key
+    assert renamed.idempotency_key != spec.idempotency_key
+
+
+def test_candidate_package_discovery_fails_closed_on_malformed_store(
+    tmp_path: Path,
+) -> None:
+    malformed = tmp_path / "sha256" / "not-a-prefix"
+    malformed.mkdir(parents=True)
+    store = CandidateSourcePackageStore(
+        tmp_path,
+        profile="m2-scripted-v1",
+        allowed_overlay_roots=("sglang",),
+        approved_mount_targets={REPLACEMENT_POINT: MOUNT_TARGET},
+    )
+
+    with pytest.raises(SourceArtifactError, match="malformed SHA256 prefix"):
+        store.list_verified()
+
+
+def test_operator_discovery_rejects_duplicate_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    compiler, request, repository = _suite(tmp_path)
+    first_candidate_id = uuid5(request.hotspot.hotspot_id, "candidate-0")
+    _publish_package(
+        tmp_path,
+        hotspot_id=request.hotspot.hotspot_id,
+        candidate_id=first_candidate_id,
+        baseline_source_hash=repository.authority.baseline_source_hash,
+        candidate_source_hash=_hash("duplicate-candidate-identity"),
+        profiler_evidence_hash=repository.authority.profiler_evidence_hash,
+    )
+    discovery = OperatorDiscoveryService(
+        compiler.profiles,
+        candidate_intake=compiler.candidate_intake,
+    )
+
+    with pytest.raises(
+        OperatorCandidatePackageInvalid,
+        match="duplicate Candidate identity",
+    ):
+        discovery.hotspots(
+            target_profile_id="m2-scripted-target",
+            target_profile_version=1,
+            workload_profile_id="m2-scripted-workload",
+            workload_profile_version=1,
+            repository=repository,
+        )
+
+
+def test_operator_round_run_records_preflight_block_before_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _compiler, _repository, preview, _coordinator, _start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    blocked = RoundPlanPreviewView.model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "checks": [
+                *preview.checks,
+                PreflightCheckResult(
+                    code="operator_test_block",
+                    scope="test",
+                    status="block",
+                    message="injected Preflight block",
+                    retryable=False,
+                    action_code="fix_test_input",
+                ),
+            ],
+            "start_allowed": False,
+        }
+    )
+    spec_path = tmp_path / "operator-plan.json"
+    spec_path.write_text(
+        OperatorRoundPlanSpec(
+            name="Blocked Scripted Round",
+            target_profile={"profile_id": "m2-scripted-target", "profile_version": 1},
+            workload_profile={
+                "profile_id": "m2-scripted-workload",
+                "profile_version": 1,
+            },
+            measurement_profile={
+                "profile_id": "m2-scripted-standard",
+                "profile_version": 1,
+            },
+            hotspot=preview.resolved_plan.hotspot,
+            candidates=tuple(
+                {
+                    "ordinal": item.ordinal,
+                    "source_package_ref": item.source_package_ref,
+                    "optimization_intent": item.optimization_intent,
+                }
+                for item in preview.resolved_plan.candidates
+            ),
+            max_promoted=1,
+            idempotency_key="operator-blocked-test",
+        ).model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "operator-output"
+
+    class FakeClient:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def plan(self, _loaded):  # type: ignore[no-untyped-def]
+            return blocked
+
+        def start(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("blocked Preview must not reach Start")
+
+    monkeypatch.setattr(
+        "hcuopt.operator.cli.OperatorHttpClient", lambda _api_url: FakeClient()
+    )
+    args = build_parser().parse_args(
+        [
+            "round",
+            "run",
+            str(spec_path),
+            "--actor",
+            "operator-cli-test",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert run_operator_command(args) == 2
+    metrics = OperatorRunMetrics.model_validate_json(
+        (output_dir / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics.outcome == "blocked"
+    assert metrics.preflight_blocked_before_hcu_count == 1
+
+
+def test_operator_round_run_records_failure_after_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _compiler, _repository, preview, _coordinator, _start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    spec = OperatorRoundPlanSpec(
+        name="Failed Scripted Round",
+        target_profile={"profile_id": "m2-scripted-target", "profile_version": 1},
+        workload_profile={
+            "profile_id": "m2-scripted-workload",
+            "profile_version": 1,
+        },
+        measurement_profile={
+            "profile_id": "m2-scripted-standard",
+            "profile_version": 1,
+        },
+        hotspot=preview.resolved_plan.hotspot,
+        candidates=tuple(
+            {
+                "ordinal": item.ordinal,
+                "source_package_ref": item.source_package_ref,
+                "optimization_intent": item.optimization_intent,
+            }
+            for item in preview.resolved_plan.candidates
+        ),
+        max_promoted=1,
+        idempotency_key="operator-failed-run-test",
+    )
+    spec_path = tmp_path / "operator-plan.json"
+    spec_path.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    output_dir = tmp_path / "operator-output"
+
+    class FakeClient:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def plan(self, _loaded):  # type: ignore[no-untyped-def]
+            return preview
+
+        def start(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise OperatorCliError("injected start failure")
+
+    monkeypatch.setattr(
+        "hcuopt.operator.cli.OperatorHttpClient", lambda _api_url: FakeClient()
+    )
+    args = build_parser().parse_args(
+        [
+            "round",
+            "run",
+            str(spec_path),
+            "--actor",
+            "operator-cli-test",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert run_operator_command(args) == 2
+    metrics = OperatorRunMetrics.model_validate_json(
+        (output_dir / "metrics.json").read_text(encoding="utf-8")
+    )
+    assert metrics.outcome == "failed"
+    assert metrics.error_code == "operator_run_failed"
+    assert metrics.preflight_blocked_before_hcu_count == 0
+
+
+def test_operator_round_run_rejects_unbound_metrics_file(tmp_path: Path) -> None:
+    _compiler, _repository, preview, _coordinator, _start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    output_dir = tmp_path / "operator-output"
+    output_dir.mkdir()
+    (output_dir / "metrics.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(OperatorCliError, match="unbound handoff files"):
+        _prepare_round_run_output_dir(output_dir, preview)
 
 
 def test_operator_round_run_rejects_output_bound_to_another_preview(

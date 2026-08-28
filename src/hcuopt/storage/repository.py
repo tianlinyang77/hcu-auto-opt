@@ -26,9 +26,11 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.operator_v1 import (
     ManualOperatorHotspotRef,
+    OperatorHotspotAuthorityView,
     OperatorHotspotRef,
     OperatorStartCandidateMember,
     OperatorStartIntentView,
+    ProfilerOperatorHotspotRef,
     ResolvedOperatorAuthority,
     RoundPlanPreviewView,
     TargetOperatorProfileRefs,
@@ -208,6 +210,150 @@ class PostgresRepository:
     @staticmethod
     def _search_round_authority(row: Mapping[str, Any]) -> SearchRound:
         return SearchRound.model_validate({name: row[name] for name in SearchRound.model_fields})
+
+    def list_scripted_operator_hotspots(
+        self,
+        target: TargetOperatorProfileRefs,
+        workload: WorkloadOperatorProfileRefs,
+    ) -> tuple[OperatorHotspotAuthorityView, ...]:
+        """List Hotspots from the latest fully matching frozen Scripted Authority."""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                WITH matched_authority AS (
+                    SELECT
+                        snapshot.target_snapshot_id,
+                        run.stage0_run_id,
+                        baseline.stage0_protocol_hash,
+                        baseline.baseline_epoch_id,
+                        source.source_hash AS baseline_source_hash,
+                        baseline.workload_id,
+                        baseline.workload_hash,
+                        baseline.configuration_hash,
+                        baseline.image_digest,
+                        baseline.adapter_profile
+                    FROM target_snapshots AS snapshot
+                    JOIN stage0_runs AS run
+                      ON run.target_snapshot_id = snapshot.target_snapshot_id
+                    JOIN tasks AS stage0_task ON stage0_task.task_id = run.task_id
+                    JOIN baseline_epochs AS baseline
+                      ON baseline.target_snapshot_id = snapshot.target_snapshot_id
+                     AND baseline.stage0_run_id = run.stage0_run_id
+                    JOIN source_snapshots AS source
+                      ON source.snapshot_id = baseline.source_snapshot_id
+                    WHERE snapshot.target_id = %s
+                      AND snapshot.target_fingerprint = %s
+                      AND run.adapter_profile = %s
+                      AND run.mode = 'dry_run'
+                      AND run.state = 'finalized'
+                      AND stage0_task.stage0_authority = 'synthetic'
+                      AND baseline.frozen = TRUE
+                      AND baseline.baseline_kind = 'search_round'
+                      AND baseline.stage0_protocol_hash = %s
+                      AND baseline.workload_id = %s
+                      AND baseline.workload_hash = %s
+                      AND baseline.configuration_hash = %s
+                      AND baseline.adapter_profile = %s
+                      AND source.synthetic = TRUE
+                      AND EXISTS (
+                          SELECT 1 FROM hotspots AS available
+                          WHERE available.baseline_epoch_id = baseline.baseline_epoch_id
+                            AND available.candidate_kind = 'fixture'
+                      )
+                    ORDER BY baseline.created_at DESC, baseline.baseline_epoch_id DESC
+                    LIMIT 1
+                )
+                SELECT
+                    authority.*,
+                    hotspot.hotspot_id,
+                    hotspot.symbol,
+                    hotspot.share_ratio,
+                    hotspot.opportunity_score,
+                    hotspot.patchability,
+                    hotspot.intake_hash AS hotspot_intake_hash,
+                    hotspot.evidence AS hotspot_evidence
+                FROM matched_authority AS authority
+                JOIN hotspots AS hotspot
+                  ON hotspot.baseline_epoch_id = authority.baseline_epoch_id
+                WHERE hotspot.candidate_kind = 'fixture'
+                ORDER BY hotspot.created_at, hotspot.hotspot_id
+                """,
+                (
+                    target.target_id,
+                    target.target_spec_hash,
+                    target.adapter_profile,
+                    target.required_stage0_protocol_hash,
+                    workload.workload_id,
+                    workload.workload_hash,
+                    workload.configuration_hash,
+                    target.adapter_profile,
+                ),
+            ).fetchall()
+        discovered: list[OperatorHotspotAuthorityView] = []
+        for row in rows:
+            evidence = dict(row["hotspot_evidence"])
+            hotspot_payload: dict[str, Any] = {
+                "source": (
+                    "manual"
+                    if evidence.get("manual_intake_uri") is not None
+                    or evidence.get("manual_intake_hash") is not None
+                    else "profiler"
+                ),
+                "hotspot_id": row["hotspot_id"],
+                "hotspot_intake_hash": row["hotspot_intake_hash"],
+                "profiler_evidence_uri": evidence.get("profiler_raw_output_uri"),
+                "profiler_evidence_hash": evidence.get("profiler_raw_output_hash"),
+                "correctness_evidence_uri": evidence.get("correctness_spec_uri"),
+                "correctness_evidence_hash": evidence.get("correctness_spec_hash"),
+                "replacement_point": evidence.get("replacement_point"),
+                "workload_hash": row["workload_hash"],
+                "shape": tuple(evidence.get("shape", ())),
+                "dtype": evidence.get("dtype"),
+            }
+            if hotspot_payload["source"] == "manual":
+                hotspot_payload.update(
+                    manual_intake_uri=evidence.get("manual_intake_uri"),
+                    manual_intake_hash=evidence.get("manual_intake_hash"),
+                )
+            try:
+                hotspot = (
+                    ManualOperatorHotspotRef.model_validate(hotspot_payload)
+                    if hotspot_payload["source"] == "manual"
+                    else ProfilerOperatorHotspotRef.model_validate(hotspot_payload)
+                )
+            except ValidationError as error:
+                raise Conflict(
+                    "stored Scripted Hotspot Authority is incomplete or invalid"
+                ) from error
+            authority = ResolvedOperatorAuthority(
+                target_snapshot_id=row["target_snapshot_id"],
+                stage0_run_id=row["stage0_run_id"],
+                stage0_protocol_hash=row["stage0_protocol_hash"],
+                baseline_epoch_id=row["baseline_epoch_id"],
+                baseline_source_hash=row["baseline_source_hash"],
+                hotspot_id=row["hotspot_id"],
+                replacement_point=evidence["replacement_point"],
+                workload_id=row["workload_id"],
+                workload_hash=row["workload_hash"],
+                configuration_hash=row["configuration_hash"],
+                image_digest=row["image_digest"],
+                adapter_profile=row["adapter_profile"],
+                profiler_evidence_uri=evidence["profiler_raw_output_uri"],
+                profiler_evidence_hash=evidence["profiler_raw_output_hash"],
+                synthetic=True,
+            )
+            discovered.append(
+                OperatorHotspotAuthorityView(
+                    hotspot=hotspot,
+                    authority=authority,
+                    symbol=row["symbol"],
+                    share_ratio=row["share_ratio"],
+                    opportunity_score=row["opportunity_score"],
+                    patchability=row["patchability"],
+                )
+            )
+        return tuple(discovered)
 
     def resolve_scripted_operator_authority(
         self,

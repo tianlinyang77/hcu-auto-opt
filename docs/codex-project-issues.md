@@ -103,7 +103,10 @@
   第一切片在 2026-08-26 的普通权限 Windows 全量结果为
   `326 passed, 16 skipped, 18 failed`；18 个失败仍全部来自上述文件语义，涉及
   `test_f1c_pipeline.py`、`test_git_source_manager.py`、`test_local_artifact_store.py`、
-  `test_m1_candidate_builder.py` 和 `test_noop_builder.py`。
+  `test_m1_candidate_builder.py` 和 `test_noop_builder.py`。OX-1 收尾在 2026-08-28 的同类
+  环境结果为 `456 passed, 69 skipped, 19 failed`，新增清单中的
+  `test_m1_c_scripted.py` 也失败在 Artifact Store 的 Windows 只读删除语义；干净的
+  `main@b338a4c` 已复现两类代表错误。
 - Cause: 测试依赖 Linux 文件语义；当前 Windows 会话没有创建符号链接权限，且只读位的
   删除语义与 Linux 不同。
 - Proven workaround: F1-C 正式验证使用 Linux CI；Windows 上只运行明确支持 Windows 的
@@ -113,7 +116,7 @@
 - Applies to: 普通权限 Windows Python 3.10+ 的仓库全量单测。
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。
-- Last updated: 2026-08-26
+- Last updated: 2026-08-28
 
 ## Windows 可编辑安装可能指向同项目的旧 checkout
 
