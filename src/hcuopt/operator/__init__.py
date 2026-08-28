@@ -11,6 +11,7 @@ from hcuopt.operator.profiles import (
     profile_catalog_hash,
     publish_operator_profile,
 )
+from hcuopt.operator.read_models import OperatorReadModelService
 from hcuopt.operator.start import (
     HmacScriptedPlanAuthority,
     OperatorStartCoordinator,
@@ -20,6 +21,7 @@ from hcuopt.operator.start import (
 __all__ = [
     "OperatorProfileCatalog",
     "OperatorPlanCompiler",
+    "OperatorReadModelService",
     "OperatorStartCoordinator",
     "HmacScriptedPlanAuthority",
     "build_operator_service_identity",

@@ -536,6 +536,19 @@ class PostgresRepository:
             return None
         return self._operator_start_intent(row)
 
+    def get_operator_start_intent_by_round_id(
+        self,
+        round_id: UUID,
+    ) -> OperatorStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operator_start_intents WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"Operator StartIntent not found for Round: {round_id}")
+        return self._operator_start_intent(row)
+
     def record_operator_start_plans(
         self,
         intent_id: UUID,

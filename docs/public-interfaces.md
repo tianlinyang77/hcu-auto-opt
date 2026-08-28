@@ -128,4 +128,15 @@ OX-1 的 durable Scripted StartIntent 通过
 `GET /v1/operator/start-intents/{intent_id}` 提供。它只消费不可变 Preview，并复用现有
 SearchRound/Candidate/Intake Close 权威接口；D-owned Scripted Plan Authority 由部署显式注入，
 未配置时安全失败。StartIntent finalized 只允许后续控制面继续处理，不代表已经执行 Build、
-测量或裁决。当前仍未实现 CLI 和 Summary/Report，因此不是 Formal 或一键优化完成声明。
+测量或裁决。CLI 和 Summary/Report 已提供 synthetic 操作闭环，但它仍不是 Formal 或真实
+一键优化完成声明。
+
+OX-1 CLI 和 Operator Read Model 使用同一 API：
+
+- `GET /v1/operator/search-rounds/{round_id}/summary`
+- `GET /v1/operator/search-rounds/{round_id}/report`
+- `hcuopt profile list|show`
+- `hcuopt round plan|start|status|report|run`
+
+命令从 Preview/Start 文件自动提取后续 ID 与 Hash，不要求人工复制；部署配置、Plan Spec 和
+fail-closed 边界见 [OX-1 Scripted Operator CLI](operator-cli.md)。

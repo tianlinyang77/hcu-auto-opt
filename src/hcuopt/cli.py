@@ -13,6 +13,7 @@ from hcuopt.domain.enums import (
     WorkerType,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.operator.cli import configure_operator_parsers, run_operator_command
 from hcuopt.stage0 import evaluate_stage0
 
 
@@ -66,11 +67,18 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--api-url", default=os.getenv("HCUOPT_API_URL", "http://localhost:8000"))
     demo.add_argument("--timeout", type=float, default=60.0)
     demo.add_argument("--external-workers", action="store_true")
+    configure_operator_parsers(
+        sub,
+        default_api_url=os.getenv("HCUOPT_API_URL", "http://localhost:8000"),
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    operator_result = run_operator_command(args)
+    if operator_result is not None:
+        return operator_result
     if args.command == "stage0-evaluate":
         report = evaluate_stage0(_load_stage0(args.evidence))
         payload = asdict(report)

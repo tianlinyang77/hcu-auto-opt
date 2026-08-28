@@ -11,7 +11,7 @@ from pydantic import ConfigDict, Field, model_validator
 from hcuopt.contracts.base import ContractModel, ReadModel
 from hcuopt.contracts.m2 import CandidateSourcePackageRef, RoundBudget
 from hcuopt.contracts.platform_v1 import GIT_COMMIT_PATTERN, SHA256_PATTERN
-from hcuopt.domain.enums import SearchRoundRunMode
+from hcuopt.domain.enums import RoundCandidateState, SearchRoundRunMode, SearchRoundState
 
 M2_OPERATOR_CONTRACT_VERSION = "m2-operator-v1"
 
@@ -452,4 +452,130 @@ class OperatorStartView(OperatorStartIntentView):
     def bind_executable_to_finalized_intent(self) -> OperatorStartView:
         if self.executable != (self.state == "finalized"):
             raise ValueError("only finalized StartIntent is executable")
+        return self
+
+
+class OperatorProfileSelector(ContractModel):
+    profile_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
+    profile_version: int = Field(ge=1)
+
+
+class OperatorRoundPlanSpec(ContractModel):
+    """Human-authored CLI input; exact Profile hashes come from the live service."""
+
+    name: str = Field(min_length=1, max_length=200)
+    target_profile: OperatorProfileSelector
+    workload_profile: OperatorProfileSelector
+    measurement_profile: OperatorProfileSelector
+    hotspot: OperatorHotspotRef
+    candidates: tuple[OperatorCandidateInput, ...] = Field(min_length=2, max_length=4)
+    max_promoted: int = Field(ge=1, le=2)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+
+    @model_validator(mode="after")
+    def require_candidate_and_promotion_bounds(self) -> OperatorRoundPlanSpec:
+        if self.max_promoted > len(self.candidates):
+            raise ValueError("max_promoted cannot exceed Candidate count")
+        return self
+
+
+class OperatorCandidateSummary(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    round_candidate_id: UUID
+    candidate_id: UUID
+    state: RoundCandidateState
+    artifact_id: UUID | None = None
+    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    terminal_failure_code: str | None = Field(default=None, min_length=1, max_length=200)
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_candidate_terminal_pairs(self) -> OperatorCandidateSummary:
+        if (self.artifact_id is None) != (self.artifact_hash is None):
+            raise ValueError("Operator Candidate Artifact identity must be paired")
+        if (self.terminal_failure_code is None) != (
+            self.failure_evidence_hash is None
+        ):
+            raise ValueError("Operator Candidate failure evidence must be paired")
+        return self
+
+
+class OperatorRoundSummary(ReadModel):
+    schema_version: Literal["m2-operator-read-model-v1"] = (
+        "m2-operator-read-model-v1"
+    )
+    generated_at: datetime
+    intent_id: UUID
+    task_id: UUID
+    round_id: UUID
+    round_version: int = Field(ge=1)
+    state: SearchRoundState
+    run_mode: Literal["scripted"] = "scripted"
+    next_action: Literal[
+        "await_candidate_intake",
+        "close_intake",
+        "await_build_terminals",
+        "freeze_artifact_family",
+        "close_search_barrier",
+        "record_holdout_reveal",
+        "close_holdout_barrier",
+        "record_multiple_comparison",
+        "finalize_scripted_round",
+        "none",
+    ]
+    reason: str = Field(min_length=1, max_length=500)
+    candidates: tuple[OperatorCandidateSummary, ...] = Field(min_length=2, max_length=4)
+    candidate_count: int = Field(ge=2, le=4)
+    build_terminal_count: int = Field(ge=0, le=4)
+    settled_budget_entry_count: int = Field(ge=0)
+    evidence_status: Literal["not_available", "available"]
+    terminal: bool
+    synthetic: Literal[True] = True
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_summary_counts(self) -> OperatorRoundSummary:
+        if self.candidate_count != len(self.candidates):
+            raise ValueError("Operator candidate_count must match Candidate summaries")
+        if self.build_terminal_count > self.candidate_count:
+            raise ValueError("Operator build_terminal_count exceeds Candidate count")
+        terminal_state = self.state in {
+            SearchRoundState.SCRIPTED_COMPLETED,
+            SearchRoundState.CANCELLED,
+        }
+        if self.terminal != terminal_state:
+            raise ValueError("Operator terminal flag must follow Round Authority")
+        return self
+
+
+class OperatorRoundReport(ReadModel):
+    schema_version: Literal["m2-operator-report-v1"] = "m2-operator-report-v1"
+    generated_at: datetime
+    report_status: Literal["interim", "final"]
+    summary: OperatorRoundSummary
+    round_authority: dict
+    evidence_bundle: dict | None = None
+    conclusion_boundary: Literal["synthetic_only_no_real_performance_claim"] = (
+        "synthetic_only_no_real_performance_claim"
+    )
+    formal_signoff_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_report_finality(self) -> OperatorRoundReport:
+        expected = "final" if self.summary.terminal else "interim"
+        if self.report_status != expected:
+            raise ValueError("Operator Report status must follow terminal Round Authority")
+        if (
+            str(self.round_authority.get("round_id")) != str(self.summary.round_id)
+            or self.round_authority.get("version") != self.summary.round_version
+            or self.round_authority.get("state") != self.summary.state.value
+            or self.round_authority.get("run_mode") != "scripted"
+            or self.round_authority.get("automatic_release_allowed") is not False
+        ):
+            raise ValueError("Operator Report Round Authority does not match its Summary")
+        if (self.summary.evidence_status == "available") != (
+            self.evidence_bundle is not None
+        ):
+            raise ValueError("Operator Evidence status must match the Report Bundle")
         return self

@@ -3,7 +3,7 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,18 +14,25 @@ from hcuopt.adapters.m2_candidate import (
     candidate_source_package_hash,
 )
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
-from hcuopt.api.app import create_app
+from hcuopt.api.app import (
+    _operator_scripted_candidate_intake,
+    _operator_scripted_plan_authority,
+    create_app,
+)
+from hcuopt.cli import build_parser
 from hcuopt.contracts.m1 import CandidateSourcePackageManifest
 from hcuopt.contracts.m2 import RoundCandidate, SearchRound
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileContent,
     OperatorProfileRef,
+    OperatorRoundPlanSpec,
     OperatorRoundStartRequest,
     OperatorStartCandidateMember,
     OperatorStartIntentView,
     PreflightCheckResult,
     ResolvedOperatorAuthority,
     RoundPlanPreviewRequest,
+    RoundPlanPreviewView,
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
@@ -34,15 +41,22 @@ from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
     HmacScriptedPlanAuthority,
     OperatorPlanCompiler,
+    OperatorReadModelService,
     OperatorStartCoordinator,
     build_operator_service_identity,
     build_scripted_operator_profile_catalog,
     publish_operator_profile,
 )
+from hcuopt.operator.cli import (
+    OperatorCliError,
+    OperatorHttpClient,
+    run_operator_command,
+)
 from hcuopt.operator.errors import (
     OperatorPlanHashMismatch,
     OperatorPreviewBlocked,
     OperatorPreviewExpired,
+    OperatorReadModelUnavailable,
     OperatorServiceIdentityMismatch,
     OperatorStartFailed,
     OperatorWarningAcknowledgementRequired,
@@ -204,6 +218,12 @@ class MemoryStartRepository(PreviewRepository):
             return None
         return self.intent
 
+    def get_operator_start_intent_by_round_id(
+        self, round_id
+    ):  # type: ignore[no-untyped-def]
+        assert self.intent is not None and self.intent.round_id == round_id
+        return self.intent
+
     def record_operator_start_plans(
         self, intent_id, plans: FrozenScriptedPlans
     ):  # type: ignore[no-untyped-def]
@@ -303,6 +323,36 @@ class MemoryStartRepository(PreviewRepository):
             candidate_family_hash=family_hash,
         )
         return self.round
+
+    def search_round_summary(self, round_id):  # type: ignore[no-untyped-def]
+        assert self.round is not None and self.round["round_id"] == round_id
+        now = datetime.now(timezone.utc)
+        return {
+            "round": self.round,
+            "candidates": [
+                {**self.members[index], "created_at": now, "updated_at": now}
+                for index in sorted(self.members)
+            ],
+            "budget_reservations": [],
+            "budget_ledger": [],
+            "barriers": [],
+            "holdout_reveal": None,
+            "multiple_comparison": None,
+            "evidence_bundle": None,
+            "automatic_release_allowed": False,
+        }
+
+    def reconcile_scripted_search_round(
+        self, round_id
+    ):  # type: ignore[no-untyped-def]
+        assert self.round is not None and self.round["round_id"] == round_id
+        return {
+            "round": self.round,
+            "consistent": True,
+            "next_action": "await_build_terminals",
+            "reason": "Candidate Family is frozen; wait for every Build terminal",
+            "automatic_release_allowed": False,
+        }
 
 
 def _suite(tmp_path: Path):  # type: ignore[no-untyped-def]
@@ -616,12 +666,407 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
             json=start_request.model_dump(mode="json"),
         )
         status = client.get(f"/v1/operator/start-intents/{first.intent_id}")
+        summary = client.get(
+            f"/v1/operator/search-rounds/{first.round_id}/summary"
+        )
+        report = client.get(
+            f"/v1/operator/search-rounds/{first.round_id}/report"
+        )
 
     assert started.status_code == 202
     assert started.json()["replayed"] is True
     assert started.headers["location"].endswith(str(first.intent_id))
     assert status.status_code == 200
     assert status.json()["state"] == "finalized"
+    assert summary.status_code == 200
+    assert summary.json()["schema_version"] == "m2-operator-read-model-v1"
+    assert summary.json()["next_action"] == "await_build_terminals"
+    assert summary.json()["candidate_count"] == 2
+    assert summary.json()["automatic_release_allowed"] is False
+    assert report.status_code == 200
+    assert report.json()["report_status"] == "interim"
+    assert report.json()["conclusion_boundary"] == (
+        "synthetic_only_no_real_performance_claim"
+    )
+    assert report.json()["formal_signoff_allowed"] is False
+
+
+def test_operator_http_client_runs_plan_start_status_and_report_without_copied_ids(
+    tmp_path: Path,
+) -> None:
+    compiler, repository, preview, coordinator, _start_request = _startable_suite(
+        tmp_path
+    )
+    app = create_app(
+        repository=repository,  # type: ignore[arg-type]
+        operator_profiles=compiler.profiles,
+        operator_plan_compiler=compiler,
+        operator_start_coordinator=coordinator,
+    )
+    resolved = preview.resolved_plan
+    spec = OperatorRoundPlanSpec(
+        name="Scripted Operator Preview",
+        target_profile={
+            "profile_id": resolved.target_profile.profile_id,
+            "profile_version": resolved.target_profile.profile_version,
+        },
+        workload_profile={
+            "profile_id": resolved.workload_profile.profile_id,
+            "profile_version": resolved.workload_profile.profile_version,
+        },
+        measurement_profile={
+            "profile_id": resolved.measurement_profile.profile_id,
+            "profile_version": resolved.measurement_profile.profile_version,
+        },
+        hotspot=resolved.hotspot,
+        candidates=tuple(
+            {
+                "ordinal": item.ordinal,
+                "source_package_ref": item.source_package_ref,
+                "optimization_intent": item.optimization_intent,
+            }
+            for item in resolved.candidates
+        ),
+        max_promoted=resolved.max_promoted,
+        idempotency_key="operator-preview-scripted",
+    )
+
+    with TestClient(app) as transport:
+        client = OperatorHttpClient("http://testserver", client=transport)
+        planned = client.plan(spec)
+        started = client.start(
+            planned,
+            actor="operator-cli-test",
+            acknowledge_warnings=False,
+        )
+        summary = client.status(started.round_id)
+        report = client.report(started.round_id)
+
+    assert planned.preview_id == preview.preview_id
+    assert started.state == "finalized"
+    assert summary.round_id == started.round_id
+    assert summary.next_action == "await_build_terminals"
+    assert report.report_status == "interim"
+    assert report.summary == summary.model_copy(
+        update={"generated_at": report.summary.generated_at}
+    )
+
+
+def test_operator_read_model_rejects_authority_binding_drift(tmp_path: Path) -> None:
+    _compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    started = coordinator.start(start_request, repository)
+    assert repository.intent is not None
+    repository.intent = repository.intent.model_copy(
+        update={"candidate_family_hash": _hash("drifted-family")}
+    )
+
+    with pytest.raises(OperatorReadModelUnavailable, match="bindings do not match"):
+        OperatorReadModelService().summary(started.round_id, repository)
+
+
+def test_operator_http_client_requires_explicit_warning_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    _compiler, _repository, preview, _coordinator, _start_request = _startable_suite(
+        tmp_path
+    )
+    warning_code = "operator_cli_warning"
+    warned = type(preview).model_validate(
+        {
+            **preview.model_dump(mode="json"),
+            "checks": [
+                *preview.checks,
+                PreflightCheckResult(
+                    code=warning_code,
+                    scope="test",
+                    status="warn",
+                    message="injected CLI warning",
+                    retryable=True,
+                    action_code="acknowledge_warning",
+                ),
+            ],
+            "required_ack_codes": [warning_code],
+        }
+    )
+    client = OperatorHttpClient(
+        "http://testserver",
+        client=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(OperatorCliError, match="--ack-warnings"):
+        client.start(warned, actor="operator-cli-test", acknowledge_warnings=False)
+
+
+def test_operator_round_start_returns_nonzero_for_failed_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _compiler, repository, preview, coordinator, start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    started = coordinator.start(start_request, repository)
+    failed = type(started).model_validate(
+        {
+            **started.model_dump(mode="json"),
+            "state": "failed",
+            "error_code": "operator_candidate_intake_failed",
+            "error_message": "Candidate Intake failed safely.",
+            "finalized_at": None,
+            "replayed": False,
+            "executable": False,
+        }
+    )
+    preview_path = tmp_path / "preview.json"
+    preview_path.write_text(preview.model_dump_json(indent=2), encoding="utf-8")
+    output_path = tmp_path / "start.json"
+
+    class FakeClient:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def start(self, loaded, **_kwargs):  # type: ignore[no-untyped-def]
+            assert loaded == preview
+            return failed
+
+    monkeypatch.setattr(
+        "hcuopt.operator.cli.OperatorHttpClient",
+        lambda _api_url: FakeClient(),
+    )
+    args = build_parser().parse_args(
+        [
+            "round",
+            "start",
+            str(preview_path),
+            "--actor",
+            "operator-cli-test",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert run_operator_command(args) == 2
+    saved = type(failed).model_validate_json(output_path.read_text(encoding="utf-8"))
+    assert saved.state == "failed"
+    assert saved.executable is False
+
+
+def test_operator_cli_parser_exposes_profile_and_round_workflow() -> None:
+    profile = build_parser().parse_args(
+        ["profile", "show", "target", "m2-scripted-target", "--version", "1"]
+    )
+    run = build_parser().parse_args(
+        ["round", "run", "operator-plan.json", "--actor", "operator-test"]
+    )
+
+    assert profile.command == "profile"
+    assert profile.profile_command == "show"
+    assert profile.profile_id == "m2-scripted-target"
+    assert run.command == "round"
+    assert run.round_command == "run"
+    assert run.spec == Path("operator-plan.json")
+    assert run.output_dir == Path("results/operator")
+
+
+def test_operator_deployment_configuration_is_explicit_and_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = build_scripted_operator_profile_catalog()
+    names = (
+        "HCUOPT_OPERATOR_PACKAGE_ROOT",
+        "HCUOPT_OPERATOR_OVERLAY_ROOTS_JSON",
+        "HCUOPT_OPERATOR_MOUNT_TARGETS_JSON",
+        "HCUOPT_OPERATOR_PLAN_SECRET_HEX",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    assert _operator_scripted_candidate_intake(catalog) is None
+    assert _operator_scripted_plan_authority() is None
+
+    monkeypatch.setenv("HCUOPT_OPERATOR_PACKAGE_ROOT", str(tmp_path))
+    with pytest.raises(ValueError, match="requires package root"):
+        _operator_scripted_candidate_intake(catalog)
+    monkeypatch.setenv("HCUOPT_OPERATOR_OVERLAY_ROOTS_JSON", '["sglang"]')
+    monkeypatch.setenv(
+        "HCUOPT_OPERATOR_MOUNT_TARGETS_JSON",
+        '{"sglang.fixture.layer_norm":"/opt/hcuopt/overlay/fixture.py"}',
+    )
+    intake = _operator_scripted_candidate_intake(catalog)
+    assert intake is not None
+    assert intake.store_id == "m2-scripted-package-store"
+
+    monkeypatch.setenv("HCUOPT_OPERATOR_PLAN_SECRET_HEX", "not-hex")
+    with pytest.raises(ValueError, match="hexadecimal"):
+        _operator_scripted_plan_authority()
+    monkeypatch.setenv("HCUOPT_OPERATOR_PLAN_SECRET_HEX", bytes(range(32)).hex())
+    assert _operator_scripted_plan_authority() is not None
+
+
+def test_operator_round_run_writes_complete_handoff_without_manual_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _compiler, repository, preview, coordinator, start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    started = coordinator.start(start_request, repository)
+    read_models = OperatorReadModelService(clock=lambda: NOW)
+    summary = read_models.summary(started.round_id, repository)
+    report = read_models.report(started.round_id, repository)
+    resolved = preview.resolved_plan
+    spec = OperatorRoundPlanSpec(
+        name="Scripted Operator Preview",
+        target_profile={
+            "profile_id": resolved.target_profile.profile_id,
+            "profile_version": resolved.target_profile.profile_version,
+        },
+        workload_profile={
+            "profile_id": resolved.workload_profile.profile_id,
+            "profile_version": resolved.workload_profile.profile_version,
+        },
+        measurement_profile={
+            "profile_id": resolved.measurement_profile.profile_id,
+            "profile_version": resolved.measurement_profile.profile_version,
+        },
+        hotspot=resolved.hotspot,
+        candidates=tuple(
+            {
+                "ordinal": item.ordinal,
+                "source_package_ref": item.source_package_ref,
+                "optimization_intent": item.optimization_intent,
+            }
+            for item in resolved.candidates
+        ),
+        max_promoted=resolved.max_promoted,
+        idempotency_key="operator-preview-scripted",
+    )
+    spec_path = tmp_path / "operator-plan.json"
+    spec_path.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    output_dir = tmp_path / "operator-output"
+
+    class FakeClient:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def plan(self, loaded):  # type: ignore[no-untyped-def]
+            assert loaded == spec
+            return preview
+
+        def start(self, loaded, **_kwargs):  # type: ignore[no-untyped-def]
+            assert loaded == preview
+            return started
+
+        def status(self, round_id):  # type: ignore[no-untyped-def]
+            assert round_id == started.round_id
+            return summary
+
+        def report(self, round_id):  # type: ignore[no-untyped-def]
+            assert round_id == started.round_id
+            return report
+
+    monkeypatch.setattr(
+        "hcuopt.operator.cli.OperatorHttpClient",
+        lambda _api_url: FakeClient(),
+    )
+    args = build_parser().parse_args(
+        [
+            "round",
+            "run",
+            str(spec_path),
+            "--actor",
+            "operator-cli-test",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert run_operator_command(args) == 0
+    assert {
+        path.name for path in output_dir.iterdir()
+    } == {"preview.json", "start.json", "summary.json", "report.json"}
+    saved_start = OperatorStartIntentView.model_validate_json(
+        (output_dir / "start.json").read_text(encoding="utf-8")
+    )
+    assert saved_start.round_id == started.round_id
+
+
+def test_operator_round_run_rejects_output_bound_to_another_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _compiler, _repository, preview, _coordinator, _start_request = _startable_suite(
+        tmp_path / "suite"
+    )
+    spec = OperatorRoundPlanSpec(
+        name="Scripted Operator Preview",
+        target_profile={"profile_id": "m2-scripted-target", "profile_version": 1},
+        workload_profile={
+            "profile_id": "m2-scripted-workload",
+            "profile_version": 1,
+        },
+        measurement_profile={
+            "profile_id": "m2-scripted-standard",
+            "profile_version": 1,
+        },
+        hotspot=preview.resolved_plan.hotspot,
+        candidates=tuple(
+            {
+                "ordinal": item.ordinal,
+                "source_package_ref": item.source_package_ref,
+                "optimization_intent": item.optimization_intent,
+            }
+            for item in preview.resolved_plan.candidates
+        ),
+        max_promoted=preview.resolved_plan.max_promoted,
+        idempotency_key="operator-preview-scripted",
+    )
+    spec_path = tmp_path / "operator-plan.json"
+    spec_path.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    output_dir = tmp_path / "operator-output"
+    output_dir.mkdir()
+    conflicting = preview.model_copy(update={"preview_id": uuid4()})
+    (output_dir / "preview.json").write_text(
+        conflicting.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+    class FakeClient:
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_args):  # type: ignore[no-untyped-def]
+            return None
+
+        def plan(self, _loaded):  # type: ignore[no-untyped-def]
+            return preview
+
+    monkeypatch.setattr(
+        "hcuopt.operator.cli.OperatorHttpClient",
+        lambda _api_url: FakeClient(),
+    )
+    args = build_parser().parse_args(
+        [
+            "round",
+            "run",
+            str(spec_path),
+            "--actor",
+            "operator-cli-test",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert run_operator_command(args) == 2
+    assert RoundPlanPreviewView.model_validate_json(
+        (output_dir / "preview.json").read_text(encoding="utf-8")
+    ).preview_id == conflicting.preview_id
 
 
 def test_operator_start_rejects_expired_blocked_and_unacknowledged_preview(

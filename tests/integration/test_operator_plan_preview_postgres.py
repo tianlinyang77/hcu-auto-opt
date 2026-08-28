@@ -28,6 +28,7 @@ from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
     HmacScriptedPlanAuthority,
     OperatorPlanCompiler,
+    OperatorReadModelService,
     OperatorStartCoordinator,
     build_operator_service_identity,
     build_scripted_operator_profile_catalog,
@@ -473,6 +474,14 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
         self.assertEqual(stored.state, "finalized")
         round_row = self.repository.get_search_round(stored.round_id)
         self.assertEqual(round_row["state"], "intake_closed")
+        summary = OperatorReadModelService().summary(
+            stored.round_id, self.repository
+        )
+        report = OperatorReadModelService().report(stored.round_id, self.repository)
+        self.assertEqual(summary.next_action, "await_build_terminals")
+        self.assertEqual(summary.candidate_count, 2)
+        self.assertEqual(report.report_status, "interim")
+        self.assertFalse(report.formal_signoff_allowed)
         with self.connection.cursor() as cursor:
             candidate_count = cursor.execute(
                 "SELECT count(*) AS count FROM round_candidates WHERE round_id = %s",
