@@ -386,6 +386,22 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
         )
         return coordinator, start
 
+    def test_hotspot_discovery_reads_latest_matching_authority(self) -> None:
+        discovered = self.repository.list_scripted_operator_hotspots(
+            self.target,
+            self.workload,
+        )
+
+        self.assertEqual(len(discovered), 1)
+        hotspot = discovered[0]
+        self.assertEqual(hotspot.hotspot.hotspot_id, self.ids["hotspot_id"])
+        self.assertEqual(
+            hotspot.authority.baseline_epoch_id,
+            self.ids["baseline_epoch_id"],
+        )
+        self.assertEqual(hotspot.hotspot.source, "profiler")
+        self.assertEqual(hotspot.symbol, "sglang.fixture.layer_norm")
+
     def test_preview_resolves_authority_and_replays_concurrently(self) -> None:
         request = self._request()
         identity = build_operator_service_identity(

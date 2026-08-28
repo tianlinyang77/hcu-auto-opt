@@ -144,6 +144,43 @@ class CandidateSourcePackageStore:
             files_root=files_root,
         )
 
+    def list_verified(self) -> tuple[LoadedCandidateSourcePackage, ...]:
+        """Enumerate the immutable store without accepting malformed entries."""
+
+        sha_root = self.root / "sha256"
+        if not sha_root.exists():
+            return ()
+        if sha_root.is_symlink() or not sha_root.is_dir():
+            raise SourceArtifactError(
+                "Candidate source package SHA256 root must be a regular directory"
+            )
+        packages: list[LoadedCandidateSourcePackage] = []
+        for prefix in sorted(sha_root.iterdir(), key=lambda item: item.name):
+            if (
+                prefix.is_symlink()
+                or not prefix.is_dir()
+                or len(prefix.name) != 2
+                or any(character not in "0123456789abcdef" for character in prefix.name)
+            ):
+                raise SourceArtifactError(
+                    "Candidate source package store contains a malformed SHA256 prefix"
+                )
+            for suffix in sorted(prefix.iterdir(), key=lambda item: item.name):
+                digest = prefix.name + suffix.name
+                if (
+                    suffix.is_symlink()
+                    or not suffix.is_dir()
+                    or len(suffix.name) != 62
+                    or any(character not in "0123456789abcdef" for character in suffix.name)
+                ):
+                    raise SourceArtifactError(
+                        "Candidate source package store contains a malformed SHA256 entry"
+                    )
+                packages.append(
+                    self.read(candidate_source_hash=f"sha256:{digest}")
+                )
+        return tuple(packages)
+
     def apply(self, package: LoadedCandidateSourcePackage, candidate_root: Path) -> tuple[str, ...]:
         candidate_root = candidate_root.resolve(strict=True)
         changed: list[str] = []

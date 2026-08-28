@@ -286,6 +286,10 @@ OX-1 Scripted Report 固定
 | `POST /v1/operator/search-rounds/{round_id}/signoff` | `hcuopt round signoff` |
 
 CLI 输出默认适合人阅读，并提供 `--json` 输出同一 Contract；脚本不得解析彩色表格文本。
+`hcuopt round draft` 是无状态客户端辅助命令：它只消费上述 Workload/Hotspot/Profile GET API，
+从返回的已验证 Candidate Package 引用生成 `OperatorRoundPlanSpec`，不直接写数据库，也不创建
+Preview、Task 或 Round。编号选择只用于当前排序后的发现结果，生成的 Spec 仍冻结全部 UUID/Hash，
+后续 Preview 会重新解析 Authority 和复核 Package，不能把 Draft 当成授权。
 
 ## 9. 稳定错误
 

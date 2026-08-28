@@ -30,6 +30,7 @@ from hcuopt.contracts.m2 import (
     SearchRoundView,
 )
 from hcuopt.contracts.operator_v1 import (
+    OperatorHotspotView,
     OperatorProfileDescriptor,
     OperatorRoundReport,
     OperatorRoundStartRequest,
@@ -37,6 +38,7 @@ from hcuopt.contracts.operator_v1 import (
     OperatorServiceIdentity,
     OperatorStartIntentView,
     OperatorStartView,
+    OperatorWorkloadView,
     RoundPlanPreviewRequest,
     RoundPlanPreviewView,
     TargetOperatorProfileRefs,
@@ -100,6 +102,7 @@ from hcuopt.evaluation.m2_models import (
 from hcuopt.evaluation.m2_statistics import SearchBarrierDecision
 from hcuopt.evaluation.stage0_finalizer import FileStage0Finalizer
 from hcuopt.operator import (
+    OperatorDiscoveryService,
     OperatorProfileCatalog,
     build_operator_service_identity,
     build_scripted_operator_profile_catalog,
@@ -205,6 +208,7 @@ def create_app(
     operator_plan_compiler: OperatorPlanCompiler | None = None,
     operator_start_coordinator: OperatorStartCoordinator | None = None,
     operator_read_models: OperatorReadModelService | None = None,
+    operator_discovery: OperatorDiscoveryService | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -249,6 +253,14 @@ def create_app(
     if start_coordinator.service_identity != operator_identity:
         raise ValueError("Operator Start Coordinator service identity does not match the API")
     read_models = operator_read_models or OperatorReadModelService()
+    discovery = operator_discovery or OperatorDiscoveryService(
+        operator_catalog,
+        candidate_intake=plan_compiler.candidate_intake,
+    )
+    if discovery.profiles.catalog_hash != operator_catalog.catalog_hash:
+        raise ValueError("Operator Discovery Profile Catalog does not match the API")
+    if discovery.candidate_intake is not plan_compiler.candidate_intake:
+        raise ValueError("Operator Discovery Candidate Intake does not match Plan Preview")
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -367,6 +379,63 @@ def create_app(
         profile_version: int,
     ) -> OperatorProfileDescriptor:
         return operator_catalog.get(profile_kind, profile_id, profile_version)
+
+    @application.get(
+        "/v1/operator/workloads",
+        response_model=list[OperatorWorkloadView],
+    )
+    def list_operator_workloads() -> list[OperatorWorkloadView]:
+        return discovery.workloads()
+
+    @application.get(
+        "/v1/operator/workloads/{profile_id}/versions/{profile_version}",
+        response_model=OperatorWorkloadView,
+    )
+    def get_operator_workload(
+        profile_id: str,
+        profile_version: int,
+    ) -> OperatorWorkloadView:
+        return discovery.workload(profile_id, profile_version)
+
+    @application.get(
+        "/v1/operator/hotspots",
+        response_model=list[OperatorHotspotView],
+    )
+    def list_operator_hotspots(
+        request: Request,
+        target_profile_id: str,
+        target_profile_version: int,
+        workload_profile_id: str,
+        workload_profile_version: int,
+    ) -> list[OperatorHotspotView]:
+        return discovery.hotspots(
+            target_profile_id=target_profile_id,
+            target_profile_version=target_profile_version,
+            workload_profile_id=workload_profile_id,
+            workload_profile_version=workload_profile_version,
+            repository=repo(request),
+        )
+
+    @application.get(
+        "/v1/operator/hotspots/{hotspot_id}",
+        response_model=OperatorHotspotView,
+    )
+    def get_operator_hotspot(
+        hotspot_id: UUID,
+        request: Request,
+        target_profile_id: str,
+        target_profile_version: int,
+        workload_profile_id: str,
+        workload_profile_version: int,
+    ) -> OperatorHotspotView:
+        return discovery.hotspot(
+            hotspot_id,
+            target_profile_id=target_profile_id,
+            target_profile_version=target_profile_version,
+            workload_profile_id=workload_profile_id,
+            workload_profile_version=workload_profile_version,
+            repository=repo(request),
+        )
 
     @application.post(
         "/v1/operator/round-plans:preview",

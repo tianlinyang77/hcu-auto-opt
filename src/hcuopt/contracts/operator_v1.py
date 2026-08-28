@@ -460,6 +460,57 @@ class OperatorProfileSelector(ContractModel):
     profile_version: int = Field(ge=1)
 
 
+class OperatorWorkloadView(ReadModel):
+    """One discoverable workload backed by an exact immutable Profile."""
+
+    profile: OperatorProfileRef
+    state: Literal["active", "deprecated", "revoked"]
+    display_name: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=1000)
+    authority_refs: WorkloadOperatorProfileRefs
+    synthetic: Literal[True] = True
+
+
+class OperatorCandidatePackageView(ReadModel):
+    """A verified deployment-owned Candidate Package safe for Plan drafting."""
+
+    candidate_id: UUID
+    source_package_ref: CandidateSourcePackageRef
+    candidate_kind: Literal["fixture"] = "fixture"
+    reviewed_by: str = Field(min_length=1, max_length=200)
+    reviewed_at: datetime
+    replacement_path: str = Field(min_length=1, max_length=2000)
+    suggested_optimization_intent: str = Field(min_length=1, max_length=2000)
+
+
+class OperatorHotspotAuthorityView(ReadModel):
+    """Typed storage result used to assemble the public discovery view."""
+
+    hotspot: OperatorHotspotRef
+    authority: ResolvedOperatorAuthority
+    symbol: str = Field(min_length=1, max_length=1000)
+    share_ratio: float = Field(ge=0.0, le=1.0)
+    opportunity_score: float = Field(ge=0.0)
+    patchability: str = Field(min_length=1, max_length=200)
+
+
+class OperatorHotspotView(ReadModel):
+    """A frozen Hotspot Authority plus its currently verified Candidate inputs."""
+
+    hotspot: OperatorHotspotRef
+    target_profile: OperatorProfileRef
+    workload_profile: OperatorProfileRef
+    baseline_epoch_id: UUID
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    symbol: str = Field(min_length=1, max_length=1000)
+    share_ratio: float = Field(ge=0.0, le=1.0)
+    opportunity_score: float = Field(ge=0.0)
+    patchability: str = Field(min_length=1, max_length=200)
+    candidate_packages: tuple[OperatorCandidatePackageView, ...] = ()
+    synthetic: Literal[True] = True
+    automatic_release_allowed: Literal[False] = False
+
+
 class OperatorRoundPlanSpec(ContractModel):
     """Human-authored CLI input; exact Profile hashes come from the live service."""
 
@@ -476,6 +527,41 @@ class OperatorRoundPlanSpec(ContractModel):
     def require_candidate_and_promotion_bounds(self) -> OperatorRoundPlanSpec:
         if self.max_promoted > len(self.candidates):
             raise ValueError("max_promoted cannot exceed Candidate count")
+        return self
+
+
+class OperatorRunMetrics(ReadModel):
+    """Non-performance OX-1 usability metrics captured from one real CLI run."""
+
+    schema_version: Literal["m2-operator-run-metrics-v1"] = (
+        "m2-operator-run-metrics-v1"
+    )
+    outcome: Literal["succeeded", "blocked", "failed"]
+    started_at: datetime
+    completed_at: datetime
+    operator_active_seconds: float = Field(ge=0.0)
+    manual_intervention_count: int = Field(ge=0)
+    preflight_blocked_before_hcu_count: int = Field(ge=0, le=1)
+    report_generation_seconds: float = Field(ge=0.0)
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+    synthetic: Literal[True] = True
+    performance_evidence: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_run_metric_consistency(self) -> OperatorRunMetrics:
+        if self.completed_at < self.started_at:
+            raise ValueError("Operator run metrics cannot complete before they start")
+        if (self.outcome == "succeeded") == (self.error_code is not None):
+            raise ValueError("only non-success Operator runs carry an error code")
+        if (self.outcome == "blocked") != (
+            self.preflight_blocked_before_hcu_count == 1
+        ):
+            raise ValueError(
+                "exactly a blocked Operator run records one Preflight block"
+            )
         return self
 
 

@@ -241,6 +241,12 @@ Round。该切片仍不运行 HCU，也不生成性能结论。
 无手工数据库写入的 synthetic 操作闭环。finalized 仍只表示 Round Authority 及 Candidate Family
 已安全建立，不表示优化已执行。
 
+OX-1 收尾切片增加 `workload list|show`、`hotspot list|show` 和 `round draft`。热点只从最新匹配的
+PostgreSQL Scripted Authority 读取，候选只从部署侧内容寻址 Package Store 完整复核后展示；Draft
+按稳定编号生成 Plan Spec，普通操作者不再准备完整 UUID、Evidence URI 或 Hash。`round run` 同时
+原子保存 `metrics.json`，以真实单调时钟记录主动操作、warning 确认、HCU 前阻塞和报告生成时间；
+这些指标固定不是性能 Evidence。
+
 退出条件：注册 Scripted Profile 后，一条命令启动、另一条命令查看状态和导出报告，全程无需
 SSH、Docker、数据库写入或复制内部 UUID/Hash。
 

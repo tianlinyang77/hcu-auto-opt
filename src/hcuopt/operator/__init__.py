@@ -1,3 +1,4 @@
+from hcuopt.operator.discovery import OperatorDiscoveryService
 from hcuopt.operator.plans import (
     OperatorPlanCompiler,
     operator_preview_request_digest,
@@ -20,6 +21,7 @@ from hcuopt.operator.start import (
 
 __all__ = [
     "OperatorProfileCatalog",
+    "OperatorDiscoveryService",
     "OperatorPlanCompiler",
     "OperatorReadModelService",
     "OperatorStartCoordinator",

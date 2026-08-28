@@ -51,3 +51,8 @@ class OperatorStartFailed(Conflict):
 class OperatorReadModelUnavailable(Conflict):
     code = "operator_read_model_unavailable"
     retryable = True
+
+
+class OperatorCandidatePackageInvalid(Conflict):
+    code = "operator_candidate_package_invalid"
+    retryable = False

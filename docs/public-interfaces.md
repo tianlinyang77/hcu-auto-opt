@@ -136,7 +136,12 @@ OX-1 CLI 和 Operator Read Model 使用同一 API：
 - `GET /v1/operator/search-rounds/{round_id}/summary`
 - `GET /v1/operator/search-rounds/{round_id}/report`
 - `hcuopt profile list|show`
-- `hcuopt round plan|start|status|report|run`
+- `GET /v1/operator/workloads`、`GET /v1/operator/workloads/{id}/versions/{version}` 与
+  `hcuopt workload list|show`
+- `GET /v1/operator/hotspots`、`GET /v1/operator/hotspots/{hotspot_id}` 与
+  `hcuopt hotspot list|show`
+- `hcuopt round draft|plan|start|status|report|run`
 
-命令从 Preview/Start 文件自动提取后续 ID 与 Hash，不要求人工复制；部署配置、Plan Spec 和
-fail-closed 边界见 [OX-1 Scripted Operator CLI](operator-cli.md)。
+`round draft` 从可信 Profile、Hotspot Authority 和已验证 Candidate Package 生成 Plan Spec；后续
+命令从 Preview/Start 文件自动提取 ID 与 Hash，不要求人工复制。`round run` 另存非性能性质的
+真实操作成本指标；部署配置和 fail-closed 边界见 [OX-1 Scripted Operator CLI](operator-cli.md)。
