@@ -66,16 +66,20 @@
 - Symptom: 同一任务前序命令可运行 `python`，后续新工具会话却报告命令不存在；解释器
   文件仍然存在。
 - Evidence: `Get-Command python` 与 `where.exe python` 曾无结果，但已确认的 Python 3.12
-  安装路径仍为普通文件；后续工具会话恢复了该绝对路径的执行权限。
+  安装路径仍为普通文件；后续工具会话恢复了该绝对路径的执行权限。M2a Formal Authority
+  切片所在 checkout 还没有独立 `.venv`，且本机会话没有 Docker CLI 或
+  `HCUOPT_DATABASE_URL`，因此不能在 Windows 本地伪装 PostgreSQL 实跑。
 - Cause: 当前 Codex 工具会话的 PATH 发生变化；具体注入原因未确认。
 - Proven workaround: 先用 `Get-Command`/`where.exe` 验证，再直接使用已经确认的解释器绝对
   路径；若某次工具会话仍拒绝执行，保留原命令并在新会话复验，不重装 Python，也不改项目
-  依赖。PostgreSQL 集成测试仍交给带 PostgreSQL 17 Service 的 Linux CI。
+  依赖。checkout 暂无独立虚拟环境时，先确认 `python` 的真实绝对路径并显式设置
+  `PYTHONPATH=src`；PostgreSQL 集成测试仍交给带 PostgreSQL 17 Service 的 Linux CI。
 - Validation: 权限恢复后，同一解释器完成 Ruff 全量检查及 M1 聚焦回归，结果为
-  `46 passed, 6 skipped`；跳过项均为本机未配置 `HCUOPT_DATABASE_URL` 的 PostgreSQL 测试。
+  `46 passed, 6 skipped`。M2a Formal Authority 定向验证为 `12 passed, 11 skipped`，其中
+  11 项只因本机未配置 PostgreSQL 而跳过，不能算作数据库通过。
 - Applies to: 本项目的 Windows 本地验证。
 - Do not repeat: 不要把 `python` 命令不可见当成测试失败，也不要因此改仓库配置。
-- Last updated: 2026-08-25
+- Last updated: 2026-08-29
 
 ## Measurement 包顶层重导出 M1 Harness 会形成导入环
 
@@ -115,7 +119,8 @@
   失败清单没有 M2 Contract 或其他新增失败。M2a Formal readiness 在 2026-08-29 的普通权限
   Windows 全量结果为 `458 passed, 21 skipped, 18 failed`：16 项仍为符号链接权限，2 项仍为
   只读临时制品删除，新增 readiness 定向测试 `10 passed`。Linux CI 继续作为这些文件语义的
-  正式门禁。
+  正式门禁。M2a Formal Authority 切片复验为 `464 passed, 21 skipped, 18 failed`；失败集合
+  未增加，仍是同样的 16 项符号链接权限和 2 项只读临时制品删除。
 - Applies to: 普通权限 Windows Python 3.10+ 的仓库全量单测。
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。

@@ -8,7 +8,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[9] == "0009_m2_round_authority.sql"
     assert MIGRATIONS[10] == "0010_operator_plan_preview.sql"
     assert MIGRATIONS[11] == "0011_operator_start_intent.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 12))
+    assert MIGRATIONS[12] == "0012_m2_formal_authority.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 13))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -82,3 +83,27 @@ def test_operator_start_migration_is_durable_and_scripted_safe() -> None:
     assert "operator_start_family_matches_state" in sql
     assert "operator_start_never_auto_releases" in sql
     assert "VALUES (11, 'operator_start_intent')" in sql
+
+
+def test_m2_formal_authority_migration_is_separate_append_only_and_fail_closed() -> None:
+    scripted = migration_sql(9)
+    formal = migration_sql(12)
+
+    assert "round_barrier_scripted_only CHECK (synthetic = TRUE)" in scripted
+    assert "round_evidence_scripted_only CHECK (synthetic = TRUE)" in scripted
+    for table in (
+        "formal_round_authority_contexts",
+        "formal_round_barriers",
+        "formal_round_holdout_reveals",
+        "formal_multiple_comparison_results",
+        "formal_round_evidence_bundles",
+    ):
+        assert f"CREATE TABLE {table}" in formal
+
+    assert "formal_authority_non_synthetic CHECK (synthetic = FALSE)" in formal
+    assert "formal_barrier_non_synthetic CHECK (synthetic = FALSE)" in formal
+    assert "formal_evidence_non_synthetic CHECK (synthetic = FALSE)" in formal
+    assert "formal_evidence_never_auto_releases" in formal
+    assert "reject_m2_formal_authority_mutation" in formal
+    assert "nonce" not in formal.lower()
+    assert "VALUES (12, 'm2_formal_authority')" in formal

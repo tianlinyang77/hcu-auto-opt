@@ -1,7 +1,7 @@
 schema_version: m2a-formal-readiness-v1
 audit_id: nmz36-m2a-formal-readiness-20260829-v1
-audit_base_commit: f1deab4a0014b9c83a6b4ca832f5d7cae3844462
-observed_at: 2026-08-29T19:20:00+08:00
+audit_base_commit: 15120eef56e349ca293b8102aa153b0d3278f759
+observed_at: 2026-08-29T20:19:20+08:00
 
 profile_draft:
   profile_version: 1
@@ -55,14 +55,26 @@ gates:
         evidence_type: scripted_fixture_discovery_implementation
   - code: formal_authority_persistence
     owner: D
-    status: block
-    summary: Barrier, Holdout Reveal, FWER, and Round Evidence tables enforce synthetic=true.
-    required_action: Add separately reviewed Formal authority tables or constraints without weakening Scripted isolation or append-only evidence semantics.
+    status: hold
+    summary: Isolated non-Synthetic Formal Context, Barrier, Reveal, FWER, and EvidenceBundle Contracts and tables now exist without weakening the Scripted tables.
+    required_action: Keep this gate on hold until production Repository writers, independent Formal Finalizer, Signoff integration, and crash-recovery paths persist and reread these records end to end.
     evidence:
-      - path: src/hcuopt/storage/sql/0009_m2_round_authority.sql
-        sha256: sha256:3d30bbc73f82640cf9fc246a7e6b837ffe8717c622731911924313c645c99aa5
+      - path: src/hcuopt/contracts/m2_formal_authority_v1.py
+        sha256: sha256:f8762974dab9a75f59829173692a39ad3e412c688e51304e7bba04d951871f7e
         digest_mode: text_lf
-        evidence_type: scripted_only_round_authority_schema
+        evidence_type: formal_authority_context_contract
+      - path: src/hcuopt/evaluation/m2_formal_authority.py
+        sha256: sha256:e8601232c05e7e50acffc5abefa5218f5437ba0094c0e20798e49deee54dc00e
+        digest_mode: text_lf
+        evidence_type: formal_persistence_binding_contracts
+      - path: src/hcuopt/storage/sql/0012_m2_formal_authority.sql
+        sha256: sha256:b58b71135efdc555b2c95b7890df65699e6647cd16ffb358b016b7e022a364fa
+        digest_mode: text_lf
+        evidence_type: isolated_formal_authority_schema
+      - path: tests/integration/test_m2_formal_authority_postgres.py
+        sha256: sha256:8479adfba694225878fa6bf22c42e2795ce278627f3d81957711b08757ef5992
+        digest_mode: text_lf
+        evidence_type: formal_authority_postgres_fail_closed_tests
   - code: formal_evidence_finalizer
     owner: D
     status: block
@@ -189,7 +201,7 @@ reviews:
     evidence: null
   - owner: D
     decision: pending
-    reason: Formal authority persistence, evidence reader/finalizer, and Signoff evidence path remain open.
+    reason: Formal persistence foundations exist, but production writers, the independent evidence reader/finalizer, and the Signoff evidence path remain open.
     evidence: null
 
 window_authorization: not_requested
