@@ -12,6 +12,7 @@ import {
   CheckSquareOffset,
   CircleNotch,
   ClipboardText,
+  ClockCounterClockwise,
   Clock,
   Database,
   DownloadSimple,
@@ -43,10 +44,12 @@ import {
 import { loadOperatorDashboard } from "./api.js";
 import { demoDashboard } from "./demo-data.js";
 import { PlanPreviewWorkspace } from "./PlanPreviewWorkspace.jsx";
+import { StartIntentWorkspace } from "./StartIntentWorkspace.jsx";
 
 const navigation = [
   ["round", "轮次总览", ChartLineUp],
   ["plan", "计划预览", ClipboardText],
+  ["start", "启动审计", ClockCounterClockwise],
   ["candidates", "候选管理", Stack],
   ["build", "构建中心", Hammer],
   ["correctness", "正确性评估", CheckSquareOffset],
@@ -552,6 +555,7 @@ export function App() {
   const [activeNavigation, setActiveNavigation] = useState("round");
   const [modal, setModal] = useState(null);
   const [plannerOpen, setPlannerOpen] = useState(false);
+  const [startAuditOpen, setStartAuditOpen] = useState(false);
 
   const load = async (useDemo = demoMode) => {
     setLoading(true);
@@ -622,7 +626,23 @@ export function App() {
     }
     if (key === "plan") {
       setActiveNavigation(key);
+      setStartAuditOpen(false);
       setPlannerOpen(true);
+      return;
+    }
+    if (key === "start") {
+      if (!round?.intent_id) {
+        setModal({
+          eyebrow: "UI-2 启动审计",
+          title: "当前 Round 没有可追溯的 StartIntent",
+          body: "只有带权威 intent_id 的 Round 才能进入 durable Start 审计。页面不会用 Round 状态反推一个不存在的 Intent。",
+          items: ["需要权威 intent_id", "只读取 Operator GET API", "不触发 Reconcile 或其他写操作"],
+        });
+        return;
+      }
+      setActiveNavigation(key);
+      setPlannerOpen(false);
+      setStartAuditOpen(true);
       return;
     }
     setModal({
@@ -665,6 +685,7 @@ export function App() {
         onToggleSidebar={() => setSidebarOpen((value) => !value)}
         onOpenPlanner={() => {
           setActiveNavigation("plan");
+          setStartAuditOpen(false);
           setPlannerOpen(true);
         }}
       />
@@ -689,11 +710,25 @@ export function App() {
             </div>
           </div>
           <div className="dashboard-head-actions">
+            {round?.intent_id && (
+              <button
+                className="outline-button start-audit-cta"
+                type="button"
+                onClick={() => {
+                  setActiveNavigation("start");
+                  setPlannerOpen(false);
+                  setStartAuditOpen(true);
+                }}
+              >
+                <ClockCounterClockwise size={19} />查看启动审计
+              </button>
+            )}
             <button
               className="primary-button plan-preview-cta"
               type="button"
               onClick={() => {
                 setActiveNavigation("plan");
+                setStartAuditOpen(false);
                 setPlannerOpen(true);
               }}
             >
@@ -815,6 +850,16 @@ export function App() {
           demoMode={demoMode}
           onClose={() => {
             setPlannerOpen(false);
+            setActiveNavigation("round");
+          }}
+        />
+      )}
+      {startAuditOpen && round && (
+        <StartIntentWorkspace
+          round={round}
+          demoMode={demoMode}
+          onClose={() => {
+            setStartAuditOpen(false);
             setActiveNavigation("round");
           }}
         />

@@ -40,6 +40,10 @@ export async function createRoundPlanPreview(payload) {
   });
 }
 
+export async function loadOperatorStartIntent(intentId) {
+  return request(`/v1/operator/start-intents/${encodeURIComponent(intentId)}`);
+}
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),
