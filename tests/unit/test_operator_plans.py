@@ -38,7 +38,13 @@ from hcuopt.contracts.operator_v1 import (
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
+from hcuopt.domain.enums import RoundCandidateState
 from hcuopt.domain.errors import Conflict, SourceArtifactError
+from hcuopt.evaluation.m2_models import BarrierMemberResult
+from hcuopt.evaluation.m2_statistics import (
+    ScriptedCandidateStatisticsInput,
+    close_scripted_search_barrier,
+)
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator import (
     HmacScriptedPlanAuthority,
@@ -211,6 +217,7 @@ class MemoryStartRepository(PreviewRepository):
         self.intent: OperatorStartIntentView | None = None
         self.round: dict | None = None
         self.members: dict[int, dict] = {}
+        self.barriers: list[dict] = []
         self.candidate_owner: UUID | None = None
 
     def assert_operator_candidate_ids_available(
@@ -374,7 +381,7 @@ class MemoryStartRepository(PreviewRepository):
             ],
             "budget_reservations": [],
             "budget_ledger": [],
-            "barriers": [],
+            "barriers": self.barriers,
             "holdout_reveal": None,
             "multiple_comparison": None,
             "evidence_bundle": None,
@@ -709,6 +716,9 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
         summary = client.get(
             f"/v1/operator/search-rounds/{first.round_id}/summary"
         )
+        candidate_evidence = client.get(
+            f"/v1/operator/search-rounds/{first.round_id}/candidate-evidence"
+        )
         report = client.get(
             f"/v1/operator/search-rounds/{first.round_id}/report"
         )
@@ -725,6 +735,17 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
     assert summary.json()["next_action"] == "await_build_terminals"
     assert summary.json()["candidate_count"] == 2
     assert summary.json()["automatic_release_allowed"] is False
+    assert candidate_evidence.status_code == 200
+    candidate_payload = candidate_evidence.json()
+    assert candidate_payload["schema_version"] == "m2-operator-candidate-evidence-v1"
+    assert candidate_payload["automatic_release_allowed"] is False
+    assert [item["build"]["status"] for item in candidate_payload["candidates"]] == [
+        "pending",
+        "pending",
+    ]
+    assert {
+        item["correctness"]["reason"] for item in candidate_payload["candidates"]
+    } == {"build_not_terminal"}
     assert report.status_code == 200
     assert report.json()["report_status"] == "interim"
     assert report.json()["conclusion_boundary"] == (
@@ -806,6 +827,121 @@ def test_operator_read_model_rejects_authority_binding_drift(tmp_path: Path) -> 
 
     with pytest.raises(OperatorReadModelUnavailable, match="bindings do not match"):
         OperatorReadModelService().summary(started.round_id, repository)
+
+
+def test_operator_candidate_evidence_rejects_source_binding_drift(
+    tmp_path: Path,
+) -> None:
+    _compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    started = coordinator.start(start_request, repository)
+    repository.members[0] = {
+        **repository.members[0],
+        "optimization_intent": "drifted intent",
+    }
+
+    with pytest.raises(OperatorReadModelUnavailable, match="source authority"):
+        OperatorReadModelService().candidate_evidence(started.round_id, repository)
+
+
+def test_operator_candidate_evidence_uses_search_barrier_correctness_authority(
+    tmp_path: Path,
+) -> None:
+    _compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    started = coordinator.start(start_request, repository)
+    assert repository.round is not None
+    artifact_family_hash = _hash("artifact-family")
+    repository.round.update(
+        state="search_barrier",
+        artifact_family_hash=artifact_family_hash,
+    )
+
+    members: list[BarrierMemberResult] = []
+    measured_statistics: list[ScriptedCandidateStatisticsInput] = []
+    for ordinal, stored in repository.members.items():
+        artifact_id = uuid4()
+        artifact_hash = _hash(f"artifact-{ordinal}")
+        if ordinal == 0:
+            state = RoundCandidateState.SEARCH_MEASURED
+            correctness_hash = _hash("correctness-passed")
+            receipt_id = uuid4()
+            failure_hash = None
+            cleanup_hash = _hash("cleanup-passed")
+            measured_statistics.append(
+                ScriptedCandidateStatisticsInput(
+                    candidate_id=stored["candidate_id"],
+                    scripted_phase_receipt_id=receipt_id,
+                    correctness_evidence_hash=correctness_hash,
+                    raw_evidence_hash=_hash("raw-search"),
+                    baseline_sample_set_hash=_hash("baseline-search"),
+                    restart_effects=(0.1, 0.1, 0.1, 0.1),
+                    baseline_restart_means_ns=(100.0, 100.0, 100.0, 100.0),
+                    stage0_mde_ratio=0.03,
+                )
+            )
+        else:
+            state = RoundCandidateState.CORRECTNESS_FAILED
+            correctness_hash = None
+            receipt_id = None
+            failure_hash = _hash("correctness-failed")
+            cleanup_hash = None
+        repository.members[ordinal] = {
+            **stored,
+            "state": state.value,
+            "artifact_id": artifact_id,
+            "artifact_hash": artifact_hash,
+        }
+        members.append(
+            BarrierMemberResult(
+                round_candidate_id=stored["round_candidate_id"],
+                candidate_id=stored["candidate_id"],
+                candidate_state=state,
+                artifact_id=artifact_id,
+                artifact_hash=artifact_hash,
+                correctness_evidence_hash=correctness_hash,
+                scripted_phase_receipt_id=receipt_id,
+                failure_evidence_hash=failure_hash,
+                budget_usage_evidence_hash=_hash(f"budget-{ordinal}"),
+                cleanup_evidence_hash=cleanup_hash,
+                synthetic=True,
+            )
+        )
+
+    decision = close_scripted_search_barrier(
+        round_authority=SearchRound.model_validate(
+            {
+                key: value
+                for key, value in repository.round.items()
+                if key != "updated_at"
+            }
+        ),
+        expected_candidate_ids=tuple(item.candidate_id for item in members),
+        members=members,
+        statistics=measured_statistics,
+        closed_by="operator-read-model-test",
+        closed_at=NOW,
+        idempotency_key="operator-candidate-evidence-barrier",
+    )
+    repository.barriers = [decision.model_dump(mode="json")]
+
+    workspace = OperatorReadModelService(clock=lambda: NOW).candidate_evidence(
+        started.round_id,
+        repository,
+    )
+
+    assert [item.correctness.status for item in workspace.candidates] == [
+        "passed",
+        "failed",
+    ]
+    assert workspace.candidates[0].correctness.correctness_evidence_hash == _hash(
+        "correctness-passed"
+    )
+    assert workspace.candidates[1].correctness.failure_evidence_hash == _hash(
+        "correctness-failed"
+    )
 
 
 def test_operator_http_client_requires_explicit_warning_acknowledgement(

@@ -565,6 +565,131 @@ class OperatorRunMetrics(ReadModel):
         return self
 
 
+class OperatorCandidateSourceEvidence(ReadModel):
+    candidate_input_digest: str = Field(pattern=SHA256_PATTERN)
+    source_package_store_id: str = Field(min_length=1, max_length=200)
+    source_package_store_version: int = Field(ge=1)
+    source_package_store_hash: str = Field(pattern=SHA256_PATTERN)
+    source_package_ref: CandidateSourcePackageRef
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    hotspot_id: UUID
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    track: Literal["triton"] = "triton"
+    release_mode: Literal["overlay"] = "overlay"
+    candidate_kind: Literal["fixture"] = "fixture"
+    optimization_intent: str = Field(min_length=1, max_length=2000)
+
+
+class OperatorCandidateBuildEvidence(ReadModel):
+    status: Literal["pending", "available", "failed"]
+    artifact_id: UUID | None = None
+    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    terminal_failure_code: str | None = Field(default=None, min_length=1, max_length=200)
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_build_evidence_shape(self) -> OperatorCandidateBuildEvidence:
+        artifact_pair = self.artifact_id is not None and self.artifact_hash is not None
+        failure_pair = (
+            self.terminal_failure_code is not None
+            and self.failure_evidence_hash is not None
+        )
+        if self.status == "available" and (not artifact_pair or failure_pair):
+            raise ValueError("available Build evidence requires only an Artifact pair")
+        if self.status == "failed" and (not failure_pair or artifact_pair):
+            raise ValueError("failed Build evidence requires only a failure pair")
+        if self.status == "pending" and (artifact_pair or failure_pair):
+            raise ValueError("pending Build evidence cannot carry terminal evidence")
+        return self
+
+
+class OperatorCandidateCorrectnessEvidence(ReadModel):
+    status: Literal["not_available", "passed", "failed"]
+    authority: Literal["not_available", "search_barrier"]
+    reason: Literal[
+        "build_not_terminal",
+        "build_failed",
+        "awaiting_search_barrier",
+        "correctness_passed",
+        "correctness_failed",
+    ]
+    search_barrier_id: UUID | None = None
+    correctness_evidence_hash: str | None = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_correctness_evidence_shape(
+        self,
+    ) -> OperatorCandidateCorrectnessEvidence:
+        if self.status == "passed" and (
+            self.authority != "search_barrier"
+            or self.reason != "correctness_passed"
+            or self.search_barrier_id is None
+            or self.correctness_evidence_hash is None
+            or self.failure_evidence_hash is not None
+        ):
+            raise ValueError("passed correctness requires Search Barrier evidence")
+        if self.status == "failed" and (
+            self.authority != "search_barrier"
+            or self.reason != "correctness_failed"
+            or self.search_barrier_id is None
+            or self.correctness_evidence_hash is not None
+            or self.failure_evidence_hash is None
+        ):
+            raise ValueError("failed correctness requires Search Barrier failure evidence")
+        if self.status == "not_available" and (
+            self.authority != "not_available"
+            or self.search_barrier_id is not None
+            or self.correctness_evidence_hash is not None
+            or self.failure_evidence_hash is not None
+            or self.reason not in {
+                "build_not_terminal",
+                "build_failed",
+                "awaiting_search_barrier",
+            }
+        ):
+            raise ValueError("unavailable correctness cannot claim evidence authority")
+        return self
+
+
+class OperatorCandidateEvidence(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    round_candidate_id: UUID
+    candidate_id: UUID
+    state: RoundCandidateState
+    source: OperatorCandidateSourceEvidence
+    build: OperatorCandidateBuildEvidence
+    correctness: OperatorCandidateCorrectnessEvidence
+
+
+class OperatorCandidateEvidenceWorkspace(ReadModel):
+    schema_version: Literal["m2-operator-candidate-evidence-v1"] = (
+        "m2-operator-candidate-evidence-v1"
+    )
+    generated_at: datetime
+    intent_id: UUID
+    task_id: UUID
+    round_id: UUID
+    round_version: int = Field(ge=1)
+    round_state: SearchRoundState
+    candidates: tuple[OperatorCandidateEvidence, ...] = Field(min_length=2, max_length=4)
+    synthetic: Literal[True] = True
+    formal_signoff_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_canonical_candidate_order(self) -> OperatorCandidateEvidenceWorkspace:
+        if tuple(item.ordinal for item in self.candidates) != tuple(
+            range(len(self.candidates))
+        ):
+            raise ValueError("Operator Candidate evidence must remain canonically ordered")
+        if len({item.candidate_id for item in self.candidates}) != len(self.candidates):
+            raise ValueError("Operator Candidate evidence identities must be unique")
+        return self
+
+
 class OperatorCandidateSummary(ReadModel):
     ordinal: int = Field(ge=0, le=3)
     round_candidate_id: UUID

@@ -1,0 +1,134 @@
+{
+  "schema_version": "m2-operator-candidate-evidence-v1",
+  "generated_at": "2026-08-28T10:42:00Z",
+  "intent_id": "7b93528c-4ef0-45fa-8537-b978611f274b",
+  "task_id": "af7735bd-2e5f-47ee-a72d-7eb3a753f6bc",
+  "round_id": "250cb54c-f0da-4475-87d8-9618f10232e2",
+  "round_version": 4,
+  "round_state": "building",
+  "candidates": [
+    {
+      "ordinal": 0,
+      "round_candidate_id": "3934a9f4-fc90-4749-8d7c-c74609f346ef",
+      "candidate_id": "0021d533-5802-43f7-ad61-c214029d7071",
+      "state": "built",
+      "source": {
+        "candidate_input_digest": "sha256:1010101010101010101010101010101010101010101010101010101010101010",
+        "source_package_store_id": "m2-scripted-package-store",
+        "source_package_store_version": 1,
+        "source_package_store_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_package_ref": {
+          "candidate_source_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "source_package_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifest_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "manifest_schema_version": "m1-candidate-source-v1"
+        },
+        "baseline_source_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "hotspot_id": "3e62de7d-31f6-47b7-9983-62dedb1d5644",
+        "replacement_point": "sglang/fixture_kernel.py",
+        "track": "triton",
+        "release_mode": "overlay",
+        "candidate_kind": "fixture",
+        "optimization_intent": "Validate the no-op Candidate path."
+      },
+      "build": {
+        "status": "available",
+        "artifact_id": "91f30676-04da-4af4-89ad-2d9500360a30",
+        "artifact_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "terminal_failure_code": null,
+        "failure_evidence_hash": null
+      },
+      "correctness": {
+        "status": "not_available",
+        "authority": "not_available",
+        "reason": "awaiting_search_barrier",
+        "search_barrier_id": null,
+        "correctness_evidence_hash": null,
+        "failure_evidence_hash": null
+      }
+    },
+    {
+      "ordinal": 1,
+      "round_candidate_id": "f79033c6-dd7e-49d3-9a97-6c53b2e7f46b",
+      "candidate_id": "eb24fca2-4219-4f63-a99a-b5b0c8bfe976",
+      "state": "built",
+      "source": {
+        "candidate_input_digest": "sha256:2020202020202020202020202020202020202020202020202020202020202020",
+        "source_package_store_id": "m2-scripted-package-store",
+        "source_package_store_version": 1,
+        "source_package_store_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_package_ref": {
+          "candidate_source_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "source_package_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "manifest_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "manifest_schema_version": "m1-candidate-source-v1"
+        },
+        "baseline_source_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "hotspot_id": "3e62de7d-31f6-47b7-9983-62dedb1d5644",
+        "replacement_point": "sglang/fixture_kernel.py",
+        "track": "triton",
+        "release_mode": "overlay",
+        "candidate_kind": "fixture",
+        "optimization_intent": "Exercise a known-faster Scripted branch."
+      },
+      "build": {
+        "status": "available",
+        "artifact_id": "60be7365-f4bb-4390-9621-3c16638436c1",
+        "artifact_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "terminal_failure_code": null,
+        "failure_evidence_hash": null
+      },
+      "correctness": {
+        "status": "not_available",
+        "authority": "not_available",
+        "reason": "awaiting_search_barrier",
+        "search_barrier_id": null,
+        "correctness_evidence_hash": null,
+        "failure_evidence_hash": null
+      }
+    },
+    {
+      "ordinal": 2,
+      "round_candidate_id": "6572408f-358a-4a44-a94a-018591862181",
+      "candidate_id": "a359c911-fc41-40d2-867f-503504a4fb36",
+      "state": "build_failed",
+      "source": {
+        "candidate_input_digest": "sha256:3030303030303030303030303030303030303030303030303030303030303030",
+        "source_package_store_id": "m2-scripted-package-store",
+        "source_package_store_version": 1,
+        "source_package_store_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_package_ref": {
+          "candidate_source_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "source_package_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "manifest_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+          "manifest_schema_version": "m1-candidate-source-v1"
+        },
+        "baseline_source_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "hotspot_id": "3e62de7d-31f6-47b7-9983-62dedb1d5644",
+        "replacement_point": "sglang/fixture_kernel.py",
+        "track": "triton",
+        "release_mode": "overlay",
+        "candidate_kind": "fixture",
+        "optimization_intent": "Exercise an immutable build-failure branch."
+      },
+      "build": {
+        "status": "failed",
+        "artifact_id": null,
+        "artifact_hash": null,
+        "terminal_failure_code": "scripted_build_failure",
+        "failure_evidence_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "correctness": {
+        "status": "not_available",
+        "authority": "not_available",
+        "reason": "build_failed",
+        "search_barrier_id": null,
+        "correctness_evidence_hash": null,
+        "failure_evidence_hash": null
+      }
+    }
+  ],
+  "synthetic": true,
+  "formal_signoff_allowed": false,
+  "automatic_release_allowed": false
+}
