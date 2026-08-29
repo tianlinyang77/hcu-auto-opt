@@ -11,6 +11,7 @@ import {
   CheckCircle,
   CheckSquareOffset,
   CircleNotch,
+  ClipboardText,
   Clock,
   Database,
   DownloadSimple,
@@ -41,9 +42,11 @@ import {
 
 import { loadOperatorDashboard } from "./api.js";
 import { demoDashboard } from "./demo-data.js";
+import { PlanPreviewWorkspace } from "./PlanPreviewWorkspace.jsx";
 
 const navigation = [
   ["round", "轮次总览", ChartLineUp],
+  ["plan", "计划预览", ClipboardText],
   ["candidates", "候选管理", Stack],
   ["build", "构建中心", Hammer],
   ["correctness", "正确性评估", CheckSquareOffset],
@@ -161,7 +164,7 @@ function IconButton({ label, children, onClick, className = "" }) {
   );
 }
 
-function TopBar({ dashboard, demoMode, onRefresh, onToggleSidebar }) {
+function TopBar({ dashboard, demoMode, onRefresh, onToggleSidebar, onOpenPlanner }) {
   const workload = dashboard.workloads[0];
   return (
     <header className="topbar">
@@ -183,13 +186,13 @@ function TopBar({ dashboard, demoMode, onRefresh, onToggleSidebar }) {
 
       <div className="topbar-context">
         <span className="topbar-label">工作负载</span>
-        <button className="context-select" type="button">
+        <button className="context-select" type="button" onClick={onOpenPlanner}>
           <span>{workload?.display_name || "未发现 Workload"}</span>
           <CaretDown size={15} />
         </button>
         <span className="topbar-label">当前视图</span>
-        <button className="context-select view-select" type="button">
-          <span>M2 多候选优化轮次</span>
+        <button className="context-select view-select" type="button" onClick={onOpenPlanner}>
+          <span>启动前 Plan Preview</span>
           <CaretDown size={15} />
         </button>
       </div>
@@ -548,6 +551,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeNavigation, setActiveNavigation] = useState("round");
   const [modal, setModal] = useState(null);
+  const [plannerOpen, setPlannerOpen] = useState(false);
 
   const load = async (useDemo = demoMode) => {
     setLoading(true);
@@ -616,6 +620,11 @@ export function App() {
       setActiveNavigation(key);
       return;
     }
+    if (key === "plan") {
+      setActiveNavigation(key);
+      setPlannerOpen(true);
+      return;
+    }
     setModal({
       eyebrow: "UI-0 只读范围",
       title: `${label} 将在后续只读切片展开`,
@@ -654,6 +663,10 @@ export function App() {
         demoMode={demoMode}
         onRefresh={() => load(demoMode)}
         onToggleSidebar={() => setSidebarOpen((value) => !value)}
+        onOpenPlanner={() => {
+          setActiveNavigation("plan");
+          setPlannerOpen(true);
+        }}
       />
       <SideBar
         open={sidebarOpen}
@@ -675,19 +688,31 @@ export function App() {
               <span className="mono">commit {shortId(dashboard.identity.source_commit, 9)}</span>
             </div>
           </div>
-          {round && (
-            <div className="round-status">
-              <div>
-                <span>当前状态</span>
-                <strong>{roundStateText[round.state] || round.state}</strong>
-                {loading && <CircleNotch className="spin" size={22} />}
+          <div className="dashboard-head-actions">
+            <button
+              className="primary-button plan-preview-cta"
+              type="button"
+              onClick={() => {
+                setActiveNavigation("plan");
+                setPlannerOpen(true);
+              }}
+            >
+              <ClipboardText size={19} />新建计划预览
+            </button>
+            {round && (
+              <div className="round-status">
+                <div>
+                  <span>当前状态</span>
+                  <strong>{roundStateText[round.state] || round.state}</strong>
+                  {loading && <CircleNotch className="spin" size={22} />}
+                </div>
+                <p>
+                  Authority：{formatDate(round.generated_at)}
+                  <span>Round v{round.round_version}</span>
+                </p>
               </div>
-              <p>
-                Authority：{formatDate(round.generated_at)}
-                <span>Round v{round.round_version}</span>
-              </p>
-            </div>
-          )}
+            )}
+          </div>
         </section>
 
         {dashboard.rounds.length > 1 && (
@@ -784,6 +809,16 @@ export function App() {
         />
       )}
       <Modal modal={modal} onClose={() => setModal(null)} />
+      {plannerOpen && (
+        <PlanPreviewWorkspace
+          dashboard={dashboard}
+          demoMode={demoMode}
+          onClose={() => {
+            setPlannerOpen(false);
+            setActiveNavigation("round");
+          }}
+        />
+      )}
     </div>
   );
 }

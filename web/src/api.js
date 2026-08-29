@@ -1,8 +1,13 @@
 const API_BASE = (import.meta.env.VITE_HCUOPT_API_BASE || "").replace(/\/$/, "");
 
-async function request(path) {
+async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { Accept: "application/json" },
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...options.headers,
+    },
   });
   if (!response.ok) {
     let detail = {};
@@ -18,6 +23,23 @@ async function request(path) {
   return response.json();
 }
 
+export async function loadOperatorHotspots(target, workload) {
+  const query = new URLSearchParams({
+    target_profile_id: target.profile_id,
+    target_profile_version: String(target.profile_version),
+    workload_profile_id: workload.profile.profile_id,
+    workload_profile_version: String(workload.profile.profile_version),
+  });
+  return request(`/v1/operator/hotspots?${query}`);
+}
+
+export async function createRoundPlanPreview(payload) {
+  return request("/v1/operator/round-plans:preview", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),
@@ -30,13 +52,7 @@ export async function loadOperatorDashboard() {
   const workload = workloads[0];
   let hotspots = [];
   if (target && workload) {
-    const query = new URLSearchParams({
-      target_profile_id: target.profile_id,
-      target_profile_version: String(target.profile_version),
-      workload_profile_id: workload.profile.profile_id,
-      workload_profile_version: String(workload.profile.profile_version),
-    });
-    hotspots = await request(`/v1/operator/hotspots?${query}`);
+    hotspots = await loadOperatorHotspots(target, workload);
   }
 
   const reports = {};
