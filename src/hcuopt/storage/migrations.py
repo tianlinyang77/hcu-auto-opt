@@ -14,6 +14,7 @@ MIGRATIONS = {
     11: "0011_operator_start_intent.sql",
     12: "0012_m2_formal_authority.sql",
     13: "0013_m2_formal_finalizer.sql",
+    14: "0014_m2_formal_signoff_outbox.sql",
 }
 
 

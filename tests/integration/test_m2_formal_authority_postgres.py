@@ -21,6 +21,10 @@ from hcuopt.contracts.m2_formal_authority_v1 import (
     formal_authority_context_ref,
     publish_formal_authority_context,
 )
+from hcuopt.contracts.m2_formal_signoff_v1 import (
+    FormalDecisionSignature,
+    FormalRoundSignoffRequest,
+)
 from hcuopt.domain.enums import (
     ManualCandidateVerdict,
     RoundBarrierOutcome,
@@ -44,6 +48,10 @@ from hcuopt.evaluation.m2_formal_finalizer import (
     build_formal_round_evidence,
     formal_round_evidence_requirements,
 )
+from hcuopt.evaluation.m2_formal_signoff import (
+    LocalFormalSignoffArtifactPublisher,
+    M2FormalRoundSignoffFinalizer,
+)
 from hcuopt.evaluation.m2_models import (
     AdjustedCandidateResult,
     BarrierMemberResult,
@@ -61,6 +69,7 @@ from hcuopt.orchestrator.search_round import (
     round_budget_ledger_document,
     round_budget_ledger_hash,
 )
+from hcuopt.source_hash import file_uri_to_path
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -107,6 +116,24 @@ class _ProtectedEvidenceStore:
         artifact = self.artifact_for_hash(expected_hash)
         path = self.root / f"{artifact.sha256[7:]}.json"
         path.write_bytes(b'{"tampered":true}\n')
+
+
+class _FormalSignoffTestSigner:
+    def sign(self, payload: bytes) -> FormalDecisionSignature:
+        return FormalDecisionSignature(
+            signer_id="m2-formal-postgres-test-signer",
+            signer_key_id="test-key-v1",
+            signer_identity_hash=_hash("5"),
+            algorithm="test-sha256-v1",
+            value=hashlib.sha256(b"formal-signoff-key" + payload).hexdigest(),
+        )
+
+
+class _FormalSignoffTestVerifier:
+    def verify(self, payload: bytes, signature: FormalDecisionSignature) -> None:
+        expected = hashlib.sha256(b"formal-signoff-key" + payload).hexdigest()
+        if signature.value != expected:
+            raise ValueError("Formal Signoff test signature mismatch")
 
 
 @unittest.skipUnless(DATABASE_URL and psycopg, "requires PostgreSQL and psycopg")
@@ -678,6 +705,47 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
             evidence_index_hash=index.sha256,
             evidence_reader=HashedEvidenceReader(Path(self.temp_dir.name)),
         )
+
+    def _prepare_signoff_repository(self, *, decision: str = "approved"):
+        repository, context, authority, barrier, budget_hash = (
+            self._prepare_repository_zero_promotion()
+        )
+        bundle = self._build_zero_bundle(context, authority, barrier, budget_hash)
+        repository.finalize_formal_search_round(
+            FormalEvidenceBundlePersistence(
+                context=formal_authority_context_ref(context),
+                bundle=bundle,
+                payload_hash=formal_authority_payload_hash(bundle),
+            )
+        )
+        reader = HashedEvidenceReader(Path(self.temp_dir.name))
+        repository = PostgresRepository(
+            DATABASE_URL,
+            m2_formal_finalizer=M2FormalRoundFinalizer(reader),
+            m2_formal_signoff_finalizer=M2FormalRoundSignoffFinalizer(
+                reader,
+                _FormalSignoffTestVerifier(),
+            ),
+        )
+        request = FormalRoundSignoffRequest(
+            round_id=self.ids["round"],
+            round_evidence_bundle_id=bundle.round_evidence_bundle_id,
+            decision=decision,
+            actor="operator-a",
+            actor_identity_hash=_hash("6"),
+            reason=f"Formal Round decision: {decision}",
+            idempotency_key=f"formal-round-signoff-{decision}",
+        )
+        return repository, context, bundle, request
+
+    def _publish_signoff(self, repository, context, request):
+        intent_row = repository.create_formal_round_signoff_intent(request)
+        intent = repository._formal_signoff_intent(intent_row, context)
+        publication = LocalFormalSignoffArtifactPublisher(
+            Path(self.temp_dir.name) / "formal-signoff",
+            _FormalSignoffTestSigner(),
+        ).publish(intent)
+        return intent_row, intent, publication
 
     def _insert_context(self, **updates: object) -> None:
         with self.connection.cursor() as cursor:
@@ -1422,3 +1490,228 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
         self.evidence_store.tamper(context.search_plan_hash)
         with self.assertRaisesRegex(Conflict, "evidence_hash_mismatch"):
             repository.finalize_formal_search_round(record)
+
+    def test_formal_signoff_approved_two_transaction_flow_is_idempotent(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+
+        first_intent, _, publication = self._publish_signoff(
+            repository, context, request
+        )
+        replay_intent = repository.create_formal_round_signoff_intent(request)
+        self.assertEqual(
+            replay_intent["signoff_intent_id"], first_intent["signoff_intent_id"]
+        )
+        self.assertEqual(replay_intent["outbox"]["state"], "pending")
+        with self.assertRaisesRegex(Conflict, "not durably published"):
+            repository.finalize_formal_round_signoff(publication)
+
+        first_publication = repository.record_formal_round_signoff_artifact(publication)
+        replay_publication = repository.record_formal_round_signoff_artifact(publication)
+        self.assertEqual(first_publication["state"], "artifact_published")
+        self.assertEqual(
+            replay_publication["decision_artifact_hash"],
+            publication.decision_artifact_hash,
+        )
+
+        first = repository.finalize_formal_round_signoff(publication)
+        replay = repository.finalize_formal_round_signoff(publication)
+
+        self.assertEqual(first["round_signoff_id"], replay["round_signoff_id"])
+        self.assertEqual(first["round_state"], "completed")
+        self.assertEqual(first["task_state"], "completed")
+        self.assertFalse(first["automatic_release_allowed"])
+        reconciled = repository.reconcile_formal_round_signoff(self.ids["round"])
+        self.assertEqual(reconciled["next_action"], "complete")
+        self.assertFalse(reconciled["automatic_release_allowed"])
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT intent.state, outbox.state, count(events.event_id) AS event_count
+                FROM formal_round_signoff_intents AS intent
+                JOIN formal_round_signoff_outbox AS outbox
+                  ON outbox.signoff_intent_id = intent.signoff_intent_id
+                LEFT JOIN task_events AS events
+                  ON events.task_id = intent.task_id
+                 AND events.event_type = 'm2_formal_round_signed_off'
+                WHERE intent.round_id = %s
+                GROUP BY intent.state, outbox.state
+                """,
+                (self.ids["round"],),
+            )
+            state = cursor.fetchone()
+        assert state is not None
+        self.assertEqual(state[0], "finalized")
+        self.assertEqual(state[1], "finalized")
+        self.assertEqual(state[2], 1)
+
+    def test_formal_signoff_rejected_is_a_non_releasable_terminal_state(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository(
+            decision="rejected"
+        )
+        _, _, publication = self._publish_signoff(repository, context, request)
+        repository.record_formal_round_signoff_artifact(publication)
+
+        result = repository.finalize_formal_round_signoff(publication)
+
+        self.assertEqual(result["decision"], "rejected")
+        self.assertEqual(result["round_state"], "rejected")
+        self.assertEqual(result["task_state"], "rejected")
+        self.assertFalse(result["synthetic"])
+        self.assertFalse(result["automatic_release_allowed"])
+
+    def test_formal_signoff_create_and_finalize_are_concurrent_idempotent(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            intents = list(
+                pool.map(
+                    lambda _: repository.create_formal_round_signoff_intent(request),
+                    range(2),
+                )
+            )
+        self.assertEqual(
+            {row["signoff_intent_id"] for row in intents},
+            {intents[0]["signoff_intent_id"]},
+        )
+
+        intent = repository._formal_signoff_intent(intents[0], context)
+        publication = LocalFormalSignoffArtifactPublisher(
+            Path(self.temp_dir.name) / "formal-signoff",
+            _FormalSignoffTestSigner(),
+        ).publish(intent)
+        repository.record_formal_round_signoff_artifact(publication)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            replay_future = pool.submit(
+                repository.create_formal_round_signoff_intent, request
+            )
+            signoff_futures = [
+                pool.submit(repository.finalize_formal_round_signoff, publication)
+                for _ in range(2)
+            ]
+            replay = replay_future.result()
+            signoffs = [future.result() for future in signoff_futures]
+
+        self.assertEqual(replay["signoff_intent_id"], intent.signoff_intent_id)
+        self.assertEqual(
+            {row["round_signoff_id"] for row in signoffs},
+            {signoffs[0]["round_signoff_id"]},
+        )
+        self.assertTrue(all(row["round_state"] == "completed" for row in signoffs))
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM formal_round_signoffs WHERE round_id = %s",
+                (self.ids["round"],),
+            )
+            self.assertEqual(cursor.fetchone()[0], 1)
+
+    def test_formal_signoff_reconcile_recovers_each_crash_boundary(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+
+        self.assertEqual(
+            repository.reconcile_formal_round_signoff(self.ids["round"])["next_action"],
+            "create_intent",
+        )
+        _, intent, publication = self._publish_signoff(repository, context, request)
+        after_intent = repository.reconcile_formal_round_signoff(self.ids["round"])
+        self.assertEqual(after_intent["next_action"], "publish_artifact")
+
+        artifact_path = file_uri_to_path(publication.decision_artifact_uri)
+        self.assertTrue(artifact_path.is_file())
+        still_pending = repository.reconcile_formal_round_signoff(self.ids["round"])
+        self.assertEqual(still_pending["next_action"], "publish_artifact")
+        replayed_publication = LocalFormalSignoffArtifactPublisher(
+            Path(self.temp_dir.name) / "formal-signoff",
+            _FormalSignoffTestSigner(),
+        ).publish(intent)
+        self.assertEqual(replayed_publication, publication)
+
+        repository.record_formal_round_signoff_artifact(publication)
+        after_artifact = repository.reconcile_formal_round_signoff(self.ids["round"])
+        self.assertEqual(after_artifact["next_action"], "finalize_signoff")
+
+        repository.finalize_formal_round_signoff(publication)
+        self.assertEqual(
+            repository.reconcile_formal_round_signoff(self.ids["round"])["next_action"],
+            "complete",
+        )
+
+    def test_formal_signoff_rejects_tamper_and_terminal_identity_drift(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+        _, intent, publication = self._publish_signoff(repository, context, request)
+        repository.record_formal_round_signoff_artifact(publication)
+        artifact_path = file_uri_to_path(publication.decision_artifact_uri)
+        artifact_path.unlink()
+        with self.assertRaisesRegex(Conflict, "evidence_path_escape"):
+            repository.finalize_formal_round_signoff(publication)
+
+        publication = LocalFormalSignoffArtifactPublisher(
+            Path(self.temp_dir.name) / "formal-signoff",
+            _FormalSignoffTestSigner(),
+        ).publish(intent)
+        artifact_path.chmod(0o600)
+        artifact_path.write_bytes(b'{"tampered":true}\n')
+
+        with self.assertRaisesRegex(Conflict, "evidence_hash_mismatch"):
+            repository.finalize_formal_round_signoff(publication)
+
+        artifact_path.unlink()
+        _, _, publication = self._publish_signoff(repository, context, request)
+        finalized = repository.finalize_formal_round_signoff(publication)
+        self.assertEqual(finalized["round_state"], "completed")
+        different = publication.model_copy(
+            update={"decision_artifact_hash": _hash("0")}
+        )
+        with self.assertRaisesRegex(Conflict, "another Artifact identity"):
+            repository.finalize_formal_round_signoff(different)
+        with self.assertRaisesRegex(Conflict, "already published other bytes"):
+            repository.record_formal_round_signoff_artifact(different)
+
+    def test_formal_signoff_rejects_idempotency_input_drift(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+        self._publish_signoff(repository, context, request)
+
+        changed = request.model_copy(update={"reason": "Changed after Intent creation."})
+        with self.assertRaisesRegex(Conflict, "different frozen inputs"):
+            repository.create_formal_round_signoff_intent(changed)
+
+        changed_key = request.model_copy(update={"idempotency_key": "another-key-001"})
+        with self.assertRaisesRegex(Conflict, "different frozen inputs"):
+            repository.create_formal_round_signoff_intent(changed_key)
+
+    def test_formal_signoff_authority_rows_reject_identity_mutation(self) -> None:
+        repository, context, _, request = self._prepare_signoff_repository()
+        intent_row, _, publication = self._publish_signoff(repository, context, request)
+        outbox = repository.record_formal_round_signoff_artifact(publication)
+        signoff = repository.finalize_formal_round_signoff(publication)
+
+        mutations = (
+            (
+                "formal_round_signoff_intents",
+                "signoff_intent_id",
+                intent_row["signoff_intent_id"],
+                "actor = 'other-operator'",
+            ),
+            (
+                "formal_round_signoff_outbox",
+                "outbox_event_id",
+                outbox["outbox_event_id"],
+                "payload = '{}'::jsonb",
+            ),
+            (
+                "formal_round_signoffs",
+                "round_signoff_id",
+                signoff["round_signoff_id"],
+                "reason = 'changed'",
+            ),
+        )
+        for table, key, identity, assignment in mutations:
+            with self.subTest(table=table):
+                self._assert_rejected(
+                    f"UPDATE {table} SET {assignment} WHERE {key} = %s",
+                    (identity,),
+                )
+                self._assert_rejected(
+                    f"DELETE FROM {table} WHERE {key} = %s",
+                    (identity,),
+                )

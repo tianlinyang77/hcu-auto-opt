@@ -7,9 +7,10 @@
 EvidenceBundle 时，数据库有一个不会把真实证据混进 `synthetic=true` 表、也不会放宽现有
 Scripted 约束的落点。
 
-`0012` 先提供持久化地基，`0013` 与受保护 Formal Finalizer 再补齐无 HCU 的生产写入和终局
-验证路径。当前仍不提供 Formal Round 启动能力，不访问 HCU，不注册 Real Adapter Profile，
-不实现 Signoff、Outbox 或自动发布。
+`0012` 先提供持久化地基，`0013` 与受保护 Formal Finalizer 补齐无 HCU 的生产写入和终局
+验证路径，`0014` 再增加人工 Signoff Intent、内容寻址签名决策 Artifact、Outbox 和终局
+Signoff。当前仍不提供 Formal Round 启动能力，不访问 HCU，不注册 Real Adapter Profile，
+不开放生产签核入口或自动发布。
 
 ## 为什么不复用 0009 表
 
@@ -33,6 +34,17 @@ FWER 和 EvidenceBundle 都要求 `synthetic=true`。直接把这些约束改成
 `0013_m2_formal_finalizer.sql` 进一步要求 Search Barrier 在同一事务中把晋级结果对应的
 `holdout_family_hash` 写回 Round：有晋级成员时必须存在 Family Hash，零晋级时必须为空。
 Holdout Barrier 只能继续引用这一个 Search 输出 Family。
+
+`0014_m2_formal_signoff_outbox.sql` 另外增加三张签核表：
+
+| 表 | 作用 |
+|---|---|
+| `formal_round_signoff_intents` | 在第一笔事务中冻结 EvidenceBundle、决策、操作者身份摘要、理由、时间和幂等输入 |
+| `formal_round_signoff_outbox` | 保存待发布、已发布、已终结三个阶段以及内容寻址 Artifact 身份，支持崩溃后判定唯一下一步 |
+| `formal_round_signoffs` | 在第二笔事务中保存最终签核并把 Round/Task 推进到 `completed` 或 `rejected` |
+
+Intent 的业务输入不可修改，Outbox 只允许受控状态迁移，最终 Signoff 为 append-only。批准只表示
+人工接受这份单算子 Formal 证据；它不会提升 Baseline，也不会打开自动发布。
 
 ## 权威父链
 
@@ -88,12 +100,31 @@ ID/Hash、Retention Owner 和访问确认时间。Barrier、FWER 等 D 结论必
 终局 Bundle 的结论范围固定为 `formal_single_operation_only`，并显式声明它不是模型、服务或
 端到端性能结论。无论是否存在推荐 Candidate，`automatic_release_allowed` 始终为 `false`。
 
+## 两事务 Signoff 与崩溃恢复
+
+Signoff 不把数据库事务跨越到文件系统写入。流程固定为：
+
+1. `create_formal_round_signoff_intent()` 锁定等待签核的 Formal Round，重新绑定最终
+   EvidenceBundle，在同一事务写入确定性 Intent 与 `pending` Outbox；
+2. `LocalFormalSignoffArtifactPublisher` 对规范 JSON 决策内容签名，并写入本地内容寻址目录；
+3. `record_formal_round_signoff_artifact()` 在独立事务中冻结 URI、SHA-256 和签名信封；
+4. `finalize_formal_round_signoff()` 从受保护根重新读取 Artifact、重算 Hash、比对全部冻结输入
+   并验签，然后在同一事务写最终 Signoff、终结 Intent/Outbox 和 Round/Task；
+5. `reconcile_formal_round_signoff()` 只报告 `create_intent`、`publish_artifact`、
+   `finalize_signoff`、`complete` 或人工处置，不猜测外部动作已经成功。
+
+因此在 Intent 后崩溃可以确定性重发 Artifact，在文件已写但数据库未记录时可以重发同一 CAS
+内容，在 Artifact 已记录后崩溃可以安全重做终结。重复请求必须使用同一幂等输入；同一个 Key
+绑定不同决策、理由或 Evidence 会 fail closed。当前仓库里的 signer/verifier 只有测试实现，
+生产认证与密钥托管仍是单独 blocker。
+
 ## 验证范围
 
 单元测试验证不可变 Contract、Context/Payload 重哈希、Formal/Scripted 隔离、受保护本地
 Evidence Root、Producer/Verifier 角色隔离、Family 绑定、零晋级和 Holdout 两条 Bundle 重建。
 PostgreSQL 集成测试验证真实迁移、幂等/并发写入、部分写入恢复、Budget 未终结、Evidence
-篡改以及最终只进入 `awaiting_signoff` 的 fail-closed 行为。
+篡改以及 Evidence Finalizer 只进入 `awaiting_signoff` 的 fail-closed 行为；Signoff 测试再覆盖
+批准/拒绝终态、两事务崩溃恢复、Artifact 篡改、幂等输入漂移和三张签核表的不可变性。
 
 Windows 本地没有 PostgreSQL 和 Docker 时，集成测试会显式 skip，不能把 skip 解释成数据库
 通过。正式数据库结论以 GitHub CI 的 PostgreSQL 17 Job 为准。
@@ -103,7 +134,8 @@ Windows 本地没有 PostgreSQL 和 Docker 时，集成测试会显式 skip，�
 ```bash
 ruff check .
 pytest tests/unit/test_m2_formal_authority.py \
-  tests/unit/test_m2_formal_finalizer.py tests/unit/test_m2_migration.py -q
+  tests/unit/test_m2_formal_finalizer.py tests/unit/test_m2_formal_signoff.py \
+  tests/unit/test_m2_migration.py -q
 HCUOPT_DATABASE_URL=postgresql://hcuopt:hcuopt@127.0.0.1:5432/hcuopt \
   pytest tests/integration/test_m2_formal_authority_postgres.py -m postgres -q
 ```
@@ -113,9 +145,9 @@ HCUOPT_DATABASE_URL=postgresql://hcuopt:hcuopt@127.0.0.1:5432/hcuopt \
 完成本切片后，`formal_authority_persistence` 和 `formal_evidence_finalizer` 都只能保持
 `hold`，不能标记 `pass`。后续仍需：
 
-1. Formal Round Signoff、签名决策 Artifact 与 crash-recoverable Outbox；
-2. A/B/C/D 审核后的 Real Profile、Formal Plan Compiler 和 Formal StartIntent；
-3. 在生产调用路径中配置受保护 Evidence Root，并通过 PostgreSQL 17 的恢复/并发验收；
+1. A/B/C/D 审核后的 Real Profile、Formal Plan Compiler 和 Formal StartIntent；
+2. 生产认证、Signer/Verifier 密钥托管和受保护 Evidence/Signoff Artifact Root；
+3. PostgreSQL 17 对 Formal Authority、Finalizer 和 Signoff/Outbox 的恢复/并发验收；
 4. 项目所有者对精确主机、设备、时间窗、Candidate Family Hash 和预算的单独授权。
 
 在这些条件全部通过前，readiness 继续是 `HOLD`，Formal Round creation 和自动发布继续关闭。

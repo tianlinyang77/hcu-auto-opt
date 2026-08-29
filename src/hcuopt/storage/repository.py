@@ -31,6 +31,14 @@ from hcuopt.contracts.m2_formal_authority_v1 import (
     FormalVerifierRef,
     formal_authority_context_ref,
 )
+from hcuopt.contracts.m2_formal_signoff_v1 import (
+    FormalDecisionSignature,
+    FormalRoundSignoff,
+    FormalRoundSignoffArtifactPublication,
+    FormalRoundSignoffIntent,
+    FormalRoundSignoffRequest,
+    build_formal_round_signoff_intent,
+)
 from hcuopt.contracts.operator_v1 import (
     ManualOperatorHotspotRef,
     OperatorHotspotAuthorityView,
@@ -104,6 +112,10 @@ from hcuopt.evaluation.m2_formal_authority import (
     FormalMultipleComparisonPersistence,
 )
 from hcuopt.evaluation.m2_formal_finalizer import M2FormalRoundFinalizationService
+from hcuopt.evaluation.m2_formal_signoff import (
+    FormalRoundSignoffFinalizationService,
+    M2FormalSignoffError,
+)
 from hcuopt.evaluation.m2_models import (
     MultipleComparisonResult,
     RoundBarrierResult,
@@ -118,7 +130,7 @@ from hcuopt.evaluation.m2_statistics import (
     m2_fwer_protocol_hash,
     recompute_multiple_comparison_result_hash,
 )
-from hcuopt.evaluation.m2_verifier import M2RoundEvidenceError
+from hcuopt.evaluation.m2_verifier import M2RoundEvidenceError, require_formal_round_signoff
 from hcuopt.evaluation.stage0_finalizer import Stage0FinalizationService
 from hcuopt.evaluation.stage0_protocol import (
     Stage0ProtocolError,
@@ -152,11 +164,13 @@ class PostgresRepository:
         stage0_finalizer: Stage0FinalizationService | None = None,
         m2_scripted_finalizer: M2ScriptedRoundFinalizationService | None = None,
         m2_formal_finalizer: M2FormalRoundFinalizationService | None = None,
+        m2_formal_signoff_finalizer: FormalRoundSignoffFinalizationService | None = None,
     ) -> None:
         self.database_url = database_url
         self.stage0_finalizer = stage0_finalizer
         self.m2_scripted_finalizer = m2_scripted_finalizer
         self.m2_formal_finalizer = m2_formal_finalizer
+        self.m2_formal_signoff_finalizer = m2_formal_signoff_finalizer
 
     @contextmanager
     def connection(self) -> Iterator[Connection[dict[str, Any]]]:
@@ -293,6 +307,21 @@ class PostgresRepository:
         ):
             raise Conflict("M2a Formal authority reference belongs to another Context")
         return row, context
+
+    @staticmethod
+    def _formal_signoff_intent(
+        row: Mapping[str, Any],
+        context: FormalAuthorityContextDescriptor,
+    ) -> FormalRoundSignoffIntent:
+        values = {
+            name: row[name]
+            for name in FormalRoundSignoffIntent.model_fields
+            if name not in {"schema_version", "authority_context"}
+        }
+        return FormalRoundSignoffIntent(
+            authority_context=formal_authority_context_ref(context),
+            **values,
+        )
 
     def list_scripted_operator_hotspots(
         self,
@@ -3054,6 +3083,609 @@ class PostgresRepository:
                 ),
             )
         return round_row
+
+    def create_formal_round_signoff_intent(
+        self,
+        request: FormalRoundSignoffRequest,
+    ) -> dict[str, Any]:
+        """Atomically freeze one human decision and its Artifact outbox."""
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (request.round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {request.round_id}")
+            existing = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_intents
+                WHERE idempotency_key = %s OR round_id = %s
+                FOR UPDATE
+                """,
+                (request.idempotency_key, request.round_id),
+            ).fetchone()
+            if existing is not None:
+                context_row = connection.execute(
+                    """
+                    SELECT * FROM formal_round_authority_contexts
+                    WHERE authority_context_id = %s
+                    """,
+                    (existing["authority_context_id"],),
+                ).fetchone()
+                assert context_row is not None
+                intent = self._formal_signoff_intent(
+                    existing, self._formal_authority_context(context_row)
+                )
+                self._require_signoff_request_replay(request, intent)
+                outbox = connection.execute(
+                    """
+                    SELECT * FROM formal_round_signoff_outbox
+                    WHERE signoff_intent_id = %s
+                    """,
+                    (intent.signoff_intent_id,),
+                ).fetchone()
+                if outbox is None:
+                    raise Conflict("Formal Signoff Intent lost its durable Outbox")
+                return {**existing, "outbox": outbox}
+            if (
+                round_row["run_mode"] != SearchRoundRunMode.FORMAL.value
+                or round_row["state"] != SearchRoundState.AWAITING_SIGNOFF.value
+                or round_row["automatic_release_allowed"]
+            ):
+                raise Conflict("Formal Signoff requires a non-releasable awaiting Round")
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+                (round_row["task_id"],),
+            ).fetchone()
+            if task_row is None or (
+                task_row["state"] != TaskState.AWAITING_SIGNOFF.value
+                or task_row["workflow_type"] != WorkflowType.SEARCH_ROUND.value
+                or task_row["automatic_release_allowed"]
+            ):
+                raise Conflict("Formal Signoff requires its awaiting SearchRound Task")
+            evidence_row = connection.execute(
+                """
+                SELECT * FROM formal_round_evidence_bundles
+                WHERE round_evidence_bundle_id = %s
+                FOR SHARE
+                """,
+                (request.round_evidence_bundle_id,),
+            ).fetchone()
+            if evidence_row is None:
+                raise Conflict("Formal Signoff requires the durable final EvidenceBundle")
+            context_row = connection.execute(
+                """
+                SELECT * FROM formal_round_authority_contexts
+                WHERE round_id = %s
+                FOR SHARE
+                """,
+                (request.round_id,),
+            ).fetchone()
+            if context_row is None:
+                raise Conflict("Formal Signoff requires durable Formal Authority")
+            context = self._formal_authority_context(context_row)
+            evidence = RoundEvidenceBundle.model_validate(evidence_row["payload"])
+            try:
+                require_formal_round_signoff(
+                    round_authority=self._search_round_authority(round_row),
+                    evidence=evidence,
+                )
+            except M2RoundEvidenceError as error:
+                raise Conflict(f"{error.code}: {error}") from error
+            if (
+                evidence.round_evidence_bundle_id
+                != request.round_evidence_bundle_id
+                or evidence_row["round_id"] != request.round_id
+                or evidence_row["authority_context_id"] != context.authority_context_id
+                or evidence_row["authority_context_hash"] != context.context_hash
+                or evidence_row["candidate_family_hash"] != context.candidate_family_hash
+                or evidence_row["artifact_family_hash"] != context.artifact_family_hash
+                or evidence_row["synthetic"]
+                or evidence_row["automatic_release_allowed"]
+            ):
+                raise Conflict("round_signoff_evidence_mismatch: Formal Evidence identity drifted")
+            timestamp = connection.execute(
+                "SELECT transaction_timestamp() AS decision_at"
+            ).fetchone()
+            assert timestamp is not None
+            intent = build_formal_round_signoff_intent(
+                request=request,
+                task_id=round_row["task_id"],
+                authority_context=formal_authority_context_ref(context),
+                evidence_bundle_hash=evidence_row["payload_hash"],
+                candidate_family_hash=evidence_row["candidate_family_hash"],
+                artifact_family_hash=evidence_row["artifact_family_hash"],
+                holdout_family_hash=evidence_row["holdout_family_hash"],
+                decision_at=timestamp["decision_at"],
+            )
+            intent_row = connection.execute(
+                """
+                INSERT INTO formal_round_signoff_intents (
+                    signoff_intent_id, round_signoff_id, round_id, task_id,
+                    authority_context_id, authority_context_hash,
+                    round_evidence_bundle_id, evidence_bundle_hash,
+                    candidate_family_hash, artifact_family_hash,
+                    holdout_family_hash, decision, actor, actor_identity_hash,
+                    reason, decision_at, input_digest, idempotency_key, state,
+                    run_mode, synthetic, automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, 'preparing', 'formal', FALSE, FALSE
+                )
+                RETURNING *
+                """,
+                (
+                    intent.signoff_intent_id,
+                    intent.round_signoff_id,
+                    intent.round_id,
+                    intent.task_id,
+                    intent.authority_context.authority_context_id,
+                    intent.authority_context.context_hash,
+                    intent.round_evidence_bundle_id,
+                    intent.evidence_bundle_hash,
+                    intent.candidate_family_hash,
+                    intent.artifact_family_hash,
+                    intent.holdout_family_hash,
+                    intent.decision,
+                    intent.actor,
+                    intent.actor_identity_hash,
+                    intent.reason,
+                    intent.decision_at,
+                    intent.input_digest,
+                    intent.idempotency_key,
+                ),
+            ).fetchone()
+            assert intent_row is not None
+            outbox_event_id = uuid5(
+                NAMESPACE_URL,
+                f"hcuopt:m2-formal-signoff-outbox:{intent.input_digest}",
+            )
+            outbox_payload = {
+                "schema_version": "m2a-formal-signoff-outbox-v1",
+                "intent": intent.model_dump(mode="json"),
+            }
+            outbox = connection.execute(
+                """
+                INSERT INTO formal_round_signoff_outbox (
+                    outbox_event_id, signoff_intent_id, round_id,
+                    aggregate_id, payload, payload_hash, state
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+                RETURNING *
+                """,
+                (
+                    outbox_event_id,
+                    intent.signoff_intent_id,
+                    intent.round_id,
+                    intent.round_signoff_id,
+                    Jsonb(outbox_payload),
+                    self._m2_payload_hash(outbox_payload),
+                ),
+            ).fetchone()
+            assert outbox is not None
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_formal_signoff_intent_created', %s)
+                """,
+                (
+                    intent.task_id,
+                    Jsonb(
+                        {
+                            "round_id": str(intent.round_id),
+                            "signoff_intent_id": str(intent.signoff_intent_id),
+                            "round_evidence_bundle_id": str(
+                                intent.round_evidence_bundle_id
+                            ),
+                            "decision": intent.decision,
+                            "actor": intent.actor,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        return {**intent_row, "outbox": outbox}
+
+    @staticmethod
+    def _require_signoff_request_replay(
+        request: FormalRoundSignoffRequest,
+        intent: FormalRoundSignoffIntent,
+    ) -> None:
+        expected = {
+            "round_id": request.round_id,
+            "round_evidence_bundle_id": request.round_evidence_bundle_id,
+            "decision": request.decision,
+            "actor": request.actor,
+            "actor_identity_hash": request.actor_identity_hash,
+            "reason": request.reason,
+            "idempotency_key": request.idempotency_key,
+        }
+        if any(getattr(intent, name) != value for name, value in expected.items()):
+            raise Conflict("Formal Signoff idempotency key has different frozen inputs")
+
+    def record_formal_round_signoff_artifact(
+        self,
+        publication: FormalRoundSignoffArtifactPublication,
+    ) -> dict[str, Any]:
+        """Record one immutable publisher result without advancing the Round."""
+
+        with self.connection() as connection:
+            intent_row = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_intents
+                WHERE signoff_intent_id = %s
+                FOR UPDATE
+                """,
+                (publication.signoff_intent_id,),
+            ).fetchone()
+            if intent_row is None:
+                raise NotFound(
+                    f"Formal Signoff Intent not found: {publication.signoff_intent_id}"
+                )
+            outbox = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_outbox
+                WHERE signoff_intent_id = %s
+                FOR UPDATE
+                """,
+                (publication.signoff_intent_id,),
+            ).fetchone()
+            if outbox is None:
+                raise Conflict("Formal Signoff Intent lost its durable Outbox")
+            if (
+                intent_row["round_signoff_id"] != publication.round_signoff_id
+                or outbox["aggregate_id"] != publication.round_signoff_id
+            ):
+                raise Conflict("Formal Signoff publication belongs to another Intent")
+            signature = publication.signature.model_dump(mode="json")
+            if outbox["state"] in {"artifact_published", "finalized"}:
+                if (
+                    outbox["decision_artifact_uri"]
+                    != publication.decision_artifact_uri
+                    or outbox["decision_artifact_hash"]
+                    != publication.decision_artifact_hash
+                    or outbox["signature"] != signature
+                ):
+                    raise Conflict("Formal Signoff Outbox already published other bytes")
+                return outbox
+            if intent_row["state"] != "preparing" or outbox["state"] != "pending":
+                raise Conflict("Formal Signoff Outbox is not publishable")
+            outbox = connection.execute(
+                """
+                UPDATE formal_round_signoff_outbox
+                SET state = 'artifact_published', decision_artifact_uri = %s,
+                    decision_artifact_hash = %s, signature = %s,
+                    last_error = NULL, updated_at = now()
+                WHERE outbox_event_id = %s
+                RETURNING *
+                """,
+                (
+                    publication.decision_artifact_uri,
+                    publication.decision_artifact_hash,
+                    Jsonb(signature),
+                    outbox["outbox_event_id"],
+                ),
+            ).fetchone()
+            assert outbox is not None
+            connection.execute(
+                """
+                UPDATE formal_round_signoff_intents
+                SET state = 'artifact_published', updated_at = now()
+                WHERE signoff_intent_id = %s
+                """,
+                (publication.signoff_intent_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_formal_signoff_artifact_published', %s)
+                """,
+                (
+                    intent_row["task_id"],
+                    Jsonb(
+                        {
+                            "round_id": str(intent_row["round_id"]),
+                            "signoff_intent_id": str(publication.signoff_intent_id),
+                            "decision_artifact_hash": publication.decision_artifact_hash,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        return outbox
+
+    def finalize_formal_round_signoff(
+        self,
+        publication: FormalRoundSignoffArtifactPublication,
+    ) -> dict[str, Any]:
+        """Authenticate the decision Artifact, then commit the human terminal state."""
+
+        with self.connection() as connection:
+            unlocked_intent = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_intents
+                WHERE signoff_intent_id = %s
+                """,
+                (publication.signoff_intent_id,),
+            ).fetchone()
+            if unlocked_intent is None:
+                raise NotFound(
+                    f"Formal Signoff Intent not found: {publication.signoff_intent_id}"
+                )
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s FOR UPDATE",
+                (unlocked_intent["round_id"],),
+            ).fetchone()
+            intent_row = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_intents
+                WHERE signoff_intent_id = %s
+                FOR UPDATE
+                """,
+                (publication.signoff_intent_id,),
+            ).fetchone()
+            if intent_row is None or intent_row["round_id"] != unlocked_intent["round_id"]:
+                raise Conflict("Formal Signoff Intent identity changed while locking")
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+                (intent_row["task_id"],),
+            ).fetchone()
+            context_row = connection.execute(
+                """
+                SELECT * FROM formal_round_authority_contexts
+                WHERE authority_context_id = %s
+                FOR SHARE
+                """,
+                (intent_row["authority_context_id"],),
+            ).fetchone()
+            outbox = connection.execute(
+                """
+                SELECT * FROM formal_round_signoff_outbox
+                WHERE signoff_intent_id = %s
+                FOR UPDATE
+                """,
+                (publication.signoff_intent_id,),
+            ).fetchone()
+            if any(value is None for value in (round_row, task_row, context_row, outbox)):
+                raise Conflict("Formal Signoff lost Round, Task, Authority, or Outbox")
+            assert round_row is not None
+            assert task_row is not None
+            assert context_row is not None
+            assert outbox is not None
+            context = self._formal_authority_context(context_row)
+            intent = self._formal_signoff_intent(intent_row, context)
+            if (
+                intent_row["state"] not in {"artifact_published", "finalized"}
+                or outbox["state"] not in {"artifact_published", "finalized"}
+                or outbox["decision_artifact_uri"] is None
+                or outbox["decision_artifact_hash"] is None
+                or outbox["signature"] is None
+            ):
+                raise Conflict("Formal Signoff Artifact is not durably published")
+            expected_publication = FormalRoundSignoffArtifactPublication(
+                signoff_intent_id=intent.signoff_intent_id,
+                round_signoff_id=intent.round_signoff_id,
+                decision_artifact_uri=outbox["decision_artifact_uri"],
+                decision_artifact_hash=outbox["decision_artifact_hash"],
+                signature=FormalDecisionSignature.model_validate(outbox["signature"]),
+            )
+            if publication != expected_publication:
+                raise Conflict("Formal Signoff Finalizer received another Artifact identity")
+            existing = connection.execute(
+                "SELECT * FROM formal_round_signoffs WHERE round_id = %s",
+                (intent.round_id,),
+            ).fetchone()
+            if self.m2_formal_signoff_finalizer is None:
+                raise Conflict("Formal Round Signoff Finalizer is not configured")
+            try:
+                self.m2_formal_signoff_finalizer.verify(
+                    intent=intent,
+                    publication=publication,
+                )
+            except M2FormalSignoffError as error:
+                raise Conflict(f"{error.code}: {error}") from error
+            if existing is not None:
+                expected = {
+                    "round_signoff_id": intent.round_signoff_id,
+                    "signoff_intent_id": intent.signoff_intent_id,
+                    "round_evidence_bundle_id": intent.round_evidence_bundle_id,
+                    "input_digest": intent.input_digest,
+                    "decision_artifact_hash": publication.decision_artifact_hash,
+                }
+                if any(existing[name] != value for name, value in expected.items()):
+                    raise Conflict("Formal Round already has another durable Signoff")
+                return {
+                    **existing,
+                    "round_state": round_row["state"],
+                    "task_state": task_row["state"],
+                }
+            if (
+                intent.state != "artifact_published"
+                or outbox["state"] != "artifact_published"
+                or round_row["state"] != SearchRoundState.AWAITING_SIGNOFF.value
+                or task_row["state"] != TaskState.AWAITING_SIGNOFF.value
+                or round_row["automatic_release_allowed"]
+                or task_row["automatic_release_allowed"]
+            ):
+                raise Conflict("Formal Round Signoff is not ready to finalize")
+            signoff = FormalRoundSignoff(
+                round_signoff_id=intent.round_signoff_id,
+                signoff_intent_id=intent.signoff_intent_id,
+                round_id=intent.round_id,
+                task_id=intent.task_id,
+                authority_context=intent.authority_context,
+                round_evidence_bundle_id=intent.round_evidence_bundle_id,
+                evidence_bundle_hash=intent.evidence_bundle_hash,
+                decision=intent.decision,
+                actor=intent.actor,
+                actor_identity_hash=intent.actor_identity_hash,
+                reason=intent.reason,
+                decision_at=intent.decision_at,
+                input_digest=intent.input_digest,
+                idempotency_key=intent.idempotency_key,
+                decision_artifact_uri=publication.decision_artifact_uri,
+                decision_artifact_hash=publication.decision_artifact_hash,
+                signature=publication.signature,
+            )
+            signoff_row = connection.execute(
+                """
+                INSERT INTO formal_round_signoffs (
+                    round_signoff_id, signoff_intent_id, round_id, task_id,
+                    authority_context_id, authority_context_hash,
+                    round_evidence_bundle_id, evidence_bundle_hash,
+                    decision, actor, actor_identity_hash, reason, decision_at,
+                    input_digest, idempotency_key, decision_artifact_uri,
+                    decision_artifact_hash, signature, run_mode, synthetic,
+                    automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, 'formal', FALSE, FALSE
+                )
+                RETURNING *
+                """,
+                (
+                    signoff.round_signoff_id,
+                    signoff.signoff_intent_id,
+                    signoff.round_id,
+                    signoff.task_id,
+                    signoff.authority_context.authority_context_id,
+                    signoff.authority_context.context_hash,
+                    signoff.round_evidence_bundle_id,
+                    signoff.evidence_bundle_hash,
+                    signoff.decision,
+                    signoff.actor,
+                    signoff.actor_identity_hash,
+                    signoff.reason,
+                    signoff.decision_at,
+                    signoff.input_digest,
+                    signoff.idempotency_key,
+                    signoff.decision_artifact_uri,
+                    signoff.decision_artifact_hash,
+                    Jsonb(signoff.signature.model_dump(mode="json")),
+                ),
+            ).fetchone()
+            assert signoff_row is not None
+            target_round_state = (
+                SearchRoundState.COMPLETED
+                if signoff.decision == "approved"
+                else SearchRoundState.REJECTED
+            )
+            target_task_state = (
+                TaskState.COMPLETED if signoff.decision == "approved" else TaskState.REJECTED
+            )
+            transition_task(TaskState(task_row["state"]), target_task_state)
+            connection.execute(
+                """
+                UPDATE formal_round_signoff_intents
+                SET state = 'finalized', updated_at = now()
+                WHERE signoff_intent_id = %s
+                """,
+                (intent.signoff_intent_id,),
+            )
+            connection.execute(
+                """
+                UPDATE formal_round_signoff_outbox
+                SET state = 'finalized', updated_at = now()
+                WHERE signoff_intent_id = %s
+                """,
+                (intent.signoff_intent_id,),
+            )
+            connection.execute(
+                """
+                UPDATE search_rounds
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE round_id = %s
+                """,
+                (target_round_state.value, intent.round_id),
+            )
+            connection.execute(
+                """
+                UPDATE tasks
+                SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (target_task_state.value, intent.task_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'm2_formal_round_signed_off', %s)
+                """,
+                (
+                    intent.task_id,
+                    Jsonb(
+                        {
+                            "round_id": str(intent.round_id),
+                            "round_signoff_id": str(intent.round_signoff_id),
+                            "round_evidence_bundle_id": str(
+                                intent.round_evidence_bundle_id
+                            ),
+                            "decision": intent.decision,
+                            "actor": intent.actor,
+                            "decision_artifact_hash": publication.decision_artifact_hash,
+                            "performance_scope": "formal_single_operation_only",
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        return {
+            **signoff_row,
+            "round_state": target_round_state.value,
+            "task_state": target_task_state.value,
+        }
+
+    def reconcile_formal_round_signoff(self, round_id: UUID) -> dict[str, Any]:
+        """Return the only safe next action without mutating Signoff authority."""
+
+        with self.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            if round_row is None:
+                raise NotFound(f"M2a SearchRound not found: {round_id}")
+            intent = connection.execute(
+                "SELECT * FROM formal_round_signoff_intents WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT * FROM formal_round_signoff_outbox WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+            signoff = connection.execute(
+                "SELECT * FROM formal_round_signoffs WHERE round_id = %s",
+                (round_id,),
+            ).fetchone()
+        if signoff is not None:
+            next_action = "complete"
+        elif intent is None:
+            next_action = (
+                "create_intent"
+                if round_row["state"] == SearchRoundState.AWAITING_SIGNOFF.value
+                else "not_signable"
+            )
+        elif intent["state"] == "failed":
+            next_action = "manual_review"
+        elif outbox is None:
+            next_action = "repair_outbox"
+        elif outbox["state"] == "pending":
+            next_action = "publish_artifact"
+        elif outbox["state"] == "artifact_published":
+            next_action = "finalize_signoff"
+        else:
+            next_action = "manual_review"
+        return {
+            "round_id": round_id,
+            "round_state": round_row["state"],
+            "signoff_intent_id": intent["signoff_intent_id"] if intent else None,
+            "intent_state": intent["state"] if intent else None,
+            "outbox_event_id": outbox["outbox_event_id"] if outbox else None,
+            "outbox_state": outbox["state"] if outbox else None,
+            "round_signoff_id": signoff["round_signoff_id"] if signoff else None,
+            "next_action": next_action,
+            "automatic_release_allowed": False,
+        }
 
     def finalize_scripted_search_round(self, evidence: RoundEvidenceBundle) -> dict[str, Any]:
         """Verify persisted D evidence and enter scripted_completed atomically."""

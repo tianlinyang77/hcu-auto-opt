@@ -86,10 +86,10 @@ PYTHONPATH=src python -m hcuopt.cli formal-readiness \
 
 | 责任人 | 当前 blocker | 下一份可验收交付 |
 | --- | --- | --- |
-| A | Real Profile、Formal Plan compiler、StartIntent、Round Signoff/Outbox 尚不存在 | 独立 Formal Authority 路径及 PostgreSQL 崩溃恢复测试 |
+| A | Formal Authority、Finalizer 和 Signoff/Outbox 地基已实现；Real Profile、Formal Plan、StartIntent、生产身份认证与 Signer 尚不存在 | 先由 PostgreSQL 17 验证签核恢复链，再单独建设受保护的 Formal 启动和生产签核入口 |
 | B | Formal phase-aware Adapter、预算确认和当期 Target Lock 尚未完成 | 不访问 HCU 的 Adapter/计划验证；窗口批准后才刷新 HCU 现场 |
 | C | 只有一个历史业务 Candidate，没有 2 成员不可变 Family | 同一 Baseline/Hotspot/replacement point 的两个业务 Overlay 包及 Family Hash |
-| D | Formal Barrier/Reveal/FWER/Evidence 表和 Finalizer 尚不存在 | 与 Scripted 隔离的 Formal Store、读取器、终结器和篡改测试 |
+| D | Formal Barrier/Reveal/FWER/Evidence 表和 Finalizer 已实现；生产受保护 Evidence Root 与 D 的正式接受尚未完成 | 验证 PostgreSQL 17 结果，并对生产 Store、Verifier 身份和递归 Evidence 规则签署接受证据 |
 | 项目所有者 | 尚未授权精确资源窗口 | 前四方接受后，另行批准主机、HCU、时间、Family Hash 和预算 |
 
 因此当前不得注册 `nmz36-m2a-formal-v1`，不得把 Scripted 表的 `synthetic=true` 约束改成兼容
@@ -97,7 +97,8 @@ PYTHONPATH=src python -m hcuopt.cli formal-readiness \
 
 ## 更新规则
 
-后续每解决一组 blocker，都应新建 manifest 版本并重新计算相关证据 Hash，不在旧审计记录上
-原地覆盖。Gate 只有在实现、测试和不可变证据同时存在时才能声明 `pass`；A/B/C/D 的
+后续每解决一组 blocker，都应更新审计基线并重新计算相关证据 Hash；形成正式窗口申请时再
+冻结为新的 manifest 版本，不覆盖已签署的历史审计记录。Gate 只有在实现、测试和不可变证据
+同时存在时才能声明 `pass`；A/B/C/D 的
 `accepted_for_formal_window` 必须引用独立签署证据。所有 gate 与四方 review 通过后，仍需在
 本 Issue 之外取得一次项目所有者窗口授权，才能建设或调用真实 Formal 执行入口。
