@@ -41,6 +41,25 @@ export async function loadDemoCandidateEvidence(roundId) {
   return workspace;
 }
 
+export async function loadDemoEvaluationEvidence(roundId) {
+  const response = await fetch("/fixtures/demo-evaluation-evidence.json", {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `demo_fixture_${response.status}: Synthetic Evaluation evidence fixture unavailable`,
+    );
+  }
+  const workspace = await response.json();
+  if (workspace.round_id !== roundId) {
+    throw new Error(
+      "demo_round_mismatch: 当前 Round 与 Synthetic Evaluation evidence 不匹配",
+    );
+  }
+  return workspace;
+}
+
 export const demoDashboard = {
   mode: "demo",
   identity: {
@@ -249,20 +268,20 @@ export const demoDashboard = {
   rounds: [
     {
       schema_version: "m2-operator-read-model-v1",
-      generated_at: "2026-08-28T10:42:00Z",
+      generated_at: "2026-08-29T09:42:00Z",
       intent_id: "7b93528c-4ef0-45fa-8537-b978611f274b",
       task_id: "af7735bd-2e5f-47ee-a72d-7eb3a753f6bc",
       round_id: "250cb54c-f0da-4475-87d8-9618f10232e2",
-      round_version: 4,
-      state: "building",
-      next_action: "await_build_terminals",
-      reason: "Candidate Family is frozen; wait for every Build terminal.",
+      round_version: 9,
+      state: "scripted_completed",
+      next_action: "none",
+      reason: "Synthetic Search, Holdout, FWER, and EvidenceBundle are complete.",
       candidates: [
         {
           ordinal: 0,
           round_candidate_id: "3934a9f4-fc90-4749-8d7c-c74609f346ef",
           candidate_id: "0021d533-5802-43f7-ad61-c214029d7071",
-          state: "built",
+          state: "holdout_measured",
           artifact_id: "91f30676-04da-4af4-89ad-2d9500360a30",
           artifact_hash: hash("1"),
           terminal_failure_code: null,
@@ -271,7 +290,7 @@ export const demoDashboard = {
           ordinal: 1,
           round_candidate_id: "f79033c6-dd7e-49d3-9a97-6c53b2e7f46b",
           candidate_id: "eb24fca2-4219-4f63-a99a-b5b0c8bfe976",
-          state: "built",
+          state: "not_promoted",
           artifact_id: "60be7365-f4bb-4390-9621-3c16638436c1",
           artifact_hash: hash("2"),
           terminal_failure_code: null,
@@ -288,9 +307,9 @@ export const demoDashboard = {
       ],
       candidate_count: 3,
       build_terminal_count: 3,
-      settled_budget_entry_count: 0,
-      evidence_status: "not_available",
-      terminal: false,
+      settled_budget_entry_count: 5,
+      evidence_status: "available",
+      terminal: true,
       synthetic: true,
       automatic_release_allowed: false,
     },
@@ -298,9 +317,19 @@ export const demoDashboard = {
   reports: {
     "250cb54c-f0da-4475-87d8-9618f10232e2": {
       schema_version: "m2-operator-report-v1",
-      generated_at: "2026-08-28T10:42:00Z",
-      report_status: "interim",
-      evidence_bundle: null,
+      generated_at: "2026-08-29T09:42:00Z",
+      report_status: "final",
+      evidence_bundle: {
+        round_evidence_bundle_id: "40000000-0000-4000-8000-000000000004",
+        terminal_reason: "holdout_completed",
+        evidence_index_hash: hash("evidence-index"),
+        summary: {
+          performance_conclusion: "not_measured",
+          evidence_authority: "synthetic_fixture_only",
+        },
+        synthetic: true,
+        automatic_release_allowed: false,
+      },
       conclusion_boundary: "synthetic_only_no_real_performance_claim",
       synthetic: true,
       performance_evidence: false,

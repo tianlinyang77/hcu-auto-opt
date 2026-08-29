@@ -50,6 +50,12 @@ export async function loadOperatorCandidateEvidence(roundId) {
   );
 }
 
+export async function loadOperatorEvaluationEvidence(roundId) {
+  return request(
+    `/v1/operator/search-rounds/${encodeURIComponent(roundId)}/evaluation-evidence`,
+  );
+}
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),

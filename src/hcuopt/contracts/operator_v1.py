@@ -690,6 +690,281 @@ class OperatorCandidateEvidenceWorkspace(ReadModel):
         return self
 
 
+class OperatorSearchMemberEvidence(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    round_candidate_id: UUID
+    candidate_id: UUID
+    state: RoundCandidateState
+    promoted: bool
+    artifact_id: UUID | None = None
+    artifact_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    correctness_evidence_hash: str | None = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+    scripted_phase_receipt_id: UUID | None = None
+    raw_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    baseline_sample_set_hash: str | None = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+    restart_effects: tuple[float, ...] = Field(default=(), max_length=1000)
+    stage0_mde_ratio: float | None = Field(default=None, gt=0, lt=1)
+    statistics_valid: bool | None = None
+    failure_codes: tuple[str, ...] = Field(default=(), max_length=32)
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    budget_usage_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    cleanup_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_search_member_evidence_shape(self) -> OperatorSearchMemberEvidence:
+        if (self.artifact_id is None) != (self.artifact_hash is None):
+            raise ValueError("Search member Artifact identity must be paired")
+        statistics = (
+            self.scripted_phase_receipt_id,
+            self.raw_evidence_hash,
+            self.baseline_sample_set_hash,
+            self.stage0_mde_ratio,
+            self.statistics_valid,
+        )
+        has_statistics = all(value is not None for value in statistics)
+        if any(value is not None for value in statistics) and not has_statistics:
+            raise ValueError("Search member statistics authority must be complete")
+        if has_statistics != bool(self.restart_effects):
+            raise ValueError("Search member restart effects require statistics authority")
+        if self.promoted and self.state is not RoundCandidateState.SEARCH_MEASURED:
+            raise ValueError("only a measured Search member can be promoted")
+        if self.promoted and not has_statistics:
+            raise ValueError("promoted Search member requires frozen statistics")
+        return self
+
+
+class OperatorSearchBarrierEvidence(ReadModel):
+    barrier_id: UUID
+    outcome: Literal["members_promoted", "no_promotable_candidate"]
+    input_family_hash: str = Field(pattern=SHA256_PATTERN)
+    input_summary_hash: str = Field(pattern=SHA256_PATTERN)
+    rule_version: str = Field(min_length=1, max_length=200)
+    rule_hash: str = Field(pattern=SHA256_PATTERN)
+    expected_member_count: int = Field(ge=2, le=4)
+    promoted_candidate_ids: tuple[UUID, ...] = Field(default=(), max_length=2)
+    holdout_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    closed_by: str = Field(min_length=1, max_length=300)
+    closed_at: datetime
+    members: tuple[OperatorSearchMemberEvidence, ...] = Field(
+        min_length=2, max_length=4
+    )
+
+    @model_validator(mode="after")
+    def require_search_family_shape(self) -> OperatorSearchBarrierEvidence:
+        if self.expected_member_count != len(self.members):
+            raise ValueError("Search Barrier must retain every family member")
+        candidate_ids = tuple(item.candidate_id for item in self.members)
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("Search Barrier members must be unique")
+        promoted = tuple(item.candidate_id for item in self.members if item.promoted)
+        if set(promoted) != set(self.promoted_candidate_ids):
+            raise ValueError("Search promoted flags must match promoted Candidate IDs")
+        if bool(promoted) != (self.holdout_family_hash is not None):
+            raise ValueError("Search promotion must bind one Holdout Family")
+        return self
+
+
+class OperatorHoldoutRevealEvidence(ReadModel):
+    reveal_lease_id: UUID
+    holdout_family_hash: str = Field(pattern=SHA256_PATTERN)
+    commitment: str = Field(pattern=SHA256_PATTERN)
+    plan_hash: str = Field(pattern=SHA256_PATTERN)
+    reveal_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    authority_id: str = Field(min_length=1, max_length=300)
+    authority_hash: str = Field(pattern=SHA256_PATTERN)
+    resource_id: str = Field(min_length=1, max_length=200)
+    fencing_token: int = Field(ge=1)
+    revealed_at: datetime
+
+
+class OperatorHoldoutMemberEvidence(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    round_candidate_id: UUID
+    candidate_id: UUID
+    state: RoundCandidateState
+    artifact_id: UUID
+    artifact_hash: str = Field(pattern=SHA256_PATTERN)
+    correctness_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    scripted_phase_receipt_id: UUID | None = None
+    failure_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    budget_usage_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    cleanup_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+
+
+class OperatorHoldoutBarrierEvidence(ReadModel):
+    barrier_id: UUID
+    outcome: Literal["completed"] = "completed"
+    input_family_hash: str = Field(pattern=SHA256_PATTERN)
+    input_summary_hash: str = Field(pattern=SHA256_PATTERN)
+    rule_version: str = Field(min_length=1, max_length=200)
+    rule_hash: str = Field(pattern=SHA256_PATTERN)
+    expected_member_count: int = Field(ge=1, le=2)
+    closed_by: str = Field(min_length=1, max_length=300)
+    closed_at: datetime
+    members: tuple[OperatorHoldoutMemberEvidence, ...] = Field(
+        min_length=1, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def require_holdout_family_shape(self) -> OperatorHoldoutBarrierEvidence:
+        if self.expected_member_count != len(self.members):
+            raise ValueError("Holdout Barrier must retain every promoted member")
+        if len({item.candidate_id for item in self.members}) != len(self.members):
+            raise ValueError("Holdout Barrier members must be unique")
+        return self
+
+
+class OperatorFwerCandidateEvidence(ReadModel):
+    ordinal: int = Field(ge=0, le=3)
+    candidate_id: UUID
+    scripted_phase_receipt_id: UUID | None = None
+    correctness_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    raw_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    baseline_sample_set_hash: str | None = Field(
+        default=None, pattern=SHA256_PATTERN
+    )
+    verdict: Literal["faster", "slower", "inconclusive", "invalid"]
+    adjusted_ci_lower: float | None = None
+    adjusted_ci_upper: float | None = None
+    stage0_mde_ratio: float | None = Field(default=None, gt=0, lt=1)
+    workload_mde_ratio: float | None = Field(default=None, ge=0)
+    credible_threshold: float | None = Field(default=None, gt=0)
+    failure_codes: tuple[str, ...] = Field(default=(), max_length=32)
+
+
+class OperatorFwerEvidence(ReadModel):
+    multiple_comparison_id: UUID
+    holdout_barrier_id: UUID
+    holdout_family_hash: str = Field(pattern=SHA256_PATTERN)
+    method: Literal["bonferroni_fwer"] = "bonferroni_fwer"
+    protocol_version: str = Field(min_length=1, max_length=200)
+    protocol_hash: str = Field(pattern=SHA256_PATTERN)
+    family_alpha: float = Field(gt=0, lt=1)
+    m: int = Field(ge=1, le=2)
+    alpha_candidate: float = Field(gt=0, lt=1)
+    result_hash: str = Field(pattern=SHA256_PATTERN)
+    recommended_candidate_id: UUID | None = None
+    created_at: datetime
+    candidates: tuple[OperatorFwerCandidateEvidence, ...] = Field(
+        min_length=1, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def require_fwer_family_shape(self) -> OperatorFwerEvidence:
+        if self.m != len(self.candidates):
+            raise ValueError("FWER m must match the retained Candidate family")
+        candidate_ids = {item.candidate_id for item in self.candidates}
+        if len(candidate_ids) != len(self.candidates):
+            raise ValueError("FWER Candidates must be unique")
+        if (
+            self.recommended_candidate_id is not None
+            and self.recommended_candidate_id not in candidate_ids
+        ):
+            raise ValueError("FWER recommendation must remain inside its family")
+        return self
+
+
+class OperatorRoundEvidenceBundleView(ReadModel):
+    round_evidence_bundle_id: UUID
+    terminal_reason: Literal["no_promotable_candidate", "holdout_completed"]
+    candidate_family_hash: str = Field(pattern=SHA256_PATTERN)
+    artifact_family_hash: str = Field(pattern=SHA256_PATTERN)
+    holdout_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    search_barrier_id: UUID
+    holdout_barrier_id: UUID | None = None
+    multiple_comparison_id: UUID | None = None
+    budget_ledger_hash: str = Field(pattern=SHA256_PATTERN)
+    evidence_index_uri: str = Field(min_length=1, max_length=4000)
+    evidence_index_hash: str = Field(pattern=SHA256_PATTERN)
+    summary: dict
+    created_at: datetime
+
+
+class OperatorEvaluationEvidenceWorkspace(ReadModel):
+    schema_version: Literal["m2-operator-evaluation-evidence-v1"] = (
+        "m2-operator-evaluation-evidence-v1"
+    )
+    generated_at: datetime
+    intent_id: UUID
+    task_id: UUID
+    round_id: UUID
+    round_version: int = Field(ge=1)
+    round_state: SearchRoundState
+    search_status: Literal["pending", "available"]
+    holdout_status: Literal["pending", "revealed", "available", "not_applicable"]
+    fwer_status: Literal["pending", "available", "not_applicable"]
+    evidence_status: Literal["pending", "available"]
+    search: OperatorSearchBarrierEvidence | None = None
+    holdout_reveal: OperatorHoldoutRevealEvidence | None = None
+    holdout: OperatorHoldoutBarrierEvidence | None = None
+    fwer: OperatorFwerEvidence | None = None
+    evidence_bundle: OperatorRoundEvidenceBundleView | None = None
+    synthetic: Literal[True] = True
+    real_performance_claim_allowed: Literal[False] = False
+    formal_signoff_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_stage_authority_shape(self) -> OperatorEvaluationEvidenceWorkspace:
+        if (self.search_status == "available") != (self.search is not None):
+            raise ValueError("Search status must follow Search Barrier authority")
+        if self.holdout_status == "available" and (
+            self.holdout_reveal is None or self.holdout is None
+        ):
+            raise ValueError("available Holdout requires Reveal and Barrier authority")
+        if self.holdout_status == "revealed" and (
+            self.holdout_reveal is None or self.holdout is not None
+        ):
+            raise ValueError("revealed Holdout requires only Reveal authority")
+        if self.holdout_status in {"pending", "not_applicable"} and (
+            self.holdout_reveal is not None or self.holdout is not None
+        ):
+            raise ValueError("unavailable Holdout cannot carry authority")
+        if (self.fwer_status == "available") != (self.fwer is not None):
+            raise ValueError("FWER status must follow Multiple Comparison authority")
+        if (self.evidence_status == "available") != (
+            self.evidence_bundle is not None
+        ):
+            raise ValueError("Evidence status must follow Round Evidence authority")
+        if self.search is not None and not self.search.promoted_candidate_ids:
+            if self.holdout_status != "not_applicable" or self.fwer_status != "not_applicable":
+                raise ValueError("zero-promotion Search must skip Holdout and FWER")
+        if self.fwer is not None and self.holdout is None:
+            raise ValueError("FWER requires a closed Holdout Barrier")
+        if self.evidence_bundle is not None and self.search is None:
+            raise ValueError("Round Evidence requires Search Barrier authority")
+        if self.holdout_reveal is not None and self.search is not None and (
+            self.holdout_reveal.holdout_family_hash != self.search.holdout_family_hash
+        ):
+            raise ValueError("Holdout Reveal must bind the Search-promoted Family")
+        if self.holdout is not None and self.search is not None and (
+            self.holdout.input_family_hash != self.search.holdout_family_hash
+            or {item.candidate_id for item in self.holdout.members}
+            != set(self.search.promoted_candidate_ids)
+        ):
+            raise ValueError("Holdout Barrier must bind the Search-promoted Family")
+        if self.fwer is not None and self.holdout is not None and (
+            self.fwer.holdout_barrier_id != self.holdout.barrier_id
+            or self.fwer.holdout_family_hash != self.holdout.input_family_hash
+            or {item.candidate_id for item in self.fwer.candidates}
+            != {item.candidate_id for item in self.holdout.members}
+        ):
+            raise ValueError("FWER must bind the closed Holdout Barrier")
+        if self.evidence_bundle is not None and self.search is not None and (
+            self.evidence_bundle.search_barrier_id != self.search.barrier_id
+            or self.evidence_bundle.holdout_barrier_id
+            != (self.holdout.barrier_id if self.holdout else None)
+            or self.evidence_bundle.multiple_comparison_id
+            != (self.fwer.multiple_comparison_id if self.fwer else None)
+        ):
+            raise ValueError("EvidenceBundle must bind every available stage authority")
+        return self
+
+
 class OperatorCandidateSummary(ReadModel):
     ordinal: int = Field(ge=0, le=3)
     round_candidate_id: UUID

@@ -21,7 +21,8 @@ test("summarizes immutable Build terminals without unlocking correctness", () =>
   assert.equal(summary.candidateCount, 3);
   assert.equal(summary.buildAvailableCount, 2);
   assert.equal(summary.buildFailedCount, 1);
-  assert.equal(summary.correctnessUnavailableCount, 3);
+  assert.equal(summary.correctnessPassedCount, 2);
+  assert.equal(summary.correctnessUnavailableCount, 1);
   assert.equal(summary.releaseLocked, true);
 });
 
@@ -31,7 +32,7 @@ test("maps each Candidate stage from explicit evidence status", () => {
 
   assert.equal(candidateStageState(built, "candidate"), "complete");
   assert.equal(candidateStageState(built, "build"), "complete");
-  assert.equal(candidateStageState(built, "correctness"), "locked");
+  assert.equal(candidateStageState(built, "correctness"), "complete");
   assert.equal(candidateStageState(failed, "build"), "failed");
   assert.equal(candidateStageState(failed, "correctness"), "locked");
   assert.equal(
