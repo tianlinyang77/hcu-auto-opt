@@ -484,6 +484,42 @@ def test_formal_finalizer_rejects_tampered_or_remote_evidence() -> None:
         )
 
 
+def test_formal_finalizer_preserves_structured_reader_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, context, round_authority, search_barrier, budget_hash = _fixture()
+    requirements = formal_round_evidence_requirements(
+        context=context,
+        round_authority=round_authority,
+        search_barrier=search_barrier,
+        budget_ledger_hash=budget_hash,
+    )
+    index = _publish_index(store, context, requirements)
+    plan = next(entry for entry in requirements if entry.role == "search/plan")
+    plan_uri = store.artifact_for_hash(plan.sha256).uri
+    original_read = store.read_raw_bytes
+
+    def read_with_hash_failure(uri: str, expected_hash: str) -> bytes:
+        if uri == plan_uri:
+            raise EvidenceReadError("evidence_hash_mismatch", "test reader mismatch")
+        return original_read(uri, expected_hash)
+
+    monkeypatch.setattr(store, "read_raw_bytes", read_with_hash_failure)
+
+    with pytest.raises(M2RoundEvidenceError) as captured:
+        build_formal_round_evidence(
+            context=context,
+            round_authority=round_authority,
+            search_barrier=search_barrier,
+            budget_ledger_hash=budget_hash,
+            evidence_index_uri=index.uri,
+            evidence_index_hash=index.sha256,
+            evidence_reader=store,
+        )
+
+    assert captured.value.code == "evidence_hash_mismatch"
+
+
 def test_formal_finalizer_rebuilds_completed_holdout_bundle() -> None:
     (
         store,

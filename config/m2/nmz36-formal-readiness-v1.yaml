@@ -82,7 +82,7 @@ gates:
     required_action: Keep this gate on hold until PostgreSQL 17 validates both terminal paths and production Formal Start, Signoff, signed decision Artifact, and crash-recoverable Outbox remain separately gated.
     evidence:
       - path: src/hcuopt/evaluation/m2_formal_finalizer.py
-        sha256: sha256:8cec1ae09e7c6ca31e0f122248862222b83c846bd5dcbd2f0268e3d80efa0889
+        sha256: sha256:cee51c69e8581ad8360ebf0608a61d7b40d79d9fbfa27deb9cb4ffdd1eaa8f70
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py

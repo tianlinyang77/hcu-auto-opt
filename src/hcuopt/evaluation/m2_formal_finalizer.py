@@ -23,6 +23,7 @@ from hcuopt.domain.enums import (
     SearchRoundRunMode,
     SearchRoundState,
 )
+from hcuopt.evaluation.evidence_reader import EvidenceReadError
 from hcuopt.evaluation.m2_formal_authority import FormalHoldoutRevealPersistence
 from hcuopt.evaluation.m2_models import (
     BarrierMemberResult,
@@ -548,6 +549,8 @@ def _read_and_verify_formal_index(
                 "formal_evidence_index_hash_mismatch", "Formal Index Hash changed"
             )
         index = FormalM2EvidenceIndex.model_validate_json(encoded)
+    except EvidenceReadError as exc:
+        raise M2RoundEvidenceError(exc.code, str(exc)) from exc
     except M2RoundEvidenceError:
         raise
     except (ValidationError, ValueError, OSError) as exc:
@@ -616,6 +619,8 @@ def _read_and_verify_formal_index(
             )
         try:
             evidence_bytes = reader.read_raw_bytes(entry.uri, entry.sha256)
+        except EvidenceReadError as exc:
+            raise M2RoundEvidenceError(exc.code, str(exc)) from exc
         except M2RoundEvidenceError:
             raise
         except (ValueError, OSError) as exc:
