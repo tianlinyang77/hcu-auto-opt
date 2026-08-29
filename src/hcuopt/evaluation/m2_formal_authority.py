@@ -52,10 +52,19 @@ class FormalBarrierPersistence(FrozenFormalAuthorityModel):
         if self.barrier.phase is RoundPhase.SEARCH:
             if (
                 self.barrier.input_family_hash != self.context.artifact_family_hash
-                or self.holdout_family_hash is not None
                 or self.parent_search_barrier_id is not None
+                or (
+                    self.barrier.outcome.value == "members_promoted"
+                    and self.holdout_family_hash is None
+                )
+                or (
+                    self.barrier.outcome.value == "no_promotable_candidate"
+                    and self.holdout_family_hash is not None
+                )
             ):
-                raise ValueError("Formal Search Barrier must bind only the Artifact Family")
+                raise ValueError(
+                    "Formal Search Barrier must bind its Artifact input and Holdout output"
+                )
         elif (
             self.holdout_family_hash is None
             or self.parent_search_barrier_id is None

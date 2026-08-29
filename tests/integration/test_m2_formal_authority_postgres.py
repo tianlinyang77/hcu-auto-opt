@@ -2,14 +2,65 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
+from hcuopt.contracts.m2 import SearchRound
+from hcuopt.contracts.m2_formal_authority_v1 import (
+    FormalAuthorityContextContent,
+    FormalEvidenceStoreRef,
+    FormalVerifierRef,
+    formal_authority_context_ref,
+    publish_formal_authority_context,
+)
+from hcuopt.domain.enums import (
+    ManualCandidateVerdict,
+    RoundBarrierOutcome,
+    RoundCandidateState,
+    RoundPhase,
+    SearchRoundRunMode,
+)
+from hcuopt.domain.errors import Conflict
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
+from hcuopt.evaluation.m2_formal_authority import (
+    FormalBarrierPersistence,
+    FormalEvidenceBundlePersistence,
+    FormalHoldoutRevealPersistence,
+    FormalMultipleComparisonPersistence,
+    formal_authority_payload_hash,
+)
+from hcuopt.evaluation.m2_formal_finalizer import (
+    FormalM2EvidenceIndex,
+    FormalM2EvidenceIndexEntry,
+    M2FormalRoundFinalizer,
+    build_formal_round_evidence,
+    formal_round_evidence_requirements,
+)
+from hcuopt.evaluation.m2_models import (
+    AdjustedCandidateResult,
+    BarrierMemberResult,
+    MultipleComparisonResult,
+    RoundBarrierResult,
+)
+from hcuopt.evaluation.m2_statistics import (
+    M2_FWER_PROTOCOL_VERSION,
+    holdout_family_hash,
+    m2_fwer_protocol_hash,
+    recompute_multiple_comparison_result_hash,
+)
+from hcuopt.measurement.evidence import EvidenceArtifact, canonical_json_bytes
+from hcuopt.orchestrator.search_round import (
+    round_budget_ledger_document,
+    round_budget_ledger_hash,
+)
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -28,6 +79,36 @@ def _hash(value: str) -> str:
     return "sha256:" + value * 64
 
 
+class _ProtectedEvidenceStore:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._by_hash: dict[str, EvidenceArtifact] = {}
+
+    def publish(self, value: object) -> EvidenceArtifact:
+        return self.publish_bytes(canonical_json_bytes(value))
+
+    def publish_bytes(self, encoded: bytes) -> EvidenceArtifact:
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        existing = self._by_hash.get(digest)
+        if existing is not None:
+            return existing
+        path = self.root / f"{digest[7:]}.json"
+        path.write_bytes(encoded)
+        artifact = EvidenceArtifact(
+            uri=path.as_uri(), sha256=digest, byte_count=len(encoded)
+        )
+        self._by_hash[digest] = artifact
+        return artifact
+
+    def artifact_for_hash(self, expected_hash: str) -> EvidenceArtifact:
+        return self._by_hash[expected_hash]
+
+    def tamper(self, expected_hash: str) -> None:
+        artifact = self.artifact_for_hash(expected_hash)
+        path = self.root / f"{artifact.sha256[7:]}.json"
+        path.write_bytes(b'{"tampered":true}\n')
+
+
 @unittest.skipUnless(DATABASE_URL and psycopg, "requires PostgreSQL and psycopg")
 @pytest.mark.postgres
 class M2FormalAuthorityPostgresTests(unittest.TestCase):
@@ -35,6 +116,8 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
         assert DATABASE_URL is not None
         assert psycopg is not None
         assert Jsonb is not None
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.evidence_store = _ProtectedEvidenceStore(Path(self.temp_dir.name))
         self.repository = PostgresRepository(DATABASE_URL)
         self.repository.migrate()
         self.connection = psycopg.connect(DATABASE_URL)
@@ -46,6 +129,7 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.connection.close()
+        self.temp_dir.cleanup()
 
     @staticmethod
     def _id_names() -> tuple[str, ...]:
@@ -313,6 +397,288 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
         values.update(updates)
         return values
 
+    def _publish_formal_index(self, context, requirements) -> EvidenceArtifact:
+        entries = []
+        for requirement in requirements:
+            artifact = (
+                self.evidence_store.publish_bytes(requirement.expected_bytes)
+                if requirement.expected_bytes is not None
+                else self.evidence_store.artifact_for_hash(requirement.sha256)
+            )
+            self.assertEqual(artifact.sha256, requirement.sha256)
+            entries.append(
+                FormalM2EvidenceIndexEntry(
+                    role=requirement.role,
+                    evidence_type=requirement.evidence_type,
+                    uri=artifact.uri,
+                    sha256=artifact.sha256,
+                    producer_role=requirement.producer_role,
+                    producer_id=requirement.producer_id
+                    or f"producer-{requirement.producer_role}",
+                    producer_hash=requirement.producer_hash
+                    or self.evidence_store.publish(
+                        {"producer": requirement.producer_role}
+                    ).sha256,
+                    retention_owner="m2-formal-postgres-test",
+                    accessibility_checked_at=NOW,
+                )
+            )
+        index = FormalM2EvidenceIndex(
+            round_id=context.round_id,
+            authority_context_id=context.authority_context_id,
+            authority_context_hash=context.context_hash,
+            evidence_store_id=context.evidence_store.store_id,
+            evidence_store_hash=context.evidence_store.store_hash,
+            entries=tuple(entries),
+            created_at=NOW,
+        )
+        return self.evidence_store.publish(index)
+
+    def _prepare_repository_zero_promotion(self, *, promote: bool = False):
+        search_plan = self.evidence_store.publish({"phase": "search", "plan": True})
+        selection_rule = self.evidence_store.publish({"selection": "formal-v1"})
+        input_summary = self.evidence_store.publish({"phase": "search", "members": 2})
+        store_identity = self.evidence_store.publish({"store": "formal-evidence-v1"})
+        access_policy = self.evidence_store.publish({"access": "protected-local-root"})
+        verifier_identity = self.evidence_store.publish({"verifier": "m2-d-verifier"})
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE search_rounds
+                SET search_plan_hash = %s, selection_rule_hash = %s
+                WHERE round_id = %s
+                """,
+                (search_plan.sha256, selection_rule.sha256, self.ids["round"]),
+            )
+        candidate_rows = []
+        members = []
+        for ordinal in range(2):
+            candidate_id = uuid4()
+            round_candidate_id = uuid4()
+            artifact_id = uuid4()
+            artifact = self.evidence_store.publish(
+                {"candidate": ordinal, "artifact": "overlay"}
+            )
+            correctness = self.evidence_store.publish(
+                {"candidate": ordinal, "correctness": True}
+            )
+            budget = self.evidence_store.publish({"candidate": ordinal, "budget": True})
+            cleanup = self.evidence_store.publish(
+                {"candidate": ordinal, "cleanup": "complete"}
+            )
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO candidates (
+                        candidate_id, task_id, round_id, baseline_epoch_id,
+                        source_hash, variant, state, ordinal, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'built', %s, '{}'::jsonb)
+                    """,
+                    (
+                        candidate_id,
+                        self.ids["round_task"],
+                        self.ids["round"],
+                        self.ids["baseline"],
+                        _hash(str(ordinal + 6)),
+                        f"formal-candidate-{ordinal}",
+                        ordinal,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id, task_id, candidate_id, kind, uri, content_hash,
+                        metadata
+                    ) VALUES (%s, %s, %s, 'overlay', %s, %s, '{}'::jsonb)
+                    """,
+                    (
+                        artifact_id,
+                        self.ids["round_task"],
+                        candidate_id,
+                        artifact.uri,
+                        artifact.sha256,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO round_candidates (
+                        round_candidate_id, round_id, candidate_id, ordinal,
+                        source_package_store_id, source_package_store_hash,
+                        source_package_hash, source_manifest_hash,
+                        baseline_source_hash, candidate_source_hash,
+                        optimization_intent, replacement_point, candidate_kind,
+                        artifact_id, artifact_hash, state, idempotency_key
+                    ) VALUES (
+                        %s, %s, %s, %s, 'formal-source-store', %s, %s, %s,
+                        %s, %s, %s, 'sglang.formal.hotspot', 'business',
+                        %s, %s, 'correctness_passed', %s
+                    )
+                    """,
+                    (
+                        round_candidate_id,
+                        self.ids["round"],
+                        candidate_id,
+                        ordinal,
+                        _hash(str(ordinal + 1)),
+                        _hash(str(ordinal + 2)),
+                        _hash(str(ordinal + 3)),
+                        _hash("3"),
+                        _hash(str(ordinal + 4)),
+                        f"formal optimization {ordinal}",
+                        artifact_id,
+                        artifact.sha256,
+                        f"formal-round-candidate-{ordinal}",
+                    ),
+                )
+            candidate_rows.append((candidate_id, round_candidate_id, artifact_id, artifact))
+            members.append(
+                BarrierMemberResult(
+                    round_candidate_id=round_candidate_id,
+                    candidate_id=candidate_id,
+                    candidate_state=RoundCandidateState.SEARCH_MEASURED,
+                    artifact_id=artifact_id,
+                    artifact_hash=artifact.sha256,
+                    correctness_evidence_hash=correctness.sha256,
+                    round_measurement_ref_id=uuid4(),
+                    budget_usage_evidence_hash=budget.sha256,
+                    cleanup_evidence_hash=cleanup.sha256,
+                    synthetic=False,
+                )
+            )
+        self.connection.commit()
+        context = publish_formal_authority_context(
+            FormalAuthorityContextContent(
+                authority_context_id=self.ids["context"],
+                round_id=self.ids["round"],
+                task_id=self.ids["round_task"],
+                target_snapshot_id=self.ids["target"],
+                stage0_run_id=self.ids["stage0_run"],
+                stage0_protocol_hash=_hash("1"),
+                baseline_epoch_id=self.ids["baseline"],
+                hotspot_id=self.ids["hotspot"],
+                target_profile_hash=_hash("f"),
+                workload_profile_hash=_hash("0"),
+                measurement_profile_hash=_hash("2"),
+                candidate_family_hash=_hash("c"),
+                artifact_family_hash=_hash("d"),
+                search_plan_hash=search_plan.sha256,
+                holdout_plan_commitment=_hash("9"),
+                holdout_plan_authority_id="d-holdout-authority-v1",
+                holdout_plan_authority_hash=_hash("a"),
+                selection_rule_hash=selection_rule.sha256,
+                evidence_store=FormalEvidenceStoreRef(
+                    store_id="formal-evidence-v1",
+                    store_version=1,
+                    store_hash=store_identity.sha256,
+                    access_policy_hash=access_policy.sha256,
+                ),
+                verifier=FormalVerifierRef(
+                    verifier_id="m2-d-verifier",
+                    verifier_version="m2-d-formal-v1",
+                    verifier_hash=verifier_identity.sha256,
+                ),
+                sealed_by="operator-a",
+                sealed_at=NOW,
+            )
+        )
+        repository = PostgresRepository(
+            DATABASE_URL,
+            m2_formal_finalizer=M2FormalRoundFinalizer(
+                HashedEvidenceReader(Path(self.temp_dir.name))
+            ),
+        )
+        repository.record_formal_authority_context(context)
+        repository.record_formal_authority_context(context)
+        with repository.connection() as connection:
+            pre_barrier_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s",
+                (self.ids["round"],),
+            ).fetchone()
+        assert pre_barrier_row is not None
+        pre_barrier_authority = SearchRound.model_validate(
+            {name: pre_barrier_row[name] for name in SearchRound.model_fields}
+        )
+        ordered_members = tuple(sorted(members, key=lambda item: str(item.candidate_id)))
+        promoted_ids = (ordered_members[0].candidate_id,) if promote else ()
+        promoted_family_hash = (
+            holdout_family_hash(
+                round_authority=pre_barrier_authority,
+                members=(ordered_members[0],),
+            )
+            if promote
+            else None
+        )
+        barrier = RoundBarrierResult(
+            barrier_id=self.ids["search_barrier"],
+            round_id=self.ids["round"],
+            run_mode=SearchRoundRunMode.FORMAL,
+            synthetic=False,
+            phase=RoundPhase.SEARCH,
+            input_family_hash=context.artifact_family_hash,
+            expected_member_count=2,
+            members=ordered_members,
+            rule_version="m2-search-v1",
+            rule_hash=context.selection_rule_hash,
+            promoted_candidate_ids=promoted_ids,
+            outcome=(
+                RoundBarrierOutcome.MEMBERS_PROMOTED
+                if promote
+                else RoundBarrierOutcome.NO_PROMOTABLE_CANDIDATE
+            ),
+            input_summary_hash=input_summary.sha256,
+            closed_by=context.verifier.verifier_id,
+            closed_at=NOW,
+            idempotency_key="formal-search-barrier-repository",
+        )
+        record = FormalBarrierPersistence(
+            context=formal_authority_context_ref(context),
+            barrier=barrier,
+            holdout_family_hash=promoted_family_hash,
+            payload_hash=formal_authority_payload_hash(barrier),
+        )
+        repository.record_formal_barrier(record)
+        repository.record_formal_barrier(record)
+        budget_document = round_budget_ledger_document(self.ids["round"], [], [])
+        budget_artifact = self.evidence_store.publish(budget_document)
+        self.assertEqual(
+            budget_artifact.sha256,
+            round_budget_ledger_hash(self.ids["round"], [], []),
+        )
+        with repository.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s",
+                (self.ids["round"],),
+            ).fetchone()
+        assert round_row is not None
+        authority = SearchRound.model_validate(
+            {name: round_row[name] for name in SearchRound.model_fields}
+        )
+        return repository, context, authority, barrier, budget_artifact.sha256
+
+    def _build_zero_bundle(
+        self,
+        context,
+        authority: SearchRound,
+        barrier: RoundBarrierResult,
+        budget_hash: str,
+    ):
+        requirements = formal_round_evidence_requirements(
+            context=context,
+            round_authority=authority,
+            search_barrier=barrier,
+            budget_ledger_hash=budget_hash,
+        )
+        index = self._publish_formal_index(context, requirements)
+        return build_formal_round_evidence(
+            context=context,
+            round_authority=authority,
+            search_barrier=barrier,
+            budget_ledger_hash=budget_hash,
+            evidence_index_uri=index.uri,
+            evidence_index_hash=index.sha256,
+            evidence_reader=HashedEvidenceReader(Path(self.temp_dir.name)),
+        )
+
     def _insert_context(self, **updates: object) -> None:
         with self.connection.cursor() as cursor:
             cursor.execute(
@@ -367,14 +733,26 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
+                UPDATE search_rounds
+                SET state = 'search_barrier', holdout_family_hash = %s
+                WHERE round_id = %s
+                """,
+                (
+                    _hash("9") if outcome == "members_promoted" else None,
+                    self.ids["round"],
+                ),
+            )
+            cursor.execute(
+                """
                 INSERT INTO formal_round_barriers (
                     barrier_id, round_id, authority_context_id,
                     authority_context_hash, phase, input_family_hash,
-                    input_summary_hash, rule_version, rule_hash, outcome,
+                    holdout_family_hash, input_summary_hash,
+                    rule_version, rule_hash, outcome,
                     expected_member_count, payload, payload_hash, idempotency_key,
                     closed_by, closed_at
                 ) VALUES (
-                    %s, %s, %s, %s, 'search', %s, %s, 'm2-search-v1', %s,
+                    %s, %s, %s, %s, 'search', %s, %s, %s, 'm2-search-v1', %s,
                     %s, 2, '{}'::jsonb, %s, %s, 'verifier-d', %s
                 )
                 """,
@@ -384,6 +762,7 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
                     self.ids["context"],
                     _hash("e"),
                     family_hash or _hash("d"),
+                    _hash("9") if outcome == "members_promoted" else None,
                     _hash("6"),
                     _hash("7"),
                     outcome,
@@ -728,6 +1107,16 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
         assert DATABASE_URL is not None
         assert psycopg is not None
         self._insert_context()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE search_rounds
+                SET state = 'search_barrier', holdout_family_hash = %s
+                WHERE round_id = %s
+                """,
+                (_hash("9"), self.ids["round"]),
+            )
+        self.connection.commit()
 
         def insert_once(_: int) -> bool:
             try:
@@ -737,11 +1126,12 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
                         INSERT INTO formal_round_barriers (
                             barrier_id, round_id, authority_context_id,
                             authority_context_hash, phase, input_family_hash,
-                            input_summary_hash, rule_version, rule_hash, outcome,
+                            holdout_family_hash, input_summary_hash,
+                            rule_version, rule_hash, outcome,
                             expected_member_count, payload, payload_hash,
                             idempotency_key, closed_by, closed_at
                         ) VALUES (
-                            %s, %s, %s, %s, 'search', %s, %s, 'm2-search-v1',
+                            %s, %s, %s, %s, 'search', %s, %s, %s, 'm2-search-v1',
                             %s, 'members_promoted', 2, '{}'::jsonb, %s, %s,
                             'verifier-d', %s
                         )
@@ -752,6 +1142,7 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
                             self.ids["context"],
                             _hash("e"),
                             _hash("d"),
+                            _hash("9"),
                             _hash("6"),
                             _hash("7"),
                             _hash("8"),
@@ -773,3 +1164,261 @@ class M2FormalAuthorityPostgresTests(unittest.TestCase):
                 (self.ids["round"],),
             )
             self.assertEqual(cursor.fetchone()[0], 1)
+
+    def test_repository_zero_promotion_finalizer_is_idempotent_and_concurrent(self) -> None:
+        repository, context, authority, barrier, budget_hash = (
+            self._prepare_repository_zero_promotion()
+        )
+        bundle = self._build_zero_bundle(context, authority, barrier, budget_hash)
+        record = FormalEvidenceBundlePersistence(
+            context=formal_authority_context_ref(context),
+            bundle=bundle,
+            payload_hash=formal_authority_payload_hash(bundle),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            rows = list(
+                pool.map(
+                    lambda _: repository.finalize_formal_search_round(record), range(2)
+                )
+            )
+
+        self.assertTrue(all(row["state"] == "awaiting_signoff" for row in rows))
+        replay = repository.finalize_formal_search_round(record)
+        self.assertEqual(replay["state"], "awaiting_signoff")
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM tasks WHERE task_id = %s",
+                (self.ids["round_task"],),
+            )
+            self.assertEqual(cursor.fetchone()[0], "awaiting_signoff")
+            cursor.execute(
+                "SELECT count(*) FROM formal_round_evidence_bundles WHERE round_id = %s",
+                (self.ids["round"],),
+            )
+            self.assertEqual(cursor.fetchone()[0], 1)
+            cursor.execute(
+                """
+                SELECT count(*) FROM task_events
+                WHERE task_id = %s AND event_type = 'm2_formal_round_awaiting_signoff'
+                """,
+                (self.ids["round_task"],),
+            )
+            self.assertEqual(cursor.fetchone()[0], 1)
+        self.evidence_store.tamper(context.search_plan_hash)
+        with self.assertRaisesRegex(Conflict, "evidence_hash_mismatch"):
+            repository.finalize_formal_search_round(record)
+
+    def test_repository_completed_holdout_path_stops_at_signoff(self) -> None:
+        repository, context, authority, search, budget_hash = (
+            self._prepare_repository_zero_promotion(promote=True)
+        )
+        promoted = next(
+            item
+            for item in search.members
+            if item.candidate_id == search.promoted_candidate_ids[0]
+        )
+        family_hash = holdout_family_hash(
+            round_authority=authority,
+            members=(promoted,),
+        )
+        plan = self.evidence_store.publish({"phase": "holdout", "plan": True})
+        reveal_evidence = self.evidence_store.publish(
+            {"phase": "holdout", "revealed": True}
+        )
+        reveal = FormalHoldoutRevealPersistence(
+            context=formal_authority_context_ref(context),
+            search_barrier_id=search.barrier_id,
+            reveal_lease_id=self.ids["reveal_lease"],
+            fencing_token=7,
+            holdout_family_hash=family_hash,
+            holdout_plan_hash=plan.sha256,
+            reveal_evidence_uri=reveal_evidence.uri,
+            reveal_evidence_hash=reveal_evidence.sha256,
+            revealed_by=context.verifier.verifier_id,
+            revealed_at=NOW,
+        )
+        repository.record_formal_holdout_reveal(reveal)
+        repository.record_formal_holdout_reveal(reveal)
+        holdout_budget = self.evidence_store.publish({"phase": "holdout", "budget": True})
+        holdout_cleanup = self.evidence_store.publish(
+            {"phase": "holdout", "cleanup": "complete"}
+        )
+        holdout_member = promoted.model_copy(
+            update={
+                "candidate_state": RoundCandidateState.HOLDOUT_MEASURED,
+                "round_measurement_ref_id": uuid4(),
+                "budget_usage_evidence_hash": holdout_budget.sha256,
+                "cleanup_evidence_hash": holdout_cleanup.sha256,
+            }
+        )
+        holdout = RoundBarrierResult(
+            barrier_id=self.ids["holdout_barrier"],
+            round_id=self.ids["round"],
+            run_mode=SearchRoundRunMode.FORMAL,
+            synthetic=False,
+            phase=RoundPhase.HOLDOUT,
+            input_family_hash=family_hash,
+            expected_member_count=1,
+            members=(holdout_member,),
+            rule_version="m2-holdout-v1",
+            rule_hash=context.selection_rule_hash,
+            promoted_candidate_ids=(),
+            outcome=RoundBarrierOutcome.COMPLETED,
+            input_summary_hash=self.evidence_store.publish(
+                {"phase": "holdout", "summary": True}
+            ).sha256,
+            closed_by=context.verifier.verifier_id,
+            closed_at=NOW,
+            idempotency_key="formal-holdout-barrier-repository",
+        )
+        holdout_record = FormalBarrierPersistence(
+            context=formal_authority_context_ref(context),
+            barrier=holdout,
+            holdout_family_hash=family_hash,
+            parent_search_barrier_id=search.barrier_id,
+            payload_hash=formal_authority_payload_hash(holdout),
+        )
+        repository.record_formal_barrier(holdout_record)
+        repository.record_formal_barrier(holdout_record)
+        raw = self.evidence_store.publish({"phase": "holdout", "raw": True})
+        baseline = self.evidence_store.publish({"phase": "holdout", "baseline": True})
+        adjusted = AdjustedCandidateResult(
+            candidate_id=holdout_member.candidate_id,
+            round_measurement_ref_id=holdout_member.round_measurement_ref_id,
+            synthetic=False,
+            correctness_evidence_hash=holdout_member.correctness_evidence_hash,
+            raw_evidence_hash=raw.sha256,
+            baseline_sample_set_hash=baseline.sha256,
+            verdict=ManualCandidateVerdict.INCONCLUSIVE,
+            adjusted_ci_lower=-0.01,
+            adjusted_ci_upper=0.01,
+            stage0_mde_ratio=0.02,
+            workload_mde_ratio=0.02,
+            credible_threshold=0.02,
+        )
+        comparison = MultipleComparisonResult(
+            multiple_comparison_id=self.ids["fwer"],
+            round_id=self.ids["round"],
+            run_mode=SearchRoundRunMode.FORMAL,
+            synthetic=False,
+            holdout_barrier_id=holdout.barrier_id,
+            holdout_family_hash=family_hash,
+            protocol_version=M2_FWER_PROTOCOL_VERSION,
+            protocol_hash=m2_fwer_protocol_hash(),
+            family_alpha=0.05,
+            m=1,
+            alpha_candidate=0.05,
+            candidate_results=(adjusted,),
+            result_hash=_hash("0"),
+            created_at=NOW,
+        )
+        comparison = comparison.model_copy(
+            update={"result_hash": recompute_multiple_comparison_result_hash(comparison)}
+        )
+        comparison_record = FormalMultipleComparisonPersistence(
+            context=formal_authority_context_ref(context),
+            result=comparison,
+            payload_hash=formal_authority_payload_hash(comparison),
+        )
+        repository.record_formal_multiple_comparison(comparison_record)
+        repository.record_formal_multiple_comparison(comparison_record)
+        with repository.connection() as connection:
+            round_row = connection.execute(
+                "SELECT * FROM search_rounds WHERE round_id = %s",
+                (self.ids["round"],),
+            ).fetchone()
+        assert round_row is not None
+        authority = SearchRound.model_validate(
+            {name: round_row[name] for name in SearchRound.model_fields}
+        )
+        requirements = formal_round_evidence_requirements(
+            context=context,
+            round_authority=authority,
+            search_barrier=search,
+            budget_ledger_hash=budget_hash,
+            holdout_reveal=reveal,
+            holdout_barrier=holdout,
+            multiple_comparison=comparison,
+        )
+        index = self._publish_formal_index(context, requirements)
+        bundle = build_formal_round_evidence(
+            context=context,
+            round_authority=authority,
+            search_barrier=search,
+            budget_ledger_hash=budget_hash,
+            evidence_index_uri=index.uri,
+            evidence_index_hash=index.sha256,
+            evidence_reader=HashedEvidenceReader(Path(self.temp_dir.name)),
+            holdout_reveal=reveal,
+            holdout_barrier=holdout,
+            multiple_comparison=comparison,
+        )
+        bundle_record = FormalEvidenceBundlePersistence(
+            context=formal_authority_context_ref(context),
+            bundle=bundle,
+            payload_hash=formal_authority_payload_hash(bundle),
+        )
+
+        finalized = repository.finalize_formal_search_round(bundle_record)
+
+        self.assertEqual(finalized["state"], "awaiting_signoff")
+        self.assertFalse(bundle.synthetic)
+        self.assertFalse(bundle.automatic_release_allowed)
+        self.assertEqual(
+            bundle.summary["performance_conclusion"], "formal_single_operation_only"
+        )
+
+    def test_repository_formal_finalizer_rejects_reserved_budget_and_tampering(self) -> None:
+        repository, context, authority, barrier, budget_hash = (
+            self._prepare_repository_zero_promotion()
+        )
+        bundle = self._build_zero_bundle(context, authority, barrier, budget_hash)
+        record = FormalEvidenceBundlePersistence(
+            context=formal_authority_context_ref(context),
+            bundle=bundle,
+            payload_hash=formal_authority_payload_hash(bundle),
+        )
+        job_id = uuid4()
+        reservation_id = uuid4()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, task_id, job_type, state, payload,
+                    accepted_worker_type, adapter_profile, lease_scope,
+                    idempotency_key
+                ) VALUES (
+                    %s, %s, 'performance', 'queued', '{}'::jsonb,
+                    'gpu', 'formal-adapter-v1', 'exclusive',
+                    'formal-reserved-budget-job'
+                )
+                """,
+                (job_id, self.ids["round_task"]),
+            )
+            cursor.execute(
+                """
+                INSERT INTO round_budget_reservations (
+                    reservation_id, round_id, job_id, attempt, candidate_id,
+                    phase, planned, state, idempotency_key
+                ) VALUES (
+                    %s, %s, %s, 1, NULL, 'search', '{}'::jsonb,
+                    'reserved', 'formal-reserved-budget'
+                )
+                """,
+                (reservation_id, self.ids["round"], job_id),
+            )
+        self.connection.commit()
+
+        with self.assertRaisesRegex(Conflict, "every Budget reservation terminal"):
+            repository.finalize_formal_search_round(record)
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM round_budget_reservations WHERE reservation_id = %s",
+                (reservation_id,),
+            )
+            cursor.execute("DELETE FROM jobs WHERE job_id = %s", (job_id,))
+        self.connection.commit()
+        self.evidence_store.tamper(context.search_plan_hash)
+        with self.assertRaisesRegex(Conflict, "evidence_hash_mismatch"):
+            repository.finalize_formal_search_round(record)

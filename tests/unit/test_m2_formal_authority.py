@@ -216,14 +216,16 @@ def test_formal_barrier_binds_context_family_mode_and_payload_hash() -> None:
     record = FormalBarrierPersistence(
         context=context,
         barrier=barrier,
+        holdout_family_hash=_hash("4"),
         payload_hash=formal_authority_payload_hash(barrier),
     )
 
     assert record.barrier.input_family_hash == context.artifact_family_hash
-    with pytest.raises(ValidationError, match="Artifact Family"):
+    with pytest.raises(ValidationError, match="Artifact input"):
         FormalBarrierPersistence(
             context=context,
             barrier=barrier.model_copy(update={"input_family_hash": _hash("0")}),
+            holdout_family_hash=_hash("4"),
             payload_hash=formal_authority_payload_hash(
                 barrier.model_copy(update={"input_family_hash": _hash("0")})
             ),
@@ -232,6 +234,7 @@ def test_formal_barrier_binds_context_family_mode_and_payload_hash() -> None:
         FormalBarrierPersistence(
             context=context,
             barrier=barrier,
+            holdout_family_hash=_hash("4"),
             payload_hash=_hash("0"),
         )
 
@@ -260,6 +263,7 @@ def test_scripted_barrier_cannot_enter_formal_persistence() -> None:
         FormalBarrierPersistence(
             context=formal_authority_context_ref(_context()),
             barrier=scripted,
+            holdout_family_hash=_hash("4"),
             payload_hash=formal_authority_payload_hash(scripted),
         )
 

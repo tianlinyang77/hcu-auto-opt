@@ -629,6 +629,14 @@ def _holdout_family_hash(
     )
 
 
+def holdout_family_hash(
+    *, round_authority: SearchRound, members: Iterable[BarrierMemberResult]
+) -> str:
+    """Recompute the immutable promoted Family for persistence boundaries."""
+
+    return _holdout_family_hash(round_authority=round_authority, members=members)
+
+
 def _reject_reused_statistics_identities(
     statistics: Iterable[ScriptedCandidateStatisticsInput],
 ) -> None:

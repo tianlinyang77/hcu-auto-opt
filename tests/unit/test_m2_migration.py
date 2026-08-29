@@ -9,7 +9,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[10] == "0010_operator_plan_preview.sql"
     assert MIGRATIONS[11] == "0011_operator_start_intent.sql"
     assert MIGRATIONS[12] == "0012_m2_formal_authority.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 13))
+    assert MIGRATIONS[13] == "0013_m2_formal_finalizer.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 14))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -107,3 +108,13 @@ def test_m2_formal_authority_migration_is_separate_append_only_and_fail_closed()
     assert "reject_m2_formal_authority_mutation" in formal
     assert "nonce" not in formal.lower()
     assert "VALUES (12, 'm2_formal_authority')" in formal
+
+
+def test_m2_formal_finalizer_migration_binds_search_output_family_atomically() -> None:
+    sql = migration_sql(13)
+
+    assert "DROP CONSTRAINT formal_barrier_family_shape" in sql
+    assert "outcome = 'members_promoted'" in sql
+    assert "holdout_family_hash IS NOT NULL" in sql
+    assert "round_parent.holdout_family_hash IS DISTINCT FROM NEW.holdout_family_hash" in sql
+    assert "VALUES (13, 'm2_formal_finalizer')" in sql
