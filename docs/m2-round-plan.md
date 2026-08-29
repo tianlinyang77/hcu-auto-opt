@@ -137,7 +137,10 @@ Owner：A 负责整合；B/C/D 对自己的证据签字。
 当前实现进度：步骤 1–3 的控制面已接通。PostgreSQL 以 append-only 表保存 Barrier、Reveal、
 FWER 和 Evidence Bundle；A Finalizer 会重算数据库 Budget Ledger Hash，并调用 D verifier 从
 Evidence URI 递归重建 Bundle。零晋级与完成 Holdout 两条路径都只能进入
-`scripted_completed`。步骤 4–7 尚未开始，因此不得据此创建 Formal Round 或申请 HCU 性能窗口。
+`scripted_completed`。步骤 4 已开始只读审计，当前结论为 **HOLD**：真实 Profile/Plan/Start、
+测量 Adapter、Formal 持久化/Finalizer、2 成员业务 Candidate Family、四方 review 和窗口授权
+尚未完成。详见 [M2a Formal 就绪审计](m2a-formal-readiness.md)。步骤 5–7 尚未开始，因此不得
+据此创建 Formal Round 或申请 HCU 性能窗口。
 
 ### M2-OX：操作面与易用性横向轨道
 

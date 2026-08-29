@@ -112,11 +112,14 @@
 - Proven workaround: F1-C 正式验证使用 Linux CI；Windows 上只运行明确支持 Windows 的
   测试集合。不要用缩短 `--basetemp` 掩盖权限问题，短路径只能解决路径长度。
 - Validation: M2 新增 `tests/unit/test_m2_contracts.py` 为 `4 passed`，全仓 Ruff 通过；完整
-  失败清单没有 M2 Contract 或其他新增失败。Linux CI 继续作为这些文件语义的正式门禁。
+  失败清单没有 M2 Contract 或其他新增失败。M2a Formal readiness 在 2026-08-29 的普通权限
+  Windows 全量结果为 `458 passed, 21 skipped, 18 failed`：16 项仍为符号链接权限，2 项仍为
+  只读临时制品删除，新增 readiness 定向测试 `10 passed`。Linux CI 继续作为这些文件语义的
+  正式门禁。
 - Applies to: 普通权限 Windows Python 3.10+ 的仓库全量单测。
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。
-- Last updated: 2026-08-28
+- Last updated: 2026-08-29
 
 ## Windows 可编辑安装可能指向同项目的旧 checkout
 
