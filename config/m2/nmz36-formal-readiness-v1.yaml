@@ -1,6 +1,6 @@
 schema_version: m2a-formal-readiness-v1
 audit_id: nmz36-m2a-formal-readiness-20260829-v1
-audit_base_commit: 15120eef56e349ca293b8102aa153b0d3278f759
+audit_base_commit: ee7eec92edc268ed36e4f6903b970035f9d48fcc
 observed_at: 2026-08-29T20:19:20+08:00
 
 profile_draft:
@@ -72,7 +72,7 @@ gates:
         digest_mode: text_lf
         evidence_type: isolated_formal_authority_schema
       - path: tests/integration/test_m2_formal_authority_postgres.py
-        sha256: sha256:f3af8841981300818709e6cf28e466361559ff6bd39399f5e04a2d03758316e0
+        sha256: sha256:93ef5c881f64af7135f4113e4f66bacfa7677fd957fa5bfcfc5d9ef08dd2d6b9
         digest_mode: text_lf
         evidence_type: formal_authority_writer_finalizer_postgres_tests
   - code: formal_evidence_finalizer
@@ -86,7 +86,7 @@ gates:
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py
-        sha256: sha256:06940818c45b8b891c635fa59bf4d3af9e63c00749541f86b52c3ab7c1dba7bf
+        sha256: sha256:ec08ecc478959f6f44e6721e9e8ab415f70c6a13d125f6d4adc82dfbaef59c58
         digest_mode: text_lf
         evidence_type: formal_repository_terminal_transactions
       - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql
@@ -165,14 +165,26 @@ gates:
         evidence_type: formal_authorization_policy
   - code: round_signoff_outbox
     owner: A
-    status: block
-    summary: M2 Round Signoff Intent, signed decision Artifact, and crash-recoverable Outbox are not implemented.
-    required_action: Implement content-addressed Formal Round signoff with recursive Evidence verification, cleanup readiness, idempotency, authentication, and crash recovery.
+    status: hold
+    summary: Deterministic Formal Signoff Intent, signed content-addressed decision Artifact, two-transaction Outbox, terminal Signoff, and crash reconciliation are implemented without enabling release.
+    required_action: Keep this gate on hold until PostgreSQL 17 validates concurrency and recovery, then connect production authentication, signer/verifier key custody, protected Artifact storage, and an approved Formal operator entrypoint.
     evidence:
-      - path: src/hcuopt/storage/sql/0009_m2_round_authority.sql
-        sha256: sha256:3d30bbc73f82640cf9fc246a7e6b837ffe8717c622731911924313c645c99aa5
+      - path: src/hcuopt/contracts/m2_formal_signoff_v1.py
+        sha256: sha256:f3d01374fcf65eda27d1839cdbdd09463af66850e9edfa1fabe317fb5e466207
         digest_mode: text_lf
-        evidence_type: current_m2_authority_schema_without_signoff
+        evidence_type: formal_signoff_intent_and_artifact_contract
+      - path: src/hcuopt/evaluation/m2_formal_signoff.py
+        sha256: sha256:2190402f4328c90771fd0739d709602881e11015a65f9f6158571e0d414957e6
+        digest_mode: text_lf
+        evidence_type: formal_signoff_publisher_and_finalizer
+      - path: src/hcuopt/storage/sql/0014_m2_formal_signoff_outbox.sql
+        sha256: sha256:567b3c79ba8533bf95b75b3517c7e65152a7928e9a897f27970a133c6833d11b
+        digest_mode: text_lf
+        evidence_type: formal_signoff_two_transaction_schema
+      - path: tests/integration/test_m2_formal_authority_postgres.py
+        sha256: sha256:93ef5c881f64af7135f4113e4f66bacfa7677fd957fa5bfcfc5d9ef08dd2d6b9
+        digest_mode: text_lf
+        evidence_type: formal_signoff_recovery_postgres_tests
   - code: scripted_barrier_fwer_evidence
     owner: D
     status: pass
@@ -197,7 +209,7 @@ gates:
 reviews:
   - owner: A
     decision: pending
-    reason: Formal Profile, compiler, StartIntent, and Signoff/Outbox paths are not implemented.
+    reason: Formal Signoff/Outbox persistence exists, but PostgreSQL 17, production authentication and signing, Real Profiles, compiler, and StartIntent remain open.
     evidence: null
   - owner: B
     decision: pending
@@ -209,7 +221,7 @@ reviews:
     evidence: null
   - owner: D
     decision: pending
-    reason: Formal writers and the protected independent Finalizer exist, but PostgreSQL 17 CI, production invocation, and the Signoff evidence path remain open.
+    reason: Formal writers, protected Finalizer, and Signoff evidence verification exist, but PostgreSQL 17 CI, production protected stores, and formal D acceptance remain open.
     evidence: null
 
 window_authorization: not_requested

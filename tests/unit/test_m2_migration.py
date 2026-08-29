@@ -10,7 +10,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[11] == "0011_operator_start_intent.sql"
     assert MIGRATIONS[12] == "0012_m2_formal_authority.sql"
     assert MIGRATIONS[13] == "0013_m2_formal_finalizer.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 14))
+    assert MIGRATIONS[14] == "0014_m2_formal_signoff_outbox.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 15))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -118,3 +119,22 @@ def test_m2_formal_finalizer_migration_binds_search_output_family_atomically() -
     assert "holdout_family_hash IS NOT NULL" in sql
     assert "round_parent.holdout_family_hash IS DISTINCT FROM NEW.holdout_family_hash" in sql
     assert "VALUES (13, 'm2_formal_finalizer')" in sql
+
+
+def test_m2_formal_signoff_migration_is_two_phase_and_never_releases() -> None:
+    sql = migration_sql(14)
+
+    for table in (
+        "formal_round_signoff_intents",
+        "formal_round_signoff_outbox",
+        "formal_round_signoffs",
+    ):
+        assert f"CREATE TABLE {table}" in sql
+
+    assert "state IN ('preparing', 'artifact_published', 'finalized', 'failed')" in sql
+    assert "formal_signoff_intent_run_mode CHECK (run_mode = 'formal')" in sql
+    assert "formal_signoff_intent_non_synthetic CHECK (synthetic = FALSE)" in sql
+    assert "formal_signoff_outbox_publication_atomic" in sql
+    assert "formal_round_signoff_never_auto_releases" in sql
+    assert "formal_round_signoff_append_only" in sql
+    assert "VALUES (14, 'm2_formal_signoff_outbox')" in sql
