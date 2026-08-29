@@ -4,7 +4,10 @@
 
 仓库已经完成 F1 Framework Smoke、Formal Stage 0 和 **M1 单人工 Candidate 可信闭环**。首个真实业务 Candidate 已完成 Build、正确性、可信测量、独立裁决和人工证据接受；完整记录见 [M1 nmz36 Formal 与签核](docs/evidence/m1-formal-nmz36-20260825.md)。Formal Stage 0 的模式仍是 `DEGRADED_MANUAL_INTAKE`，`automatic_release_allowed=false`；M1 的完成不开放 Agent 搜索、自动发布或生产灰度。
 
-当前工作进入 [M1 接口复盘与 M2 Go/No-Go](docs/m1-retrospective.md)。M2 的提案是先做 M2a：同一热点下 2–4 个人工不可变 Candidate 的 Search/Holdout/轮次 Barrier，再单独评审是否进入 M2b Candidate Generator。M2 ADR 仍是 Proposed，在评审接受前不得创建真实多 Candidate Formal Task。
+当前工作已完成 M2a 无 HCU Scripted Search/Holdout/轮次 Barrier 和只读操作面，正在执行
+[M2a Formal 就绪审计](docs/m2a-formal-readiness.md)。当前审计结论为 `HOLD`：真实执行路径、
+2 成员业务 Candidate Family、四方 review 和独立 HCU 窗口授权尚未完成。不得创建真实多
+Candidate Formal Task；M2a Formal 完整闭环前也不进入 M2b Candidate Generator。
 
 首个实测目标已经冻结为 SGLang 0.5.12、`HYGON-AI/sglang-das` 固定 Commit 和指定 DTK 26.04 镜像；精确版本、运行拓扑及待解除阻塞见 [nmz36 Target Lock](config/targets/nmz36-sglang-0.5.12.yaml)。Target Lock 使用镜像 digest 与完整源码 Commit，禁止用同名 Tag、`latest` 或其他 0.5.12 镜像替换。
 
@@ -130,6 +133,7 @@ hcuopt walking-demo --api-url http://localhost:8000
 - [M1 人工签核 Runbook](docs/m1-signoff-runbook.md)
 - [M1 接口复盘与 M2 Go/No-Go](docs/m1-retrospective.md)
 - [M2 搜索轮次建设计划](docs/m2-round-plan.md)
+- [M2a Formal 就绪审计](docs/m2a-formal-readiness.md)
 - [M2 Contract 草案](docs/m2-contract-draft.md)
 - [M2 操作面与易用性建设计划](docs/m2-operability-plan.md)
 - [M2 Operator Contract 草案](docs/m2-operator-contract-draft.md)

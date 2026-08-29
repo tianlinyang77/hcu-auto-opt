@@ -46,7 +46,7 @@ jobs:
       - run: >-
           pytest tests/unit/test_stage0_protocol.py tests/unit/test_stage0_statistics.py
           tests/unit/test_stage0_verifier.py tests/unit/test_m1_measurement.py
-          tests/unit/test_m1_d_verifier.py -v
+          tests/unit/test_m1_d_verifier.py tests/unit/test_m2a_formal_readiness.py -v
 
   scripted-smoke:
     strategy:

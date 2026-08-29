@@ -1,0 +1,198 @@
+schema_version: m2a-formal-readiness-v1
+audit_id: nmz36-m2a-formal-readiness-20260829-v1
+audit_base_commit: f1deab4a0014b9c83a6b4ca832f5d7cae3844462
+observed_at: 2026-08-29T19:20:00+08:00
+
+profile_draft:
+  profile_version: 1
+  registration_state: draft_unregistered
+  run_mode: formal
+  project_mode: degraded_manual_intake
+  target_profile_id: m2a-nmz36-target
+  workload_profile_id: m2a-nmz36-allocator-prefill
+  measurement_profile_id: m2a-nmz36-formal-standard
+  target_id: nmz36-sglang-0.5.12
+  target_fingerprint: sha256:1570580b386ee2dab432d023aa3f05289e21643f9ba1a174ce5bc738aa55bf8c
+  target_snapshot_id: ffb9f94e-2035-5ff6-9b06-f1b5fb163196
+  stage0_run_id: dd50c381-75dd-5a64-9211-640c602dc817
+  stage0_protocol_hash: sha256:a976fdd6299e83d9571cf5f3aad93fe9d282fa1772563967a351fb245cb09d64
+  baseline_epoch_id: 1ab0480c-6f16-544c-a835-655599eaea6c
+  baseline_source_hash: sha256:215e9259a7afd87e93924487a8153e5e80f6f831e5a0056dce5350e031363c0b
+  workload_id: m1-qwen2.5-0.5b-prefill-4090-1-c1
+  image_digest: sha256:a959b1d27fa7fada705bcb619331b0bc9a41bd67a7c2462b515a77718f108f1c
+  adapter_profile: nmz36-m2a-formal-v1
+  resource_id: hcu-7
+  hotspot_id: ec941d47-206a-5f18-8538-ae9c18c1e0ec
+  replacement_point: sglang.srt.mem_cache.allocator.PagedTokenToKVPoolAllocator.free
+  candidate_kind: business
+  candidate_family_state: missing
+  expected_candidate_count: 2
+  max_promoted: 2
+  family_alpha: 0.05
+  budget_state: pending_b_review
+  budget:
+    max_candidates: 2
+    max_build_attempts: 2
+    max_correctness_attempts: 2
+    max_search_samples: 800
+    max_holdout_samples: 800
+    max_wall_seconds: 14400
+    max_exclusive_lease_seconds: 14400
+  candidate_packages: []
+  candidate_family_hash: null
+  automatic_release_allowed: false
+
+gates:
+  - code: business_candidate_family
+    owner: C
+    status: block
+    summary: Only one historical business Candidate exists; no immutable 2-member M2a Family is frozen.
+    required_action: Publish and independently verify two business startup-Overlay packages bound to one Baseline, Hotspot, replacement point, and Candidate Store authority.
+    evidence:
+      - path: src/hcuopt/operator/discovery.py
+        sha256: sha256:e1692bf7ac6b47f21a84379ef8e1b7116c7e13b5fcd3dc5a94e4f6b9f95052c7
+        digest_mode: text_lf
+        evidence_type: scripted_fixture_discovery_implementation
+  - code: formal_authority_persistence
+    owner: D
+    status: block
+    summary: Barrier, Holdout Reveal, FWER, and Round Evidence tables enforce synthetic=true.
+    required_action: Add separately reviewed Formal authority tables or constraints without weakening Scripted isolation or append-only evidence semantics.
+    evidence:
+      - path: src/hcuopt/storage/sql/0009_m2_round_authority.sql
+        sha256: sha256:3d30bbc73f82640cf9fc246a7e6b837ffe8717c622731911924313c645c99aa5
+        digest_mode: text_lf
+        evidence_type: scripted_only_round_authority_schema
+  - code: formal_evidence_finalizer
+    owner: D
+    status: block
+    summary: The current M2 Finalizer rebuilds only synthetic Scripted EvidenceBundle objects.
+    required_action: Implement a Formal evidence reader/finalizer with protected evidence roots, independent hash reread, identity isolation, and no Producer verdict authority.
+    evidence:
+      - path: src/hcuopt/evaluation/m2_finalizer.py
+        sha256: sha256:519124ca57edefeb52651b9461c47a9c97cc601eeb5f26785c6447c39b3e8d4b
+        digest_mode: text_lf
+        evidence_type: scripted_only_round_finalizer
+  - code: formal_measurement_adapter
+    owner: B
+    status: block
+    summary: No nmz36 M2a Formal Adapter Profile is registered for phase-aware Search/Holdout execution.
+    required_action: Register a separately authorized Real Adapter Profile that consumes B-owned plans, exclusive leases, budget reservations, fencing, telemetry, and failure-closed cleanup.
+    evidence:
+      - path: src/hcuopt/adapters/real_profile.py
+        sha256: sha256:bc7b5449e2ccf1c44689c4e489fc44ebe0588e93524ad362106e59e10ae338f5
+        digest_mode: text_lf
+        evidence_type: current_real_adapter_registry
+  - code: formal_operator_profiles
+    owner: A
+    status: block
+    summary: The runtime catalog contains only synthetic Scripted Profiles and rejects Real Profiles by default.
+    required_action: Complete A/B/C/D review, publish exact immutable Real Profile versions, and enable them only through an explicit deployment-owned allowlist.
+    evidence:
+      - path: src/hcuopt/operator/profiles.py
+        sha256: sha256:5341c066eaaa1d1d2e00a13366e9a98179fce2d4d6735cfa127c6d6daf44b0c1
+        digest_mode: text_lf
+        evidence_type: scripted_operator_profile_catalog
+  - code: formal_plan_compiler
+    owner: A
+    status: block
+    summary: Operator Plan Preview explicitly rejects every mode except synthetic Scripted.
+    required_action: Add a separate Formal compiler path that resolves live PostgreSQL Authority, business Candidate Store bindings, Target Lock freshness, and D-owned sealed Holdout plans.
+    evidence:
+      - path: src/hcuopt/operator/plans.py
+        sha256: sha256:786f0d33d197b41a7dae9f17c5d6cfcbdee61663c56e2c0ad5139053b7821742
+        digest_mode: text_lf
+        evidence_type: scripted_only_plan_compiler
+  - code: formal_start_intent
+    owner: A
+    status: block
+    summary: Operator StartIntent always creates run_mode=scripted and candidate_kind=fixture.
+    required_action: Implement and crash-test a Formal StartIntent path without allowing the client to choose protected Authority, plans, Candidate kind, or Adapter configuration.
+    evidence:
+      - path: src/hcuopt/operator/start.py
+        sha256: sha256:41e42c0c4f83a210923d7651efd2e9ad4f3d77c22f95af450e8e3894269fced8
+        digest_mode: text_lf
+        evidence_type: scripted_only_start_intent
+  - code: historical_single_candidate_provenance
+    owner: C
+    status: pass
+    summary: M1 preserved one real business Candidate, immutable Artifact, Source Hashes, cleanup, D verdict, and manual evidence acceptance.
+    required_action: Reuse its trust pattern, but do not treat one historical Candidate as an M2 Candidate Family.
+    evidence:
+      - path: docs/evidence/m1-formal-nmz36-20260825.md
+        sha256: sha256:24a37eb6b1f9f60671a4b8f73a2a81a82716c9503af94020eba239961989ad68
+        digest_mode: text_lf
+        evidence_type: historical_m1_formal_acceptance
+  - code: historical_stage0_authority
+    owner: B
+    status: pass
+    summary: A real Stage 0 run established DEGRADED_MANUAL_INTAKE with G0-M pass, profiler degraded, and overlay_only patchability.
+    required_action: Treat this as historical draft input only; revalidate Target Lock and environmental freshness immediately before any future Formal window.
+    evidence:
+      - path: docs/evidence/s0-formal-nmz36-20260821.md
+        sha256: sha256:3bd256d17bb584bd908b4e31e4cd779009ed809e99ad5b4458f65394a626bc70
+        digest_mode: text_lf
+        evidence_type: historical_stage0_formal_acceptance
+  - code: owner_window_authorization
+    owner: project_owner
+    status: block
+    summary: No exact host, device, time window, Candidate Family, or budget has been authorized for an M2a Formal run.
+    required_action: After every A/B/C/D blocker is resolved, request one separate project-owner decision naming the exact host, HCU, time window, Family Hash, and maximum budget.
+    evidence:
+      - path: docs/adr/0009-m2a-round-barrier.md
+        sha256: sha256:91f70dfa2578996c9b9ca261cc0ecb5a83d26642a2d1af9e26ffdc801e45e7e9
+        digest_mode: text_lf
+        evidence_type: formal_authorization_policy
+  - code: round_signoff_outbox
+    owner: A
+    status: block
+    summary: M2 Round Signoff Intent, signed decision Artifact, and crash-recoverable Outbox are not implemented.
+    required_action: Implement content-addressed Formal Round signoff with recursive Evidence verification, cleanup readiness, idempotency, authentication, and crash recovery.
+    evidence:
+      - path: src/hcuopt/storage/sql/0009_m2_round_authority.sql
+        sha256: sha256:3d30bbc73f82640cf9fc246a7e6b837ffe8717c622731911924313c645c99aa5
+        digest_mode: text_lf
+        evidence_type: current_m2_authority_schema_without_signoff
+  - code: scripted_barrier_fwer_evidence
+    owner: D
+    status: pass
+    summary: Scripted Search/Holdout Barrier, Bonferroni FWER, and recursive EvidenceBundle verification exist and fail closed under fixture tests.
+    required_action: Preserve these statistical and identity rules when adding a separately reviewed Formal evidence reader and persistence path.
+    evidence:
+      - path: src/hcuopt/evaluation/m2_verifier.py
+        sha256: sha256:c2b57778861e091fc63909565f224df31aa148053fc887223d44a909a8952559
+        digest_mode: text_lf
+        evidence_type: scripted_m2_evidence_verifier
+  - code: target_lock_refresh
+    owner: B
+    status: hold
+    summary: The locked nmz36 target is historical and device isolation was accepted only for Stage 0, not reserved for M2a Formal optimization.
+    required_action: Immediately before a separately authorized window, recheck image digest, source commit, driver/container identity, HCU 7 occupancy, CPU/NUMA affinity, clocks, external runners, and post-run cleanup.
+    evidence:
+      - path: config/targets/nmz36-sglang-0.5.12.yaml
+        sha256: sha256:461f35311431ee45db0fab4f49aa86a2fe19a815103f2490ae1b175907aff96c
+        digest_mode: text_lf
+        evidence_type: historical_target_lock
+
+reviews:
+  - owner: A
+    decision: pending
+    reason: Formal Profile, compiler, StartIntent, persistence, and Signoff paths are not implemented.
+    evidence: null
+  - owner: B
+    decision: pending
+    reason: Target Lock refresh, Formal measurement Adapter, resource window, and budget review remain open.
+    evidence: null
+  - owner: C
+    decision: pending
+    reason: The required two-member immutable business Candidate Family does not exist.
+    evidence: null
+  - owner: D
+    decision: pending
+    reason: Formal authority persistence, evidence reader/finalizer, and Signoff evidence path remain open.
+    evidence: null
+
+window_authorization: not_requested
+hcu_accessed: false
+formal_round_created: false
+automatic_release_allowed: false

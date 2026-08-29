@@ -44,6 +44,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("db-migrate", help="apply PostgreSQL schema migrations")
     target = sub.add_parser("target-validate", help="validate and normalize a target lock")
     target.add_argument("target", type=Path)
+    readiness = sub.add_parser(
+        "formal-readiness",
+        help="verify one no-HCU M2a Formal readiness manifest",
+    )
+    readiness.add_argument("manifest", type=Path)
+    readiness.add_argument(
+        "--repository-root",
+        type=Path,
+        default=Path("."),
+        help="repository root used to verify immutable evidence paths",
+    )
+    readiness.add_argument("--json", action="store_true")
     worker = sub.add_parser("worker", help="run one Agent, Build, or GPU worker")
     worker.add_argument("--id", required=True, dest="worker_id")
     worker.add_argument("--type", required=True, choices=[item.value for item in WorkerType])
@@ -110,6 +122,39 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(target.model_dump_json(indent=2))
         return 0
+    if args.command == "formal-readiness":
+        from hcuopt.operator.readiness import (
+            FormalReadinessAuditor,
+            FormalReadinessError,
+            load_formal_readiness_manifest,
+        )
+
+        try:
+            manifest = load_formal_readiness_manifest(args.manifest)
+            report = FormalReadinessAuditor().evaluate(
+                manifest,
+                args.repository_root,
+            )
+        except (OSError, FormalReadinessError, ValueError) as exc:
+            print(f"formal readiness failed: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(report.model_dump_json(indent=2))
+        else:
+            print(
+                "\n".join(
+                    (
+                        f"M2a Formal readiness: {report.decision.upper()}",
+                        f"Audit: {report.audit_id}",
+                        f"Verified repository evidence: {report.verified_evidence_count}",
+                        "Blockers: "
+                        + (", ".join(report.blocker_codes) or "none"),
+                        "HCU accessed: false; Formal Round created: false",
+                        "Profile registration: disabled; automatic release: false",
+                    )
+                )
+            )
+        return 0 if report.decision == "ready_for_window_authorization" else 2
     if args.command == "worker":
         from hcuopt.adapters.real_profile import (
             build_nmz36_framework_smoke_registry,
