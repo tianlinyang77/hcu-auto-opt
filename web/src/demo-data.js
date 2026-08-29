@@ -7,6 +7,21 @@ const hash = (seed) => {
   return `sha256:${state.toString(16).padStart(8, "0").repeat(8)}`;
 };
 
+export async function loadDemoStartIntent(intentId) {
+  const response = await fetch("/fixtures/demo-start-intent.json", {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`demo_fixture_${response.status}: Synthetic StartIntent fixture unavailable`);
+  }
+  const intent = await response.json();
+  if (intent.intent_id !== intentId) {
+    throw new Error("demo_intent_mismatch: 当前 Round 与 Synthetic StartIntent 不匹配");
+  }
+  return intent;
+}
+
 export const demoDashboard = {
   mode: "demo",
   identity: {
