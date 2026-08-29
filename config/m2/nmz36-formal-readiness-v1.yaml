@@ -56,15 +56,15 @@ gates:
   - code: formal_authority_persistence
     owner: D
     status: hold
-    summary: Isolated non-Synthetic Formal Context, Barrier, Reveal, FWER, and EvidenceBundle Contracts and tables now exist without weakening the Scripted tables.
-    required_action: Keep this gate on hold until production Repository writers, independent Formal Finalizer, Signoff integration, and crash-recovery paths persist and reread these records end to end.
+    summary: Isolated non-Synthetic Formal Context, Barrier, Reveal, FWER, and EvidenceBundle tables now have idempotent Repository writers and terminal transaction tests without weakening Scripted tables.
+    required_action: Keep this gate on hold until the protected writer/finalizer path passes PostgreSQL 17 CI and is connected to separately approved Formal Start and Signoff/Outbox flows.
     evidence:
       - path: src/hcuopt/contracts/m2_formal_authority_v1.py
         sha256: sha256:f8762974dab9a75f59829173692a39ad3e412c688e51304e7bba04d951871f7e
         digest_mode: text_lf
         evidence_type: formal_authority_context_contract
       - path: src/hcuopt/evaluation/m2_formal_authority.py
-        sha256: sha256:e8601232c05e7e50acffc5abefa5218f5437ba0094c0e20798e49deee54dc00e
+        sha256: sha256:83f094702b979f40a282d6ac95f1ed12aa7960f226ffba0af92bc652c9dd3c3e
         digest_mode: text_lf
         evidence_type: formal_persistence_binding_contracts
       - path: src/hcuopt/storage/sql/0012_m2_formal_authority.sql
@@ -72,19 +72,27 @@ gates:
         digest_mode: text_lf
         evidence_type: isolated_formal_authority_schema
       - path: tests/integration/test_m2_formal_authority_postgres.py
-        sha256: sha256:8479adfba694225878fa6bf22c42e2795ce278627f3d81957711b08757ef5992
+        sha256: sha256:f3af8841981300818709e6cf28e466361559ff6bd39399f5e04a2d03758316e0
         digest_mode: text_lf
-        evidence_type: formal_authority_postgres_fail_closed_tests
+        evidence_type: formal_authority_writer_finalizer_postgres_tests
   - code: formal_evidence_finalizer
     owner: D
-    status: block
-    summary: The current M2 Finalizer rebuilds only synthetic Scripted EvidenceBundle objects.
-    required_action: Implement a Formal evidence reader/finalizer with protected evidence roots, independent hash reread, identity isolation, and no Producer verdict authority.
+    status: hold
+    summary: A non-Synthetic Formal Finalizer now rereads protected local evidence, rehashes the complete index, isolates Producer roles from the D verifier, and rebuilds zero-promotion and Holdout EvidenceBundles.
+    required_action: Keep this gate on hold until PostgreSQL 17 validates both terminal paths and production Formal Start, Signoff, signed decision Artifact, and crash-recoverable Outbox remain separately gated.
     evidence:
-      - path: src/hcuopt/evaluation/m2_finalizer.py
-        sha256: sha256:519124ca57edefeb52651b9461c47a9c97cc601eeb5f26785c6447c39b3e8d4b
+      - path: src/hcuopt/evaluation/m2_formal_finalizer.py
+        sha256: sha256:8cec1ae09e7c6ca31e0f122248862222b83c846bd5dcbd2f0268e3d80efa0889
         digest_mode: text_lf
-        evidence_type: scripted_only_round_finalizer
+        evidence_type: protected_formal_round_finalizer
+      - path: src/hcuopt/storage/repository.py
+        sha256: sha256:06940818c45b8b891c635fa59bf4d3af9e63c00749541f86b52c3ab7c1dba7bf
+        digest_mode: text_lf
+        evidence_type: formal_repository_terminal_transactions
+      - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql
+        sha256: sha256:90ef20b8b76b530f0752e225415a8f8e744de3123cda962f709965e32fbbe450
+        digest_mode: text_lf
+        evidence_type: formal_search_output_family_atomicity
   - code: formal_measurement_adapter
     owner: B
     status: block
@@ -189,7 +197,7 @@ gates:
 reviews:
   - owner: A
     decision: pending
-    reason: Formal Profile, compiler, StartIntent, persistence, and Signoff paths are not implemented.
+    reason: Formal Profile, compiler, StartIntent, and Signoff/Outbox paths are not implemented.
     evidence: null
   - owner: B
     decision: pending
@@ -201,7 +209,7 @@ reviews:
     evidence: null
   - owner: D
     decision: pending
-    reason: Formal persistence foundations exist, but production writers, the independent evidence reader/finalizer, and the Signoff evidence path remain open.
+    reason: Formal writers and the protected independent Finalizer exist, but PostgreSQL 17 CI, production invocation, and the Signoff evidence path remain open.
     evidence: null
 
 window_authorization: not_requested

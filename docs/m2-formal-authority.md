@@ -7,8 +7,9 @@
 EvidenceBundle 时，数据库有一个不会把真实证据混进 `synthetic=true` 表、也不会放宽现有
 Scripted 约束的落点。
 
-本切片仍然只是 Formal Authority 的持久化地基，不提供 Formal Round 启动能力，不访问 HCU，
-不注册 Real Adapter Profile，不实现 Formal Finalizer、Signoff 或自动发布。
+`0012` 先提供持久化地基，`0013` 与受保护 Formal Finalizer 再补齐无 HCU 的生产写入和终局
+验证路径。当前仍不提供 Formal Round 启动能力，不访问 HCU，不注册 Real Adapter Profile，
+不实现 Signoff、Outbox 或自动发布。
 
 ## 为什么不复用 0009 表
 
@@ -28,6 +29,10 @@ FWER 和 EvidenceBundle 都要求 `synthetic=true`。直接把这些约束改成
 
 五张表都固定 `run_mode=formal`、`synthetic=false`、
 `automatic_release_allowed=false`，并通过数据库触发器拒绝 UPDATE/DELETE。
+
+`0013_m2_formal_finalizer.sql` 进一步要求 Search Barrier 在同一事务中把晋级结果对应的
+`holdout_family_hash` 写回 Round：有晋级成员时必须存在 Family Hash，零晋级时必须为空。
+Holdout Barrier 只能继续引用这一个 Search 输出 Family。
 
 ## 权威父链
 
@@ -60,11 +65,35 @@ Context 写入后，数据库仍允许 Round 正常推进状态和写入 Reveal 
   Search Barrier、Reveal、Holdout Barrier、FWER、Plan Hash 和 Evidence Hash；零晋级路径则
   只能引用 `no_promotable_candidate` Search Barrier。
 
+## Repository 与独立 Finalizer
+
+`PostgresRepository` 提供五个 Formal 写入边界：
+
+1. `record_formal_authority_context()`：锁定父 Round 后幂等封存 Context；
+2. `record_formal_barrier()`：校验 Candidate/Artifact 身份，Search 输出 Family 与 Barrier
+   在同一事务冻结，Holdout 只能引用同 Context 的 Search 和 Reveal；
+3. `record_formal_holdout_reveal()`：把 Family、Plan、Reveal Lease、fencing token 和
+   Reveal Evidence 同一事务写入 Round 与 append-only 表；
+4. `record_formal_multiple_comparison()`：重算 Bonferroni FWER 协议和 Result Hash；
+5. `finalize_formal_search_round()`：从数据库重新读取 Context、Barrier、Reveal、FWER 和
+   Budget Ledger，重新读取受保护原始 Evidence 并重算 SHA-256，成功后只进入
+   `awaiting_signoff`。
+
+Finalizer 使用 `m2a-formal-evidence-index-v1`。每条 Evidence 都声明 Producer Role、Producer
+ID/Hash、Retention Owner 和访问确认时间。Barrier、FWER 等 D 结论必须由 Context 中锁定的
+独立 Verifier 产生；Measurement Producer 不能冒充 D。正式本地 Reader 只接受受保护根目录
+下的绝对 `file:` URI，在 POSIX 上使用 `openat/O_NOFOLLOW`，拒绝远程 URI、路径越界、符号
+链接、非普通文件、超限文件、读取期间身份变化和 Hash 漂移。
+
+终局 Bundle 的结论范围固定为 `formal_single_operation_only`，并显式声明它不是模型、服务或
+端到端性能结论。无论是否存在推荐 Candidate，`automatic_release_allowed` 始终为 `false`。
+
 ## 验证范围
 
-单元测试验证不可变 Contract、Context/Payload 重哈希、Formal/Scripted 隔离、本地 Evidence
-URI 和 Family 绑定。PostgreSQL 集成测试验证真实迁移及数据库 fail-closed 行为，包括并发写入
-同一 Round/Phase 时只有一个 Barrier 成功。
+单元测试验证不可变 Contract、Context/Payload 重哈希、Formal/Scripted 隔离、受保护本地
+Evidence Root、Producer/Verifier 角色隔离、Family 绑定、零晋级和 Holdout 两条 Bundle 重建。
+PostgreSQL 集成测试验证真实迁移、幂等/并发写入、部分写入恢复、Budget 未终结、Evidence
+篡改以及最终只进入 `awaiting_signoff` 的 fail-closed 行为。
 
 Windows 本地没有 PostgreSQL 和 Docker 时，集成测试会显式 skip，不能把 skip 解释成数据库
 通过。正式数据库结论以 GitHub CI 的 PostgreSQL 17 Job 为准。
@@ -73,20 +102,20 @@ Windows 本地没有 PostgreSQL 和 Docker 时，集成测试会显式 skip，�
 
 ```bash
 ruff check .
-pytest tests/unit/test_m2_formal_authority.py tests/unit/test_m2_migration.py -q
+pytest tests/unit/test_m2_formal_authority.py \
+  tests/unit/test_m2_formal_finalizer.py tests/unit/test_m2_migration.py -q
 HCUOPT_DATABASE_URL=postgresql://hcuopt:hcuopt@127.0.0.1:5432/hcuopt \
   pytest tests/integration/test_m2_formal_authority_postgres.py -m postgres -q
 ```
 
-## 尚未实现
+## 仍然保持 HOLD 的部分
 
-完成本切片后，`formal_authority_persistence` 只能从 `block` 降为 `hold`，不能标记 `pass`。
-后续仍需：
+完成本切片后，`formal_authority_persistence` 和 `formal_evidence_finalizer` 都只能保持
+`hold`，不能标记 `pass`。后续仍需：
 
-1. 生产 Repository writer 与幂等恢复路径；
-2. 独立读取受保护原始证据并重算 Hash 的 Formal Finalizer；
-3. Formal Round Signoff、签名决策 Artifact 与 crash-recoverable Outbox；
-4. A/B/C/D 审核后的 Real Profile、Formal Plan Compiler 和 Formal StartIntent；
-5. 项目所有者对精确主机、设备、时间窗、Candidate Family Hash 和预算的单独授权。
+1. Formal Round Signoff、签名决策 Artifact 与 crash-recoverable Outbox；
+2. A/B/C/D 审核后的 Real Profile、Formal Plan Compiler 和 Formal StartIntent；
+3. 在生产调用路径中配置受保护 Evidence Root，并通过 PostgreSQL 17 的恢复/并发验收；
+4. 项目所有者对精确主机、设备、时间窗、Candidate Family Hash 和预算的单独授权。
 
 在这些条件全部通过前，readiness 继续是 `HOLD`，Formal Round creation 和自动发布继续关闭。
