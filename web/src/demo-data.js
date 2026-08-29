@@ -22,6 +22,25 @@ export async function loadDemoStartIntent(intentId) {
   return intent;
 }
 
+export async function loadDemoCandidateEvidence(roundId) {
+  const response = await fetch("/fixtures/demo-candidate-evidence.json", {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `demo_fixture_${response.status}: Synthetic Candidate evidence fixture unavailable`,
+    );
+  }
+  const workspace = await response.json();
+  if (workspace.round_id !== roundId) {
+    throw new Error(
+      "demo_round_mismatch: 当前 Round 与 Synthetic Candidate evidence 不匹配",
+    );
+  }
+  return workspace;
+}
+
 export const demoDashboard = {
   mode: "demo",
   identity: {

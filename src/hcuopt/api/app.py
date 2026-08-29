@@ -30,6 +30,7 @@ from hcuopt.contracts.m2 import (
     SearchRoundView,
 )
 from hcuopt.contracts.operator_v1 import (
+    OperatorCandidateEvidenceWorkspace,
     OperatorHotspotView,
     OperatorProfileDescriptor,
     OperatorRoundReport,
@@ -522,6 +523,16 @@ def create_app(
         request: Request,
     ) -> OperatorRoundSummary:
         return read_models.summary(round_id, repo(request))
+
+    @application.get(
+        "/v1/operator/search-rounds/{round_id}/candidate-evidence",
+        response_model=OperatorCandidateEvidenceWorkspace,
+    )
+    def get_operator_candidate_evidence(
+        round_id: UUID,
+        request: Request,
+    ) -> OperatorCandidateEvidenceWorkspace:
+        return read_models.candidate_evidence(round_id, repo(request))
 
     @application.get(
         "/v1/operator/search-rounds/{round_id}/report",

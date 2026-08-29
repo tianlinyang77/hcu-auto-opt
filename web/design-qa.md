@@ -1,63 +1,61 @@
-# UI-2 Product Design QA
+# UI-3 Product Design QA
 
 ## Comparison target
 
-- Source visual truth: `qa/ui1-implementation-preview-final.png` (the approved UI-1 workspace chrome and visual system).
-- Implementation: `qa/ui2-implementation-desktop-pass2.png`.
-- Combined full-view comparison: `qa/ui2-comparison-desktop.png`.
-- Desktop viewport: 1440 × 1000 CSS px, in-app browser; captured implementation pixels: 1440 × 799 because browser chrome is excluded.
-- Source pixels: 1265 × 712. For the combined comparison, the source was proportionally normalized to 1420 × 799 and placed beside the 1440 × 799 implementation with a 16 px divider.
-- Mobile evidence: `qa/ui2-implementation-mobile-pass2.png`.
-- Mobile viewport: 390 × 844 CSS px; captured content pixels: 390 × 785 because browser chrome is excluded.
-- API-error evidence: `qa/ui2-implementation-api-error.png`.
-- State: explicit Synthetic demo, finalized durable StartIntent with three bound Candidate members; API 404 and retry recovery were also exercised.
+- Source visual truth: `qa/ui3-source-ui2-desktop-1440x1000.png` (approved UI-2 workspace chrome and visual system captured at the same viewport).
+- Implementation: `qa/ui3-implementation-desktop-candidate-pass1.png`.
+- Combined full-view comparison: `qa/ui3-comparison-desktop.png`.
+- Desktop viewport and captured pixels: 1440 × 1000 CSS px at device scale 1; source and implementation are both 1440 × 1000 pixels.
+- Mobile evidence: `qa/ui3-implementation-mobile-correctness-pass1.png` and `qa/ui3-implementation-mobile-correctness-detail-pass1.png`.
+- Mobile viewport and captured pixels: 390 × 844 CSS px at device scale 1; both captures are 390 × 844 pixels.
+- Focused Build failure evidence: `qa/ui3-implementation-desktop-build-failed-pass1.png`.
+- Focused Correctness lock evidence: `qa/ui3-implementation-desktop-correctness-locked-pass1.png`.
+- Explicit API-error evidence: `qa/ui3-implementation-api-error.png`.
+- State: explicit Synthetic demo with three frozen candidates, two immutable Build Artifacts, one immutable Build failure, and Correctness intentionally unavailable until Search Barrier authority exists.
 
-The source and implementation are different workflow states, so this is a design-system continuity comparison rather than a claim of pixel-identical content. The same desktop theme, workspace anatomy, typography, density, borders, radii, icons, status colors, and trust-boundary treatment are compared.
+The source and implementation are adjacent workflow slices, so the comparison verifies design-system continuity rather than pixel-identical content. Both artifacts use the same desktop viewport, theme, modal anatomy, typography, density, borders, radii, icon family, semantic colors, and trust-boundary treatment.
 
 ## Findings
 
 No actionable P0, P1, or P2 findings remain.
 
-- Fonts and typography: Noto Sans SC Variable remains the Chinese/interface font. JetBrains Mono Variable is limited to IDs, hashes, timestamps, codes, versions, and machine states. Heading weight, 9–12 px evidence copy, line height, truncation, and mixed Chinese/English hierarchy match the approved UI-1 density.
-- Spacing and layout rhythm: the implementation keeps the same modal frame, 1 px borders, 7–12 px radii, 12–20 px gaps, compact status banner, two-column desktop evidence grid, and scroll-contained body. The 390 px view collapses to one column without horizontal overflow.
-- Colors and visual tokens: the existing dark surfaces, cyan Authority labels, mint completed states, amber locked boundary, purple Synthetic badge, and red API-error state are reused. State meaning is reinforced with text and Phosphor icons rather than color alone.
-- Image and asset quality: no new raster artwork was required. The existing product mark remains unchanged behind the modal, and all visible workflow symbols use the existing Phosphor icon family. No inline SVG, emoji, CSS illustration, or placeholder asset was introduced.
-- Copy and content: the screen explains the durable Start sequence, actor/idempotency identity, Plan Authority, Candidate binding, backend safe error, and immutable release boundary. It explicitly says that UI-2 does not call Start, Reconcile, Cancel, or Signoff and keeps `automatic_release_allowed=false` visible.
-- Accessibility and behavior: the workspace is an ARIA modal with a named heading, semantic buttons and description lists, focus-visible styles inherited from UI-0/UI-1, reduced-motion support, visible loading/error/retry states, and a labelled close control. The background document is scroll-locked while the workspace is open.
+- Fonts and typography: Noto Sans SC Variable remains the Chinese/interface font, with JetBrains Mono Variable reserved for IDs, Hashes, timestamps, codes, versions, and machine states. The 8–13 px evidence text, heading weights, line heights, truncation, and mixed Chinese/English hierarchy remain consistent with UI-2.
+- Spacing and layout rhythm: the implementation reuses the approved full-screen workspace, 1 px borders, 7–12 px radii, compact 8–20 px spacing, summary strip, three-step evidence rail, and two-column desktop body. At 390 px it collapses to one column with one internal vertical scroll region and no horizontal overflow.
+- Colors and visual tokens: existing dark surfaces, cyan Authority labels, mint completed states, amber locked boundary, purple Synthetic badge, and red failure/API-error states are reused without adding a second palette. Text and Phosphor icons reinforce every semantic color.
+- Image and asset quality: no new raster artwork was required. The existing product mark stays unchanged behind the modal, and all visible workflow symbols use the existing Phosphor family. No inline SVG, emoji, CSS illustration, gradient, or placeholder asset was introduced.
+- Copy and content: the workspace explains Source Package lineage, Candidate/Baseline/Manifest Hashes, replacement point, optimization intent, Artifact or immutable Build failure, and the exact reason Correctness is locked. It explicitly states that Candidate state is not evidence and keeps `formal_signoff_allowed=false` and automatic release `false` visible.
+- Accessibility and behavior: the workspace is an ARIA modal with named stage buttons, listbox/options, semantic headings and description lists, labelled close/retry/export controls, focus-visible styles, reduced-motion support, visible loading/empty/error/retry states, and body scroll locking.
 
 ## Full-view and focused evidence
 
-- Full-view comparison: `qa/ui2-comparison-desktop.png` confirms that the approved UI-1 workspace header, progress rail, status banner, evidence cards, compact typography, and trust-state colors carry into UI-2 without a second visual language.
-- Authority and Candidate binding details remain legible in the original 2876 × 799 combined image, so a separate desktop crop was not needed. The full-resolution evidence shows hash truncation, two-column labels, member binding states, and 1 px card boundaries.
-- Responsive focus: `qa/ui2-implementation-mobile-pass2.png` confirms the five-step rail, finalized summary, two-column fact pairs, truncated long Authority strings, one internal scroll region, and no horizontal overflow at 390 px.
-- Failure focus: `qa/ui2-implementation-api-error.png` confirms that the backend error code/message remain visible, no demo fallback is substituted, and retry is the only primary action.
+- Full-view comparison: `qa/ui3-comparison-desktop.png` shows the approved UI-2 header, status color language, card density, typography, footer, and trust-boundary treatment carried into UI-3 at the same 1440 × 1000 viewport.
+- Build focus: `qa/ui3-implementation-desktop-build-failed-pass1.png` confirms that a failure code and immutable failure Hash replace the Artifact without ambiguous mixed success/failure signals.
+- Correctness focus: `qa/ui3-implementation-desktop-correctness-locked-pass1.png` confirms that a Build failure does not become a Correctness failure and that the missing Search Barrier remains visibly locked.
+- Responsive focus: `qa/ui3-implementation-mobile-correctness-pass1.png` confirms the 2 × 2 summary strip, compact stage rail, candidate list, and fixed footer at 390 × 844. `qa/ui3-implementation-mobile-correctness-detail-pass1.png` confirms that the evidence detail and safety boundary remain reachable through the single internal scroll region.
+- Failure focus: `qa/ui3-implementation-api-error.png` confirms that the original GET failure remains visible, retry is the only primary action, and no Synthetic Authority is silently substituted.
 
 ## Comparison history
 
-### Pass 1 — blocked
+### Pass 1 — passed
 
-- [P2] The mobile workspace initially exposed both the page scrollbar and the modal body scrollbar, reducing usable width to roughly 375 px and making the audit feel nested inside the dashboard.
-  - Fix: the StartIntent workspace now locks background body scrolling for its lifetime and restores it on close.
-- Validation after the fix showed the dialog using the full 390 px viewport with one internal scroll region.
-
-### Pass 2 — passed
-
-- Re-captured desktop and mobile finalized states after scroll locking.
-- Re-captured the explicit API-error state by making the Synthetic fixture unavailable, restored the fixture, and verified that `重新读取` returned to the finalized Authority.
-- Browser console warning/error result after finalized, close/reopen, error, and retry flows: none.
-- No remaining P0/P1/P2 visual or interaction finding.
+- No P0/P1/P2 visual mismatch was found in the same-viewport full comparison.
+- Candidate selection, Candidate/Build/Correctness stage switching, the Build-failure branch, the Correctness-locked branch, mobile scrolling, explicit GET failure, retry recovery, sidebar direct entry, and workspace close/reopen all worked.
+- No visual fix was required, so a second comparison loop was not necessary.
+- Browser console warnings/errors after a clean reload and normal interaction flow: none. The forced 404 used only to capture the explicit API-error state was expected and recovered after the fixture was restored.
 
 ## Primary interactions tested
 
-- Open the current Round's StartIntent from the dashboard CTA.
-- Close the workspace and reopen it from the `启动审计` sidebar entry.
-- Read the five durable Start steps, immutable identifiers, Plan Authority, service identity, and three Candidate member bindings.
-- Force a GET failure, verify the original safe error code/message, restore the Authority, and recover with `重新读取`.
-- Repeat the finalized view at 390 × 844 and verify a single scroll region without horizontal overflow.
-- Check browser console warnings and errors after all interactions.
+- Open UI-3 from the dashboard `查看候选证据` action.
+- Open the same workspace directly from `候选管理`, `构建中心`, and `正确性评估` navigation, preserving the requested initial stage.
+- Switch among Candidate, Build, and Correctness stages.
+- Select a built candidate and a Build-failed candidate and verify their evidence remains separate.
+- Verify that a built candidate says `等待 Search Barrier 写入权威证据` rather than inferring correctness from state.
+- Remove the Synthetic GET fixture temporarily, verify the explicit API error, restore it, and recover through `重新读取`.
+- Repeat the Correctness flow at 390 × 844 and verify a single scroll region without horizontal overflow.
+- Check browser console warnings and errors after clean reload and normal interactions.
 
 ## Follow-up polish
 
-- P3: if future Formal StartIntents contain four candidates with longer optimization descriptions, consider a compact/expanded member-row toggle. It is not needed for the current 2–4 member Scripted scope.
+- P3: when a future Formal Candidate carries a much longer optimization intent, consider an optional expanded detail line in the left candidate list. The current truncation is appropriate for the frozen 2–4 Scripted family.
 
 final result: passed

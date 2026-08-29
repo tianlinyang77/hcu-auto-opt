@@ -42,6 +42,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { loadOperatorDashboard } from "./api.js";
+import { CandidateEvidenceWorkspace } from "./CandidateEvidenceWorkspace.jsx";
 import { demoDashboard } from "./demo-data.js";
 import { PlanPreviewWorkspace } from "./PlanPreviewWorkspace.jsx";
 import { StartIntentWorkspace } from "./StartIntentWorkspace.jsx";
@@ -316,7 +317,7 @@ function BuildSummary({ round, onExplain }) {
   );
 }
 
-function CandidateTable({ round, hotspot, selectedId, onSelect }) {
+function CandidateTable({ round, hotspot, selectedId, onSelect, onOpenEvidence }) {
   const packages = new Map(
     (hotspot?.candidate_packages || []).map((item) => [item.candidate_id, item]),
   );
@@ -324,7 +325,9 @@ function CandidateTable({ round, hotspot, selectedId, onSelect }) {
     <section className="candidate-section">
       <div className="section-heading">
         <h2>Candidate Family（{round.candidate_count}）</h2>
-        <Info size={18} />
+        <button className="outline-button candidate-evidence-cta" type="button" onClick={onOpenEvidence}>
+          <FileText size={17} />查看候选证据
+        </button>
       </div>
       <div className="candidate-table-wrap">
         <table className="candidate-table">
@@ -556,6 +559,8 @@ export function App() {
   const [modal, setModal] = useState(null);
   const [plannerOpen, setPlannerOpen] = useState(false);
   const [startAuditOpen, setStartAuditOpen] = useState(false);
+  const [candidateEvidenceOpen, setCandidateEvidenceOpen] = useState(false);
+  const [candidateEvidenceStage, setCandidateEvidenceStage] = useState("candidate");
 
   const load = async (useDemo = demoMode) => {
     setLoading(true);
@@ -627,6 +632,7 @@ export function App() {
     if (key === "plan") {
       setActiveNavigation(key);
       setStartAuditOpen(false);
+      setCandidateEvidenceOpen(false);
       setPlannerOpen(true);
       return;
     }
@@ -642,7 +648,16 @@ export function App() {
       }
       setActiveNavigation(key);
       setPlannerOpen(false);
+      setCandidateEvidenceOpen(false);
       setStartAuditOpen(true);
+      return;
+    }
+    if (["candidates", "build", "correctness"].includes(key)) {
+      setActiveNavigation(key);
+      setPlannerOpen(false);
+      setStartAuditOpen(false);
+      setCandidateEvidenceStage(key === "candidates" ? "candidate" : key);
+      setCandidateEvidenceOpen(true);
       return;
     }
     setModal({
@@ -686,6 +701,7 @@ export function App() {
         onOpenPlanner={() => {
           setActiveNavigation("plan");
           setStartAuditOpen(false);
+          setCandidateEvidenceOpen(false);
           setPlannerOpen(true);
         }}
       />
@@ -717,6 +733,7 @@ export function App() {
                 onClick={() => {
                   setActiveNavigation("start");
                   setPlannerOpen(false);
+                  setCandidateEvidenceOpen(false);
                   setStartAuditOpen(true);
                 }}
               >
@@ -729,6 +746,7 @@ export function App() {
               onClick={() => {
                 setActiveNavigation("plan");
                 setStartAuditOpen(false);
+                setCandidateEvidenceOpen(false);
                 setPlannerOpen(true);
               }}
             >
@@ -802,6 +820,13 @@ export function App() {
                     current === candidateId ? null : candidateId,
                   )
                 }
+                onOpenEvidence={() => {
+                  setActiveNavigation("candidates");
+                  setPlannerOpen(false);
+                  setStartAuditOpen(false);
+                  setCandidateEvidenceStage("candidate");
+                  setCandidateEvidenceOpen(true);
+                }}
               />
               <EvidencePanel
                 round={round}
@@ -860,6 +885,18 @@ export function App() {
           demoMode={demoMode}
           onClose={() => {
             setStartAuditOpen(false);
+            setActiveNavigation("round");
+          }}
+        />
+      )}
+      {candidateEvidenceOpen && round && (
+        <CandidateEvidenceWorkspace
+          round={round}
+          demoMode={demoMode}
+          initialCandidateId={selectedCandidateId}
+          initialStage={candidateEvidenceStage}
+          onClose={() => {
+            setCandidateEvidenceOpen(false);
             setActiveNavigation("round");
           }}
         />
