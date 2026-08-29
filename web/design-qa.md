@@ -1,75 +1,66 @@
-# UI-0 Product Design QA
+# UI-1 Product Design QA
 
-## Comparison Target
+## Comparison target
 
-- Source visual truth: `C:\Users\17920\.codex\generated_images\01a04139-9607-7153-ba38-959c74258e17\exec-76855afd-c71a-49d3-9dab-ee2c4ca2dc4c.png`
-- Review copy: `qa/source-visual.jpg`
-- Browser-rendered implementation: `qa/implementation-desktop-pass2.png`
-- Desktop full-view comparison: `qa/comparison-desktop-pass2.jpg`
-- Desktop focused comparison: `qa/comparison-desktop-focus-pass2.jpg`
-- Mobile before/after evidence: `qa/implementation-mobile-pass1.png`, `qa/implementation-mobile-pass2.png`
-- Mobile navigation/dialog evidence: `qa/implementation-mobile-nav-pass2.png`, `qa/implementation-mobile-dialog-pass2.png`
-- API unavailable state: `qa/implementation-api-error-pass2.png`
+- Source visual truth: `qa/ui1-source-dashboard.png`
+- Implementation: `qa/ui1-implementation-preview-final.png`
+- Combined comparison: `qa/ui1-comparison-desktop.png`
+- Desktop viewport: 1280 × 720 CSS px, browser DPR 1.5
+- Source pixels: 1265 × 712
+- Implementation pixels: 1265 × 712
+- Mobile evidence: `qa/ui1-implementation-mobile.png`, `qa/ui1-implementation-mobile-candidates.png`, `qa/ui1-implementation-mobile-preview.png`
+- Mobile viewport: 390 × 844 CSS px; captured content pixels: 375 × 755 because the browser chrome and scrollbar are excluded
+- State: Synthetic demo, pass Preview; blocked, expired, and API-error fixtures were also exercised
+- Normalization: source and implementation were captured in the same in-app browser, theme, desktop viewport, CSS scale, and browser session. UI-0 is the selected visual system rather than a pixel-identical screen, so the comparison evaluates design-system continuity and core workflow quality.
 
-## Normalization
+## Findings
 
-- Source pixels: 1487 x 1058.
-- Desktop CSS viewport: 1488 x 1058; browser device pixel ratio: 1.5.
-- Browser-rendered desktop screenshot: 1488 x 826. The in-app browser captured its visible surface, so the source was padded by one pixel on the right and cropped to the same top 1488 x 826 region before comparison.
-- Mobile CSS viewport: 390 x 844; document client width: 375; browser-rendered screenshot: 375 x 755; device pixel ratio: 1.
-- State: dark theme, `Synthetic demo`, Round v4, Build terminal 3/3, Evidence unavailable, Formal Signoff disabled, `automatic_release_allowed=false`.
+No actionable P0, P1, or P2 findings remain.
 
-## Full-view Comparison
+- Fonts and typography: Noto Sans SC Variable remains the interface font; JetBrains Mono Variable remains limited to IDs, Hashes, timestamps, codes, and machine states. Heading weights and small-copy density match UI-0. Stable Preflight codes now have Chinese titles while the original backend message remains visible as evidence.
+- Spacing and layout rhythm: the 1280 px desktop view keeps the UI-0 1 px borders, compact 6–12 px radii, dense cards, and 18–22 px section spacing. The wizard uses the same surface hierarchy instead of introducing a second visual language.
+- Colors and tokens: the existing `--bg`, `--surface`, `--border`, cyan, mint, amber, red, and purple tokens are reused. Pass, block, expiry, Synthetic, and automatic-release-disabled states are distinguishable by icon and text as well as color.
+- Image and asset quality: the product mark is unchanged. All workflow controls use the existing Phosphor icon family; no inline SVG, CSS illustration, emoji, or placeholder asset was introduced.
+- Copy and content: the flow says what is selected, what the backend resolved, why a Preview is blocked, and that UI-1 does not call `:start`. `automatic_release_allowed=false` remains persistent.
+- Accessibility and behavior: semantic buttons, selects, radio state, pressed state, focus-visible outlines, reduced-motion handling, and 44 px mobile primary controls are present. Desktop and mobile core interactions completed without horizontal overflow.
 
-`qa/comparison-desktop-pass2.jpg` places the normalized source on the left and the browser-rendered implementation on the right. The implementation preserves the selected direction's fixed header/sidebar, nine-step phase rail, build summary, Candidate Family table, evidence rail, and Agent/Apex boundary footer.
+## Focused evidence
 
-The implementation intentionally does not copy the source visual's fictitious 22.09% result, Human/Agent provenance claims, accepted evidence, or Apex readiness. Current authority is rendered instead. This is a trust-boundary correction, not design drift.
+- Target/Profile/Hotspot selection: `qa/ui1-implementation-scope.png` confirmed labels, exact version selection, Hotspot authority, shape/dtype, and Candidate count.
+- Candidate Family and budget: `qa/ui1-implementation-mobile-candidates.png` confirmed 2–4 selection affordance, selected state, reviewer identity, immutable package Hash, read-only budget, and a visible primary action at narrow width.
+- Preview and trust boundary: `qa/ui1-implementation-preview-final.png` confirmed Chinese Preflight titles, raw backend messages, Resolved Plan Hashes, expiry, `automatic_release_allowed=false`, and the explicit no-Start boundary.
+- Failure states: `qa/ui1-implementation-preview-blocked.png` plus browser assertions confirmed block; browser assertions also confirmed `Preview 已过期` and `计划预览失败` states.
 
-## Focused Comparison
-
-`qa/comparison-desktop-focus-pass2.jpg` compares the phase rail, build summary, Candidate Family, and evidence rail at readable scale. A focused comparison was required because table typography and evidence copy were too small to judge reliably in the full-view composite.
-
-## Required Fidelity Surfaces
-
-- Fonts and typography: Noto Sans SC Variable is used for Chinese/UI text and JetBrains Mono Variable for IDs, hashes, timestamps, and machine states. Weight, wrapping, hierarchy, and truncation are stable on desktop and mobile. The 12px table treatment is intentionally denser than the visual target and is acceptable as P3 polish for a read-only operations view.
-- Spacing and layout rhythm: desktop regions align with the visual target. Mobile phase and table overflow are contained locally; the document no longer scrolls horizontally. Borders, 6-8px radii, padding, and vertical rhythm are consistent.
-- Colors and tokens: dark navy surfaces, cyan active state, mint success, amber locked state, red failure, and purple Synthetic state match the selected direction and retain readable contrast.
-- Image quality and asset fidelity: the brand mark is a real raster asset; controls use one Phosphor icon family. There are no hand-built SVGs, emoji icons, CSS drawings, or placeholder image boxes.
-- Copy and content: `Synthetic demo`, `不产生真实性能结论`, disabled signoff, false automatic release, and the Agent/Apex authority boundaries remain explicit. API failure never silently fabricates demo authority.
-
-## Interaction and Accessibility Checks
-
-- Candidate selection updates the read-only evidence panel.
-- Blocking-reason, Agent unlock, and Apex responsibility dialogs open and close.
-- Refresh preserves explicit demo authority and produces no console warnings/errors.
-- API 404 shows a dedicated unavailable state; demo mode begins only after the user chooses it.
-- Mobile navigation opens and closes; the blocking dialog stays inside the viewport.
-- Visible mobile top-bar controls measure 44 x 44 CSS px.
-- Focus-visible outlines, semantic buttons, table headings, dialog role, and reduced-motion rules are present.
-
-## Comparison History
+## Comparison history
 
 ### Pass 1 — blocked
 
-- [P1] Mobile document overflow. At a 390px viewport, document client width was 375px but scroll width was 821px. Candidate Family and Evidence inherited an 806px min-content grid track, so the whole page scrolled horizontally.
-- [P2] Visible mobile header controls were 34 x 34px, below the intended touch target.
+- [P2] Step transitions preserved the internal scroll offset, so the Preview status banner could open above the visible area.
+  - Fix: added a workspace-body ref and reset its scroll position whenever the wizard step changes.
+- [P2] Candidate and Preview primary actions could fall below the 720 px desktop fold.
+  - Fix: made the full-width action row sticky inside the scrollable workspace and changed it to an opaque surface so underlying evidence does not visually leak through.
+- [P3] Raw English Preflight messages were technically correct but slowed Chinese scanning.
+  - Fix: added stable Chinese titles keyed by backend check code and retained the raw backend message below each title.
 
-### Fixes
+### Pass 2 — passed
 
-- Added `min-width: 0` to direct `dashboard-grid` children, preserving the 800px Candidate table as an internal scroll surface instead of expanding the document.
-- Increased visible mobile icon buttons to 44 x 44px.
+- Re-captured desktop pass, blocked, mobile selection, and mobile Preview states.
+- Verified the status banner starts at the top after each transition.
+- Verified primary actions stay reachable without hiding the persistent trust-boundary footer.
+- Browser console warning/error result: none.
+- No remaining P0/P1/P2 visual or interaction finding.
 
-### Pass 2 — post-fix evidence
+## Primary interactions tested
 
-- Mobile document client width and scroll width are both 375px.
-- Candidate table viewport is 345px with an internal 805px scroll surface.
-- Desktop document client width and scroll width are both 1488px.
-- Visible mobile menu and notification controls are 44 x 44px.
-- Desktop and mobile browser console checks returned no warnings or errors.
-- No actionable P0, P1, or P2 findings remain.
+- Open from dashboard CTA, sidebar, and top context affordance.
+- Select registered Target, Workload, Measurement Profile, and Hotspot.
+- Select/deselect Candidate Package inputs and enforce the 2–4 bound.
+- Generate pass, block, expired, and error Preview states.
+- Read Resolved Plan, budget, expiry, hashes, and release boundary.
+- Complete the same pass flow at 390 × 844 without horizontal overflow.
 
-## Follow-up Polish
+## Follow-up polish
 
-- [P3] If real Operator rows become substantially longer, revisit the 12px table type scale and column density with real content before increasing font size globally.
+- P3: when multiple production Profiles are registered, consider adding search inside the native selects. This is not needed for the current single Scripted catalog.
 
 final result: passed
