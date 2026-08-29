@@ -23,9 +23,11 @@ def test_ui3_demo_candidate_evidence_matches_operator_contract() -> None:
         "available",
         "failed",
     ]
-    assert {item.correctness.status for item in workspace.candidates} == {
-        "not_available"
-    }
+    assert [item.correctness.status for item in workspace.candidates] == [
+        "passed",
+        "passed",
+        "not_available",
+    ]
     assert workspace.synthetic is True
     assert workspace.formal_signoff_allowed is False
     assert workspace.automatic_release_allowed is False

@@ -38,11 +38,18 @@ from hcuopt.contracts.operator_v1 import (
     TargetOperatorProfileRefs,
     WorkloadOperatorProfileRefs,
 )
-from hcuopt.domain.enums import RoundCandidateState
+from hcuopt.domain.enums import RoundCandidateState, RoundTerminalReason
 from hcuopt.domain.errors import Conflict, SourceArtifactError
-from hcuopt.evaluation.m2_models import BarrierMemberResult
+from hcuopt.evaluation.m2_authority import HoldoutRevealResult
+from hcuopt.evaluation.m2_models import (
+    BarrierMemberResult,
+    RoundCandidateEvidence,
+    RoundEvidenceBundle,
+)
 from hcuopt.evaluation.m2_statistics import (
     ScriptedCandidateStatisticsInput,
+    bonferroni_fwer,
+    close_scripted_holdout_barrier,
     close_scripted_search_barrier,
 )
 from hcuopt.measurement.evidence import canonical_json_bytes
@@ -218,6 +225,9 @@ class MemoryStartRepository(PreviewRepository):
         self.round: dict | None = None
         self.members: dict[int, dict] = {}
         self.barriers: list[dict] = []
+        self.holdout_reveal: dict | None = None
+        self.multiple_comparison: dict | None = None
+        self.evidence_bundle: dict | None = None
         self.candidate_owner: UUID | None = None
 
     def assert_operator_candidate_ids_available(
@@ -382,9 +392,9 @@ class MemoryStartRepository(PreviewRepository):
             "budget_reservations": [],
             "budget_ledger": [],
             "barriers": self.barriers,
-            "holdout_reveal": None,
-            "multiple_comparison": None,
-            "evidence_bundle": None,
+            "holdout_reveal": self.holdout_reveal,
+            "multiple_comparison": self.multiple_comparison,
+            "evidence_bundle": self.evidence_bundle,
             "automatic_release_allowed": False,
         }
 
@@ -392,11 +402,16 @@ class MemoryStartRepository(PreviewRepository):
         self, round_id
     ):  # type: ignore[no-untyped-def]
         assert self.round is not None and self.round["round_id"] == round_id
+        terminal = self.round["state"] in {"scripted_completed", "cancelled"}
         return {
             "round": self.round,
             "consistent": True,
-            "next_action": "await_build_terminals",
-            "reason": "Candidate Family is frozen; wait for every Build terminal",
+            "next_action": "none" if terminal else "await_build_terminals",
+            "reason": (
+                "Scripted Round is terminal"
+                if terminal
+                else "Candidate Family is frozen; wait for every Build terminal"
+            ),
             "automatic_release_allowed": False,
         }
 
@@ -719,6 +734,9 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
         candidate_evidence = client.get(
             f"/v1/operator/search-rounds/{first.round_id}/candidate-evidence"
         )
+        evaluation_evidence = client.get(
+            f"/v1/operator/search-rounds/{first.round_id}/evaluation-evidence"
+        )
         report = client.get(
             f"/v1/operator/search-rounds/{first.round_id}/report"
         )
@@ -746,6 +764,17 @@ def test_operator_start_finalizes_and_replays_one_scripted_intent(
     assert {
         item["correctness"]["reason"] for item in candidate_payload["candidates"]
     } == {"build_not_terminal"}
+    assert evaluation_evidence.status_code == 200
+    evaluation_payload = evaluation_evidence.json()
+    assert evaluation_payload["schema_version"] == (
+        "m2-operator-evaluation-evidence-v1"
+    )
+    assert evaluation_payload["search_status"] == "pending"
+    assert evaluation_payload["holdout_status"] == "pending"
+    assert evaluation_payload["fwer_status"] == "pending"
+    assert evaluation_payload["evidence_status"] == "pending"
+    assert evaluation_payload["real_performance_claim_allowed"] is False
+    assert evaluation_payload["automatic_release_allowed"] is False
     assert report.status_code == 200
     assert report.json()["report_status"] == "interim"
     assert report.json()["conclusion_boundary"] == (
@@ -942,6 +971,308 @@ def test_operator_candidate_evidence_uses_search_barrier_correctness_authority(
     assert workspace.candidates[1].correctness.failure_evidence_hash == _hash(
         "correctness-failed"
     )
+
+
+def test_operator_evaluation_evidence_exposes_complete_bound_authority(
+    tmp_path: Path,
+) -> None:
+    _compiler, repository, _preview, coordinator, start_request = _startable_suite(
+        tmp_path
+    )
+    started = coordinator.start(start_request, repository)
+    assert repository.round is not None
+    artifact_family_hash = _hash("evaluation-artifact-family")
+    repository.round.update(
+        state="search_barrier",
+        artifact_family_hash=artifact_family_hash,
+    )
+
+    search_members: list[BarrierMemberResult] = []
+    search_statistics: list[ScriptedCandidateStatisticsInput] = []
+    for ordinal, stored in repository.members.items():
+        artifact_id = uuid4()
+        artifact_hash = _hash(f"evaluation-artifact-{ordinal}")
+        if ordinal == 0:
+            state = RoundCandidateState.SEARCH_MEASURED
+            correctness_hash = _hash("evaluation-correctness")
+            receipt_id = uuid4()
+            failure_hash = None
+            cleanup_hash = _hash("evaluation-search-cleanup")
+            search_statistics.append(
+                ScriptedCandidateStatisticsInput(
+                    candidate_id=stored["candidate_id"],
+                    scripted_phase_receipt_id=receipt_id,
+                    correctness_evidence_hash=correctness_hash,
+                    raw_evidence_hash=_hash("evaluation-search-raw"),
+                    baseline_sample_set_hash=_hash("evaluation-search-baseline"),
+                    restart_effects=(0.09, 0.10, 0.11, 0.10),
+                    baseline_restart_means_ns=(100.0, 100.0, 100.0, 100.0),
+                    stage0_mde_ratio=0.03,
+                )
+            )
+        else:
+            state = RoundCandidateState.CORRECTNESS_FAILED
+            correctness_hash = None
+            receipt_id = None
+            failure_hash = _hash("evaluation-correctness-failed")
+            cleanup_hash = None
+        repository.members[ordinal] = {
+            **stored,
+            "state": state.value,
+            "artifact_id": artifact_id,
+            "artifact_hash": artifact_hash,
+        }
+        search_members.append(
+            BarrierMemberResult(
+                round_candidate_id=stored["round_candidate_id"],
+                candidate_id=stored["candidate_id"],
+                candidate_state=state,
+                artifact_id=artifact_id,
+                artifact_hash=artifact_hash,
+                correctness_evidence_hash=correctness_hash,
+                scripted_phase_receipt_id=receipt_id,
+                failure_evidence_hash=failure_hash,
+                budget_usage_evidence_hash=_hash(f"evaluation-search-budget-{ordinal}"),
+                cleanup_evidence_hash=cleanup_hash,
+                synthetic=True,
+            )
+        )
+
+    search = close_scripted_search_barrier(
+        round_authority=SearchRound.model_validate(
+            {key: value for key, value in repository.round.items() if key != "updated_at"}
+        ),
+        expected_candidate_ids=tuple(item.candidate_id for item in search_members),
+        members=search_members,
+        statistics=search_statistics,
+        closed_by="operator-evaluation-test",
+        closed_at=NOW,
+        idempotency_key="operator-evaluation-search-barrier",
+    )
+    promoted_id = search.barrier.promoted_candidate_ids[0]
+    promoted_member = next(
+        item for item in search.barrier.members if item.candidate_id == promoted_id
+    )
+    assert search.holdout_family_hash is not None
+
+    canonical_plan_json = '{"restart_count":4,"synthetic":true}'
+    encoded_plan = canonical_plan_json.encode("utf-8")
+    nonce_hex = "11" * 32
+    commitment = "sha256:" + hashlib.sha256(
+        bytes.fromhex(nonce_hex) + encoded_plan
+    ).hexdigest()
+    plan_hash = "sha256:" + hashlib.sha256(encoded_plan).hexdigest()
+    reveal_lease_id = uuid4()
+    execution_lease_id = uuid4()
+    reveal_payload = {
+        "schema_version": "m2a-holdout-reveal-v1",
+        "reveal_lease_id": str(reveal_lease_id),
+        "round_id": str(started.round_id),
+        "holdout_family_hash": search.holdout_family_hash,
+        "commitment": commitment,
+        "plan_hash": plan_hash,
+        "nonce_hex": nonce_hex,
+        "authorized_worker_id": "scripted-worker",
+        "execution_lease_id": str(execution_lease_id),
+        "resource_id": "synthetic-hcu-7",
+        "fencing_token": 7,
+        "authority_id": repository.round["holdout_plan_authority_id"],
+        "authority_hash": repository.round["holdout_plan_authority_hash"],
+        "revealed_at": NOW.isoformat(),
+        "synthetic": True,
+    }
+    reveal_evidence_hash = "sha256:" + hashlib.sha256(
+        canonical_json_bytes(reveal_payload)
+    ).hexdigest()
+    reveal = HoldoutRevealResult(
+        reveal_lease_id=reveal_lease_id,
+        round_id=started.round_id,
+        holdout_family_hash=search.holdout_family_hash,
+        commitment=commitment,
+        plan_hash=plan_hash,
+        canonical_plan_json=canonical_plan_json,
+        nonce_hex=nonce_hex,
+        authorized_worker_id="scripted-worker",
+        execution_lease_id=execution_lease_id,
+        resource_id="synthetic-hcu-7",
+        fencing_token=7,
+        authority_id=repository.round["holdout_plan_authority_id"],
+        authority_hash=repository.round["holdout_plan_authority_hash"],
+        reveal_evidence_hash=reveal_evidence_hash,
+        revealed_at=NOW,
+    )
+    repository.round.update(
+        state="holdout_barrier",
+        holdout_family_hash=search.holdout_family_hash,
+        holdout_plan_commitment=commitment,
+        holdout_plan_hash=plan_hash,
+        holdout_reveal_lease_id=reveal_lease_id,
+        holdout_reveal_evidence_hash=reveal_evidence_hash,
+    )
+
+    holdout_receipt_id = uuid4()
+    holdout_member = BarrierMemberResult(
+        round_candidate_id=promoted_member.round_candidate_id,
+        candidate_id=promoted_id,
+        candidate_state=RoundCandidateState.HOLDOUT_MEASURED,
+        artifact_id=promoted_member.artifact_id,
+        artifact_hash=promoted_member.artifact_hash,
+        correctness_evidence_hash=promoted_member.correctness_evidence_hash,
+        scripted_phase_receipt_id=holdout_receipt_id,
+        budget_usage_evidence_hash=_hash("evaluation-holdout-budget"),
+        cleanup_evidence_hash=_hash("evaluation-holdout-cleanup"),
+        synthetic=True,
+    )
+    holdout = close_scripted_holdout_barrier(
+        round_authority=SearchRound.model_validate(
+            {key: value for key, value in repository.round.items() if key != "updated_at"}
+        ),
+        expected_candidate_ids=(promoted_id,),
+        members=(holdout_member,),
+        closed_by="operator-evaluation-test",
+        closed_at=NOW,
+        idempotency_key="operator-evaluation-holdout-barrier",
+    )
+    holdout_statistics = ScriptedCandidateStatisticsInput(
+        candidate_id=promoted_id,
+        scripted_phase_receipt_id=holdout_receipt_id,
+        correctness_evidence_hash=promoted_member.correctness_evidence_hash,
+        raw_evidence_hash=_hash("evaluation-holdout-raw"),
+        baseline_sample_set_hash=_hash("evaluation-holdout-baseline"),
+        restart_effects=(0.12, 0.12, 0.12, 0.12),
+        baseline_restart_means_ns=(100.0, 100.0, 100.0, 100.0),
+        stage0_mde_ratio=0.03,
+    )
+    fwer = bonferroni_fwer(
+        round_authority=SearchRound.model_validate(
+            {key: value for key, value in repository.round.items() if key != "updated_at"}
+        ),
+        holdout_barrier=holdout,
+        statistics=(holdout_statistics,),
+        created_at=NOW,
+    )
+
+    holdout_by_id = {item.candidate_id: item for item in holdout.members}
+    candidate_evidence = []
+    for member in search.barrier.members:
+        holdout_item = holdout_by_id.get(member.candidate_id)
+        search_hash = (
+            search_statistics[0].raw_evidence_hash
+            if member.candidate_id == promoted_id
+            else member.failure_evidence_hash
+        )
+        assert search_hash is not None
+        candidate_evidence.append(
+            RoundCandidateEvidence(
+                round_candidate_id=member.round_candidate_id,
+                candidate_id=member.candidate_id,
+                search_member_state=member.candidate_state,
+                search_evidence_hash=search_hash,
+                holdout_member_state=(
+                    holdout_item.candidate_state if holdout_item else None
+                ),
+                holdout_evidence_hash=(
+                    holdout_statistics.raw_evidence_hash if holdout_item else None
+                ),
+                budget_evidence_hashes=(
+                    member.budget_usage_evidence_hash,
+                    *((holdout_item.budget_usage_evidence_hash,) if holdout_item else ()),
+                ),
+                cleanup_evidence_hashes=tuple(
+                    value
+                    for value in (
+                        member.cleanup_evidence_hash,
+                        holdout_item.cleanup_evidence_hash if holdout_item else None,
+                    )
+                    if value is not None
+                ),
+            )
+        )
+    round_authority = repository.round
+    evidence = RoundEvidenceBundle(
+        round_evidence_bundle_id=uuid4(),
+        round_id=started.round_id,
+        task_id=started.task_id,
+        run_mode="scripted",
+        terminal_reason=RoundTerminalReason.HOLDOUT_COMPLETED,
+        candidate_family_hash=round_authority["candidate_family_hash"],
+        artifact_family_hash=artifact_family_hash,
+        holdout_family_hash=search.holdout_family_hash,
+        search_plan_hash=round_authority["search_plan_hash"],
+        holdout_plan_commitment=commitment,
+        holdout_plan_hash=plan_hash,
+        holdout_reveal_evidence_hash=reveal_evidence_hash,
+        candidate_evidence=tuple(
+            sorted(candidate_evidence, key=lambda item: str(item.candidate_id))
+        ),
+        search_barrier_id=search.barrier.barrier_id,
+        holdout_barrier_id=holdout.barrier_id,
+        multiple_comparison_id=fwer.multiple_comparison_id,
+        budget_ledger_hash=_hash("evaluation-budget-ledger"),
+        evidence_index_uri="scripted-evidence://sha256/evaluation-index",
+        evidence_index_hash=_hash("evaluation-index"),
+        summary={
+            "performance_conclusion": "not_measured",
+            "evidence_authority": "synthetic_fixture_only",
+            "terminal_reason": "holdout_completed",
+            "candidate_count": 2,
+            "holdout_member_count": 1,
+            "fixture_verdict_counts": {"faster": 1},
+            "recommended_fixture_candidate_id": str(promoted_id),
+        },
+        synthetic=True,
+        automatic_release_allowed=False,
+        created_at=NOW,
+    )
+
+    promoted_ordinal = next(
+        ordinal
+        for ordinal, item in repository.members.items()
+        if item["candidate_id"] == promoted_id
+    )
+    repository.members[promoted_ordinal] = {
+        **repository.members[promoted_ordinal],
+        "state": RoundCandidateState.HOLDOUT_MEASURED.value,
+    }
+    repository.round["state"] = "scripted_completed"
+    repository.barriers = [
+        search.model_dump(mode="json"),
+        holdout.model_dump(mode="json"),
+    ]
+    repository.holdout_reveal = reveal.model_dump(mode="json")
+    repository.multiple_comparison = fwer.model_dump(mode="json")
+    repository.evidence_bundle = evidence.model_dump(mode="json")
+
+    workspace = OperatorReadModelService(clock=lambda: NOW).evaluation_evidence(
+        started.round_id,
+        repository,
+    )
+
+    assert workspace.search_status == "available"
+    assert workspace.holdout_status == "available"
+    assert workspace.fwer_status == "available"
+    assert workspace.evidence_status == "available"
+    assert workspace.search is not None
+    assert workspace.search.promoted_candidate_ids == (promoted_id,)
+    assert workspace.holdout is not None
+    assert workspace.fwer is not None
+    assert workspace.fwer.candidates[0].verdict == "faster"
+    assert workspace.fwer.recommended_candidate_id == promoted_id
+    assert workspace.evidence_bundle is not None
+    assert workspace.evidence_bundle.summary["performance_conclusion"] == "not_measured"
+    assert workspace.real_performance_claim_allowed is False
+    assert workspace.formal_signoff_allowed is False
+    assert workspace.automatic_release_allowed is False
+
+    repository.multiple_comparison = {
+        **repository.multiple_comparison,
+        "holdout_barrier_id": str(uuid4()),
+    }
+    with pytest.raises(OperatorReadModelUnavailable, match="FWER"):
+        OperatorReadModelService(clock=lambda: NOW).evaluation_evidence(
+            started.round_id,
+            repository,
+        )
 
 
 def test_operator_http_client_requires_explicit_warning_acknowledgement(

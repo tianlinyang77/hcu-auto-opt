@@ -31,6 +31,7 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.operator_v1 import (
     OperatorCandidateEvidenceWorkspace,
+    OperatorEvaluationEvidenceWorkspace,
     OperatorHotspotView,
     OperatorProfileDescriptor,
     OperatorRoundReport,
@@ -533,6 +534,16 @@ def create_app(
         request: Request,
     ) -> OperatorCandidateEvidenceWorkspace:
         return read_models.candidate_evidence(round_id, repo(request))
+
+    @application.get(
+        "/v1/operator/search-rounds/{round_id}/evaluation-evidence",
+        response_model=OperatorEvaluationEvidenceWorkspace,
+    )
+    def get_operator_evaluation_evidence(
+        round_id: UUID,
+        request: Request,
+    ) -> OperatorEvaluationEvidenceWorkspace:
+        return read_models.evaluation_evidence(round_id, repo(request))
 
     @application.get(
         "/v1/operator/search-rounds/{round_id}/report",

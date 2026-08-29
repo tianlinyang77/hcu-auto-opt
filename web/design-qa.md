@@ -59,3 +59,40 @@ No actionable P0, P1, or P2 findings remain.
 - P3: when a future Formal Candidate carries a much longer optimization intent, consider an optional expanded detail line in the left candidate list. The current truncation is appropriate for the frozen 2–4 Scripted family.
 
 final result: passed
+
+---
+
+# UI-4 Evaluation Evidence implementation QA
+
+## Scope and authority boundary
+
+- Implementation: `src/EvaluationEvidenceWorkspace.jsx` with four read-only stages: Search, Holdout, FWER, and Evidence.
+- Data source: `GET /v1/operator/search-rounds/{round_id}/evaluation-evidence` or the explicitly labelled Synthetic demo fixture.
+- Authority rule: the frontend displays backend-authored Barrier, Reveal, Multiple Comparison, and EvidenceBundle records. It does not calculate means, confidence intervals, MDE, FWER, verdicts, recommendations, or speedup.
+- Release boundary: `synthetic=true`, `real_performance_claim_allowed=false`, `formal_signoff_allowed=false`, and `automatic_release_allowed=false` remain visible and immutable in this slice.
+- Visual direction: UI-4 extends the approved UI-3 workspace chrome, Noto Sans SC / JetBrains Mono typography, Phosphor icons, compact evidence density, and the existing dark semantic palette.
+
+## Automated findings
+
+No actionable implementation P0, P1, or P2 finding remains in the automated QA scope.
+
+- Search: renders the frozen family, promoted members, immutable receipt/evidence hashes, restart effects, statistics-valid state, and failure evidence without recomputing a ranking.
+- Holdout: separates Commit/Reveal authority from the Holdout Barrier and exposes lease, resource, fencing token, family hash, and cleanup evidence.
+- FWER: renders the backend-authored Bonferroni protocol, family alpha, candidate alpha, adjusted intervals, MDE fields, verdict, and recommendation without deriving a new conclusion in JavaScript.
+- Evidence: renders the complete authority chain and Evidence Index while keeping Synthetic conclusions separate from Formal signoff and release.
+- Failure behavior: unavailable or identity-drifted authority fails closed in the backend; loading, empty, and explicit API-error states do not silently fall back to demo data.
+- Accessibility structure: the workspace keeps the existing ARIA modal pattern, named stage controls, semantic headings and description lists, visible focus treatment, and reduced-motion support.
+- Responsive structure: UI-4 reuses the established single internal workspace scroll region and responsive breakpoints instead of introducing a second page-level scroll model.
+
+## Validation evidence
+
+- Backend focused authority and fixture tests: 30 passed.
+- Frontend unit tests: 12 passed, including evaluation-stage availability and the no-recomputation verdict boundary.
+- Ruff and ESLint: passed.
+- Production/Sites build: passed and produced `dist/client/index.html`, `dist/server/index.js`, and `dist/.openai/hosting.json`.
+
+## Browser QA status
+
+No new screenshot, DOM inspection, viewport comparison, or interactive browser test was performed for UI-4 because it was not requested in this iteration. The approved UI-3 browser evidence above remains the visual-system baseline; this section therefore records implementation and automated QA only and does not claim a new pixel-level visual verdict.
+
+final result: automated implementation QA passed; browser visual QA not requested

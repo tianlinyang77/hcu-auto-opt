@@ -44,6 +44,7 @@ import {
 import { loadOperatorDashboard } from "./api.js";
 import { CandidateEvidenceWorkspace } from "./CandidateEvidenceWorkspace.jsx";
 import { demoDashboard } from "./demo-data.js";
+import { EvaluationEvidenceWorkspace } from "./EvaluationEvidenceWorkspace.jsx";
 import { PlanPreviewWorkspace } from "./PlanPreviewWorkspace.jsx";
 import { StartIntentWorkspace } from "./StartIntentWorkspace.jsx";
 
@@ -266,14 +267,16 @@ function SideBar({ open, active, onSelect, onClose }) {
 
 function PhaseRail({ round }) {
   const currentIndex = phaseIndexByRoundState[round?.state] ?? 0;
+  const scriptedTerminal = round?.state === "scripted_completed";
   return (
     <section className="phase-rail" aria-label="Round 阶段进度">
       {phaseDefinitions.map(([key, label, Icon], index) => {
         const complete = index < currentIndex;
-        const current = index === currentIndex;
+        const skipped = scriptedTerminal && key === "signoff";
+        const current = index === currentIndex && !skipped;
         return (
           <div
-            className={`phase ${complete ? "complete" : ""} ${current ? "current" : ""}`}
+            className={`phase ${complete ? "complete" : ""} ${current ? "current" : ""} ${skipped ? "skipped" : ""}`}
             key={key}
           >
             <div className="phase-track">
@@ -288,7 +291,7 @@ function PhaseRail({ round }) {
               </span>
             </div>
             <strong>{label}</strong>
-            <span>{complete ? "已完成" : current ? "进行中" : "待开始"}</span>
+            <span>{complete ? "已完成" : current ? "进行中" : skipped ? "Scripted 不适用" : "待开始"}</span>
           </div>
         );
       })}
@@ -300,7 +303,7 @@ function BuildSummary({ round, onExplain }) {
   const failures = round.candidates.filter((item) =>
     ["build_failed", "invalid"].includes(item.state),
   ).length;
-  const successes = round.candidates.filter((item) => item.state === "built").length;
+  const successes = round.candidates.filter((item) => item.artifact_id).length;
   return (
     <section className="build-summary">
       <div className="build-metrics">
@@ -347,6 +350,18 @@ function CandidateTable({ round, hotspot, selectedId, onSelect, onOpenEvidence }
                 candidateStateMeta[candidate.state] || candidateStateMeta.intake_accepted;
               const packageView = packages.get(candidate.candidate_id);
               const active = selectedId === candidate.candidate_id;
+              const followup = {
+                built: "等待正确性",
+                correctness_passed: "等待 Search",
+                search_measured: "Search 已测量",
+                not_promoted: "Search 未晋级",
+                holdout_measured: "Holdout 已测量",
+                correctness_failed: "止于正确性",
+                search_failed: "止于 Search",
+                holdout_failed: "止于 Holdout",
+                build_failed: "止于 Build",
+                invalid: "已失效",
+              }[candidate.state] || "未进入";
               return (
                 <tr
                   className={active ? "selected" : ""}
@@ -382,7 +397,7 @@ function CandidateTable({ round, hotspot, selectedId, onSelect, onOpenEvidence }
                   <td>
                     <span className="muted-state">
                       <LockSimple size={17} />
-                      {candidate.state === "built" ? "等待正确性" : "未进入"}
+                      {followup}
                     </span>
                   </td>
                   <td className="mono">
@@ -561,6 +576,8 @@ export function App() {
   const [startAuditOpen, setStartAuditOpen] = useState(false);
   const [candidateEvidenceOpen, setCandidateEvidenceOpen] = useState(false);
   const [candidateEvidenceStage, setCandidateEvidenceStage] = useState("candidate");
+  const [evaluationEvidenceOpen, setEvaluationEvidenceOpen] = useState(false);
+  const [evaluationEvidenceStage, setEvaluationEvidenceStage] = useState("search");
 
   const load = async (useDemo = demoMode) => {
     setLoading(true);
@@ -633,6 +650,7 @@ export function App() {
       setActiveNavigation(key);
       setStartAuditOpen(false);
       setCandidateEvidenceOpen(false);
+      setEvaluationEvidenceOpen(false);
       setPlannerOpen(true);
       return;
     }
@@ -649,6 +667,7 @@ export function App() {
       setActiveNavigation(key);
       setPlannerOpen(false);
       setCandidateEvidenceOpen(false);
+      setEvaluationEvidenceOpen(false);
       setStartAuditOpen(true);
       return;
     }
@@ -656,8 +675,18 @@ export function App() {
       setActiveNavigation(key);
       setPlannerOpen(false);
       setStartAuditOpen(false);
+      setEvaluationEvidenceOpen(false);
       setCandidateEvidenceStage(key === "candidates" ? "candidate" : key);
       setCandidateEvidenceOpen(true);
+      return;
+    }
+    if (["search", "holdout", "fwer", "evidence"].includes(key)) {
+      setActiveNavigation(key);
+      setPlannerOpen(false);
+      setStartAuditOpen(false);
+      setCandidateEvidenceOpen(false);
+      setEvaluationEvidenceStage(key);
+      setEvaluationEvidenceOpen(true);
       return;
     }
     setModal({
@@ -702,6 +731,7 @@ export function App() {
           setActiveNavigation("plan");
           setStartAuditOpen(false);
           setCandidateEvidenceOpen(false);
+          setEvaluationEvidenceOpen(false);
           setPlannerOpen(true);
         }}
       />
@@ -734,6 +764,7 @@ export function App() {
                   setActiveNavigation("start");
                   setPlannerOpen(false);
                   setCandidateEvidenceOpen(false);
+                  setEvaluationEvidenceOpen(false);
                   setStartAuditOpen(true);
                 }}
               >
@@ -747,6 +778,7 @@ export function App() {
                 setActiveNavigation("plan");
                 setStartAuditOpen(false);
                 setCandidateEvidenceOpen(false);
+                setEvaluationEvidenceOpen(false);
                 setPlannerOpen(true);
               }}
             >
@@ -824,6 +856,7 @@ export function App() {
                   setActiveNavigation("candidates");
                   setPlannerOpen(false);
                   setStartAuditOpen(false);
+                  setEvaluationEvidenceOpen(false);
                   setCandidateEvidenceStage("candidate");
                   setCandidateEvidenceOpen(true);
                 }}
@@ -897,6 +930,17 @@ export function App() {
           initialStage={candidateEvidenceStage}
           onClose={() => {
             setCandidateEvidenceOpen(false);
+            setActiveNavigation("round");
+          }}
+        />
+      )}
+      {evaluationEvidenceOpen && round && (
+        <EvaluationEvidenceWorkspace
+          round={round}
+          demoMode={demoMode}
+          initialStage={evaluationEvidenceStage}
+          onClose={() => {
+            setEvaluationEvidenceOpen(false);
             setActiveNavigation("round");
           }}
         />
