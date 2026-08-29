@@ -12,6 +12,7 @@ MIGRATIONS = {
     9: "0009_m2_round_authority.sql",
     10: "0010_operator_plan_preview.sql",
     11: "0011_operator_start_intent.sql",
+    12: "0012_m2_formal_authority.sql",
 }
 
 

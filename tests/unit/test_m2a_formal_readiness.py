@@ -53,7 +53,7 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
 
     assert report.decision == "hold"
     assert report.generated_at == FIXED_TIME
-    assert report.verified_evidence_count == 12
+    assert report.verified_evidence_count == 16
     assert len(report.gate_results) == 13
     assert set(report.blocker_codes) == {
         "business_candidate_family",
@@ -76,6 +76,13 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
         for gate in report.gate_results
         for evidence in gate.evidence
     )
+    formal_persistence = next(
+        gate
+        for gate in report.gate_results
+        if gate.code == "formal_authority_persistence"
+    )
+    assert formal_persistence.declared_status == "hold"
+    assert formal_persistence.effective_status == "hold"
     assert report.profile_registration_allowed is False
     assert report.formal_round_creation_allowed is False
     assert report.window_authorization_required is True
