@@ -1,0 +1,59 @@
+# M2b Proposal independent verifier
+
+This document defines the D-owned, read-only verification boundary for Issue #116.
+The current implementation consumes the `m2b-agent-v1` contract from
+`feat/m2b-agent-contract`; it does not execute an Agent, modify source, use an HCU,
+measure performance, promote a package, or grant Formal Intake/release authority.
+
+## Independent inputs
+
+The verifier securely reopens canonical Knowledge Snapshot, Generation Request,
+Apex Plan, Attempt and Proposal Batch evidence. It checks each file SHA-256 and
+then independently recomputes the Knowledge, Request, Plan and Proposal identity
+hashes. Attempt, Batch, Request, Plan and Generation Run bindings are checked as
+one chain. Producer summaries are not trusted.
+
+## Patch identity and elimination order
+
+`normalized_patch_v1` performs only deterministic representation cleanup:
+
+1. require strict UTF-8 and reject NUL;
+2. normalize line endings to LF and remove trailing horizontal whitespace;
+3. omit Git `index` lines and timestamps after tabs on `---`/`+++` lines;
+4. write exactly one trailing LF.
+
+The declared normalized hash is recomputed from those bytes. Diff paths must be
+safe relative paths and equal the Proposal `touched_paths`. Candidates are then
+eliminated in this fixed order: exact patch, normalized patch, Candidate identity,
+and normalized optimization intent. Every eliminated Proposal remains visible
+with its reason code.
+
+## Failure semantics
+
+- A Runner timeout is recorded as `runner_timeout`; if no Proposal remains, the
+  aggregate status is `no_valid_proposals`.
+- All duplicate or zero Proposal output is `no_valid_proposals`, not success.
+- Cleanup failure, evidence tampering, unsafe paths, cross-binding and budget
+  violations fail closed.
+- Scripted evidence is always `synthetic`, `scripted_dev_only`,
+  `performance_conclusion=not_measured`, `formal_intake_allowed=false` and
+  `automatic_release_allowed=false`.
+
+The UI read model copies the D verdict and authority flags. It may filter and
+count rows but must not recalculate hashes, dedupe, infer performance, promote a
+Proposal, or upgrade signoff.
+
+## Final vertical acceptance gate
+
+This first tranche deliberately stops before promotion because the stable A/B/C
+outputs from Issues #113–#115 are not yet present on the parent branch. Issue
+#116 is not complete until a later stacked change proves this real chain:
+
+```text
+Hotspot -> two Agent generators -> Apex retry/dedupe -> human approval
+-> C Candidate Package promotion -> source-family verifier
+-> existing M2a Scripted Intake
+```
+
+The final test must consume the real promotion and family interfaces. A test-only
+mock is not acceptable evidence that the end-to-end requirement is complete.
