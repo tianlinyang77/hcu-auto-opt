@@ -16,6 +16,7 @@
 /docs/measurement-protocol.md      @tianlinyang77
 
 # @person-c: search, agents and build (directories added in Week 2)
+/src/hcuopt/agent/                 @tianlinyang77
 # /src/hcuopt/search/              @person-c
 # /src/hcuopt/build/               @person-c
 

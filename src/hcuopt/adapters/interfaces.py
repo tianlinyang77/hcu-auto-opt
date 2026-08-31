@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from hcuopt.contracts.agent_v1 import (
+    CandidateGenerationRequest,
+    CandidateProposalBatch,
+)
 from hcuopt.contracts.platform_v1 import (
     AdapterProvenance,
     ArtifactManifest,
@@ -37,6 +41,19 @@ class CandidateGenerator(Protocol):
     def generate(
         self, hotspot: Mapping[str, Any]
     ) -> Sequence[OptimizationCandidate | Mapping[str, Any]]: ...
+
+
+@runtime_checkable
+class CandidateGeneratorAdapter(Protocol):
+    """M2b proposal-only generator; it has no Candidate or execution authority."""
+
+    provenance: AdapterProvenance
+
+    def generate_proposals(
+        self,
+        request: CandidateGenerationRequest,
+        output_dir: Path,
+    ) -> CandidateProposalBatch: ...
 
 
 class BuilderAdapter(Protocol):

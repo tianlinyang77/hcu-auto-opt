@@ -1,6 +1,6 @@
 # v1 领域契约
 
-API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台契约位于 `src/hcuopt/contracts/platform_v1.py`，状态机位于 `src/hcuopt/domain/`，数据库迁移位于 `src/hcuopt/storage/sql/`。这些边界必须共同演进，禁止分别维护同名字段。Target、执行、源码、制品和证据接口详见 [公共接口层](public-interfaces.md)。
+API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台契约位于 `src/hcuopt/contracts/platform_v1.py`，M2b Proposal 合同位于 `src/hcuopt/contracts/agent_v1.py`，状态机位于 `src/hcuopt/domain/`，数据库迁移位于 `src/hcuopt/storage/sql/`。这些边界必须共同演进，禁止分别维护同名字段。Target、执行、源码、制品和证据接口详见 [公共接口层](public-interfaces.md)。
 
 ## 核心对象
 
@@ -21,6 +21,10 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
 | ResourceLease | A/B | Worker | 携带 fencing_token；过期后不能写回 |
 | ExperimentEvidence | A/D | Registry/KB | 区分事实、复验知识和 Agent 推测 |
+| KnowledgeSnapshot | C | Agent/A/D | 知识来源、版本、许可证和 Hash 不可变；只提供建议 |
+| CandidateGenerationRequest | A | Agent/C/D | 绑定 Target、Stage 0、Baseline、Hotspot、Workload 与知识快照；禁止 HCU/Holdout/测量访问 |
+| CandidateProposal | Agent | A/C/D | 只保存待审 Patch、意图、风险和 provenance；不是 Candidate 或性能结论 |
+| ApexGenerationPlan | A | Agent/B/C/D | 只控制生成器、重试、去重和生成预算；不控制 Round/HCU |
 
 ## M1 签核后的兼容边界
 

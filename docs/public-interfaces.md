@@ -146,3 +146,15 @@ OX-1 CLI 和 Operator Read Model 使用同一 API：
 `round draft` 从可信 Profile、Hotspot Authority 和已验证 Candidate Package 生成 Plan Spec；后续
 命令从 Preview/Start 文件自动提取 ID 与 Hash，不要求人工复制。`round run` 另存非性能性质的
 真实操作成本指标；部署配置和 fail-closed 边界见 [OX-1 Scripted Operator CLI](operator-cli.md)。
+
+## M2b Agent/Apex Proposal 接口
+
+M2b 的第一层公共接口位于 `src/hcuopt/contracts/agent_v1.py` 和
+`CandidateGeneratorAdapter.generate_proposals()`。输入固定 Target、Stage 0、Baseline、Hotspot、
+Workload、Profiler Evidence 与 `KnowledgeSnapshot`；输出只能是带 Patch/意图/风险/provenance
+的 `CandidateProposalBatch`。
+
+Proposal 固定需要人工复核、禁止 Formal Intake、没有性能结论且不能自动发布。Apex Plan 只
+拥有 generator、并发、有限重试、去重和 generation budget；HCU、Measurement、Holdout、
+Barrier、FWER、Signoff 和 Release 均不在该 Protocol 中。完整决定见
+[ADR-0011](adr/0011-m2b-agent-apex-proposal-boundary.md)。
