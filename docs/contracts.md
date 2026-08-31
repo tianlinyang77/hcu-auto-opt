@@ -27,7 +27,7 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | CandidateProposalReviewRecord | C/人工审核人 | A/C/D | 决策绑定 Proposal、Request、Patch、Baseline、Hotspot、审核人、原因、时间、幂等键和审核证据 |
 | CandidateProposalPromotionReceipt | C | A/D | 只引用既有 `CandidateSourcePackageRef` 与 M2a source-family verifier 证据；不得新造 Candidate/Artifact/Family |
 | ApexGenerationPlan | A | Agent/B/C/D | 只控制生成器、重试、去重和生成预算；不控制 Round/HCU |
-| AgentRunRequest / Evidence | A/B runtime | A/C/D | 非持久化 Runner 边界；executable/argv prefix、输入、环境和生成预算受限，失败时不返回 Proposal bytes |
+| AgentRunRequest / Evidence | A/B runtime | A/C/D | 非持久化 Runner 边界；绑定 Attempt/Run/Request、Runner provenance、Generator/Executable 内容 Hash；进程域、输入、环境和生成预算受限，失败时不返回 Proposal bytes |
 
 ## M1 签核后的兼容边界
 

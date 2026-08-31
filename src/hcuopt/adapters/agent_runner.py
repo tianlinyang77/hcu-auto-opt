@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -35,6 +37,7 @@ SENSITIVE_OUTPUT_PATTERN = re.compile(
 )
 USAGE_SCHEMA_VERSION = "hcuopt-agent-usage-v1"
 SUMMARY_BYTES = 1_024
+WINDOWS_CREATE_SUSPENDED = 0x00000004
 RESERVED_ENVIRONMENT_NAMES = frozenset(
     name.casefold()
     for name in (
@@ -63,6 +66,33 @@ class AgentRunnerSafetyError(ValueError):
 
 def _sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _require_int(name: str, value: object, *, minimum: int, maximum: int | None = None) -> int:
+    if type(value) is not int:
+        raise AgentRunnerSafetyError(f"{name} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        upper = f", {maximum}" if maximum is not None else ""
+        raise AgentRunnerSafetyError(f"{name} must be within [{minimum}{upper}]")
+    return value
+
+
+def _require_finite_float(
+    name: str, value: object, *, minimum_exclusive: float, maximum: float
+) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise AgentRunnerSafetyError(f"{name} must be a finite float")
+    if value <= minimum_exclusive or value > maximum:
+        raise AgentRunnerSafetyError(f"{name} must be within ({minimum_exclusive}, {maximum}]")
+    return value
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -128,20 +158,26 @@ class AgentRunLimits:
     termination_grace_seconds: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.attempt_number < 1 or self.attempt_number > 64:
-            raise AgentRunnerSafetyError("Agent attempt number is out of range")
-        if self.timeout_seconds <= 0 or self.timeout_seconds > 7_200:
-            raise AgentRunnerSafetyError("Agent timeout must be within (0, 7200]")
+        _require_int("attempt_number", self.attempt_number, minimum=1, maximum=64)
+        _require_finite_float(
+            "timeout_seconds",
+            self.timeout_seconds,
+            minimum_exclusive=0.0,
+            maximum=7_200.0,
+        )
         for name in (
             "max_stdout_bytes",
             "max_stderr_bytes",
             "max_total_output_bytes",
             "max_tokens",
         ):
-            if getattr(self, name) < 1:
-                raise AgentRunnerSafetyError(f"{name} must be positive")
-        if self.termination_grace_seconds <= 0 or self.termination_grace_seconds > 30:
-            raise AgentRunnerSafetyError("Agent termination grace must be within (0, 30]")
+            _require_int(name, getattr(self, name), minimum=1)
+        _require_finite_float(
+            "termination_grace_seconds",
+            self.termination_grace_seconds,
+            minimum_exclusive=0.0,
+            maximum=30.0,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,16 +186,32 @@ class AgentRunRequest:
     generation_run_id: UUID
     request_hash: str
     executable: Path
+    generator_artifact: Path
+    generator_artifact_hash: str
     argv: tuple[str, ...]
     limits: AgentRunLimits
     environment: tuple[tuple[str, str], ...] = ()
     input_files: tuple[AgentInputFile, ...] = ()
 
     def __post_init__(self) -> None:
-        if not SHA256_PATTERN.fullmatch(self.request_hash):
+        if not isinstance(self.attempt_id, UUID) or not isinstance(self.generation_run_id, UUID):
+            raise AgentRunnerSafetyError("Agent authority identifiers must be UUIDs")
+        if not isinstance(self.request_hash, str) or not SHA256_PATTERN.fullmatch(
+            self.request_hash
+        ):
             raise AgentRunnerSafetyError("Agent request hash must be canonical SHA256")
+        if not isinstance(self.executable, Path) or not isinstance(self.generator_artifact, Path):
+            raise AgentRunnerSafetyError("Agent executable and artifact must be Paths")
         if not self.executable.is_absolute():
             raise AgentRunnerSafetyError("Agent executable must be absolute")
+        if not self.generator_artifact.is_absolute():
+            raise AgentRunnerSafetyError("Agent generator artifact must be absolute")
+        if not isinstance(self.generator_artifact_hash, str) or not SHA256_PATTERN.fullmatch(
+            self.generator_artifact_hash
+        ):
+            raise AgentRunnerSafetyError("Agent generator artifact hash must be canonical SHA256")
+        if not isinstance(self.argv, tuple) or not isinstance(self.limits, AgentRunLimits):
+            raise AgentRunnerSafetyError("Agent argv and limits must use their declared types")
         if not self.argv or len(self.argv) > 128:
             raise AgentRunnerSafetyError("Agent argv must contain between 1 and 128 entries")
         if any(
@@ -181,7 +233,25 @@ class AgentRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentRunnerProvenance:
+    profile: str
+    capability: str
+    adapter_name: str
+    adapter_version: str
+    implementation_kind: Literal["real", "fake"]
+    source_commit: str | None
+    identity_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunEvidence:
+    attempt_id: UUID
+    generation_run_id: UUID
+    request_hash: str
+    attempt_number: int
+    runner_provenance: AgentRunnerProvenance
+    generator_artifact_hash: str
+    executable_hash: str | None
     status: AgentRunStatus
     synthetic: bool
     attempts_consumed: int
@@ -247,9 +317,24 @@ def _input_manifest_hash(request: AgentRunRequest) -> str:
     return _sha256_bytes(_canonical_json_bytes(manifest))
 
 
+def _freeze_provenance(provenance: AdapterProvenance) -> AgentRunnerProvenance:
+    payload = provenance.model_dump(mode="json")
+    return AgentRunnerProvenance(
+        profile=provenance.profile,
+        capability=provenance.capability,
+        adapter_name=provenance.adapter_name,
+        adapter_version=provenance.adapter_version,
+        implementation_kind=provenance.implementation_kind,
+        source_commit=provenance.source_commit,
+        identity_hash=_sha256_bytes(_canonical_json_bytes(payload)),
+    )
+
+
 def _evidence(
     *,
     request: AgentRunRequest,
+    runner_provenance: AdapterProvenance,
+    executable_hash: str | None,
     status: AgentRunStatus,
     synthetic: bool,
     wall_seconds: float,
@@ -266,6 +351,13 @@ def _evidence(
 ) -> AgentRunEvidence:
     _executable, argv_hash, _paths = _request_identity(request)
     return AgentRunEvidence(
+        attempt_id=request.attempt_id,
+        generation_run_id=request.generation_run_id,
+        request_hash=request.request_hash,
+        attempt_number=request.limits.attempt_number,
+        runner_provenance=_freeze_provenance(runner_provenance),
+        generator_artifact_hash=request.generator_artifact_hash,
+        executable_hash=executable_hash,
         status=status,
         synthetic=synthetic,
         attempts_consumed=1,
@@ -298,7 +390,7 @@ class DeterministicAgentRunner:
     """Return fixed synthetic proposal bytes for scheduler and CI tests."""
 
     def __init__(self, *, proposal_bytes: bytes, reported_tokens: int) -> None:
-        if reported_tokens < 0:
+        if type(reported_tokens) is not int or reported_tokens < 0:
             raise AgentRunnerSafetyError("reported token consumption cannot be negative")
         self.proposal_bytes = bytes(proposal_bytes)
         self.reported_tokens = reported_tokens
@@ -326,6 +418,8 @@ class DeterministicAgentRunner:
             reason = "token_limit_exceeded"
         evidence = _evidence(
             request=request,
+            runner_provenance=self.provenance,
+            executable_hash=None,
             status=status,
             synthetic=True,
             wall_seconds=0.0,
@@ -387,6 +481,209 @@ def _capture_stream(
         stream.close()
 
 
+class _WindowsJobDomain:
+    """Own one suspended process tree in a kill-on-close Windows Job Object."""
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise AgentRunnerSafetyError("Windows Job Objects are only available on Windows")
+        import ctypes
+        from ctypes import wintypes
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class _BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInformation),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        )
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        handle = kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise AgentRunnerSafetyError("failed to create Windows Agent Job Object")
+        information = _ExtendedLimitInformation()
+        information.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            handle,
+            9,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            kernel32.CloseHandle(handle)
+            raise AgentRunnerSafetyError("failed to configure Windows Agent Job Object")
+        self._ctypes = ctypes
+        self._wintypes = wintypes
+        self._kernel32 = kernel32
+        self._handle: int | None = int(handle)
+
+    def assign_and_resume(self, process: subprocess.Popen[bytes]) -> None:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        kernel32 = self._kernel32
+        if self._handle is None:
+            raise AgentRunnerSafetyError("Windows Agent Job Object is closed")
+        process_handle = getattr(process, "_handle", None)
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        if process_handle is None or not kernel32.AssignProcessToJobObject(
+            wintypes.HANDLE(self._handle), wintypes.HANDLE(int(process_handle))
+        ):
+            raise AgentRunnerSafetyError("failed to assign Agent process to Windows Job Object")
+
+        class _ThreadEntry32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
+        kernel32.Thread32First.restype = wintypes.BOOL
+        kernel32.Thread32Next.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
+        kernel32.Thread32Next.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = (wintypes.HANDLE,)
+        kernel32.ResumeThread.restype = wintypes.DWORD
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if not snapshot or int(snapshot) == invalid_handle:
+            raise AgentRunnerSafetyError("failed to enumerate suspended Agent threads")
+        resumed = 0
+        try:
+            entry = _ThreadEntry32()
+            entry.dwSize = ctypes.sizeof(entry)
+            has_entry = bool(kernel32.Thread32First(snapshot, ctypes.byref(entry)))
+            while has_entry:
+                if entry.th32OwnerProcessID == process.pid:
+                    thread = kernel32.OpenThread(0x0002, False, entry.th32ThreadID)
+                    if not thread:
+                        raise AgentRunnerSafetyError("failed to open suspended Agent thread")
+                    try:
+                        if kernel32.ResumeThread(thread) == 0xFFFFFFFF:
+                            raise AgentRunnerSafetyError("failed to resume Agent process")
+                        resumed += 1
+                    finally:
+                        kernel32.CloseHandle(thread)
+                has_entry = bool(kernel32.Thread32Next(snapshot, ctypes.byref(entry)))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        if resumed != 1:
+            raise AgentRunnerSafetyError(
+                "Agent process did not expose exactly one suspended thread"
+            )
+
+    def _active_processes(self) -> int:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        kernel32 = self._kernel32
+        if self._handle is None:
+            raise AgentRunnerSafetyError("Windows Agent Job Object is closed")
+
+        class _BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32.QueryInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        )
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        information = _BasicAccountingInformation()
+        if not kernel32.QueryInformationJobObject(
+            wintypes.HANDLE(self._handle),
+            1,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            None,
+        ):
+            raise AgentRunnerSafetyError("failed to query Windows Agent Job Object")
+        return int(information.ActiveProcesses)
+
+    def terminate_and_verify(
+        self, grace_seconds: float
+    ) -> Literal["terminated", "killed", "failed"]:
+        try:
+            if self._active_processes() == 0:
+                return "terminated"
+            kernel32 = self._kernel32
+            wintypes = self._wintypes
+            kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+            kernel32.TerminateJobObject.restype = wintypes.BOOL
+            if self._handle is None or not kernel32.TerminateJobObject(
+                wintypes.HANDLE(self._handle), 1
+            ):
+                return "failed"
+            deadline = time.monotonic() + max(1.0, grace_seconds)
+            while time.monotonic() < deadline:
+                if self._active_processes() == 0:
+                    return "killed"
+                time.sleep(0.01)
+            return "failed"
+        except (OSError, AgentRunnerSafetyError):
+            return "failed"
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._kernel32.CloseHandle(self._wintypes.HANDLE(self._handle))
+            self._handle = None
+
+
 class LocalCommandAgentRunner:
     """Execute one allowlisted local generator in an adapter-owned directory."""
 
@@ -412,10 +709,13 @@ class LocalCommandAgentRunner:
             for prefix in prefixes
         ):
             raise AgentRunnerSafetyError("at least one valid Agent argv prefix must be allowlisted")
-        if max_input_bytes < 1:
-            raise AgentRunnerSafetyError("Agent input byte limit must be positive")
-        if poll_interval_seconds <= 0 or poll_interval_seconds > 1:
-            raise AgentRunnerSafetyError("Agent poll interval must be within (0, 1]")
+        _require_int("max_input_bytes", max_input_bytes, minimum=1)
+        _require_finite_float(
+            "poll_interval_seconds",
+            poll_interval_seconds,
+            minimum_exclusive=0.0,
+            maximum=1.0,
+        )
         self.allowed_executables = frozenset(resolved)
         self.allowed_argv_prefixes = prefixes
         self.allowed_environment_names = frozenset(allowed_environment_names)
@@ -437,14 +737,21 @@ class LocalCommandAgentRunner:
         )
 
     def run(self, request: AgentRunRequest, output_dir: Path) -> AgentRunResult:
-        self._preflight(request)
+        executable_hash = self._preflight(request)
         output_dir.mkdir(parents=True, exist_ok=True)
         attempt_dir = Path(tempfile.mkdtemp(prefix="agent-run-", dir=output_dir))
         started = time.monotonic()
         result: AgentRunResult | None = None
         try:
             input_root, work_dir, usage_path = self._prepare_attempt(attempt_dir, request)
-            result = self._execute(request, input_root, work_dir, usage_path, started)
+            result = self._execute(
+                request,
+                input_root,
+                work_dir,
+                usage_path,
+                started,
+                executable_hash,
+            )
         finally:
             try:
                 self.remove_tree(attempt_dir)
@@ -465,12 +772,21 @@ class LocalCommandAgentRunner:
             raise AgentRunnerSafetyError("Agent attempt ended without a result")
         return result
 
-    def _preflight(self, request: AgentRunRequest) -> None:
+    def _preflight(self, request: AgentRunRequest) -> str:
         executable = request.executable.resolve()
         if executable not in self.allowed_executables:
             raise AgentRunnerSafetyError("Agent executable is not allowlisted")
         if not executable.is_file():
             raise AgentRunnerSafetyError("allowlisted Agent executable is not a file")
+        artifact = request.generator_artifact.resolve()
+        if not artifact.is_file():
+            raise AgentRunnerSafetyError("Agent generator artifact is not a file")
+        if artifact != executable and str(artifact) not in request.argv:
+            raise AgentRunnerSafetyError(
+                "Agent generator artifact must be the executable or an exact argv entry"
+            )
+        if not hmac.compare_digest(_sha256_file(artifact), request.generator_artifact_hash):
+            raise AgentRunnerSafetyError("Agent generator artifact hash does not match content")
         if not any(request.argv[: len(prefix)] == prefix for prefix in self.allowed_argv_prefixes):
             raise AgentRunnerSafetyError("Agent argv prefix is not allowlisted")
         if sum(len(item.content) for item in request.input_files) > self.max_input_bytes:
@@ -489,6 +805,7 @@ class LocalCommandAgentRunner:
                 raise AgentRunnerSafetyError("Agent request contains a forbidden environment name")
             if "\x00" in value:
                 raise AgentRunnerSafetyError("Agent environment value contains NUL")
+        return _sha256_file(executable)
 
     @staticmethod
     def _prepare_attempt(attempt_dir: Path, request: AgentRunRequest) -> tuple[Path, Path, Path]:
@@ -511,6 +828,7 @@ class LocalCommandAgentRunner:
         work_dir: Path,
         usage_path: Path,
         started: float,
+        executable_hash: str,
     ) -> AgentRunResult:
         environment = self._environment(request, input_root, usage_path)
         command = (str(request.executable.resolve()), *request.argv)
@@ -522,12 +840,32 @@ class LocalCommandAgentRunner:
             "env": environment,
             "shell": False,
         }
+        windows_job: _WindowsJobDomain | None = None
         if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            windows_job = _WindowsJobDomain()
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | WINDOWS_CREATE_SUSPENDED
         else:
             kwargs["start_new_session"] = True
-        process = subprocess.Popen(command, **kwargs)  # type: ignore[arg-type]
+        try:
+            process = subprocess.Popen(command, **kwargs)  # type: ignore[arg-type]
+            if windows_job is not None:
+                windows_job.assign_and_resume(process)
+        except Exception:
+            if windows_job is not None:
+                if "process" in locals():
+                    windows_job.terminate_and_verify(request.limits.termination_grace_seconds)
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=max(1.0, request.limits.termination_grace_seconds))
+                else:
+                    windows_job.close()
+            raise
         if process.stdout is None or process.stderr is None:
+            self._terminate_tree(
+                process,
+                request.limits.termination_grace_seconds,
+                windows_job=windows_job,
+            )
             raise AgentRunnerSafetyError("Agent runner failed to capture process output")
 
         state = _OutputState(lock=threading.Lock(), overflow=threading.Event())
@@ -564,17 +902,17 @@ class LocalCommandAgentRunner:
         while process.poll() is None:
             if state.overflow.is_set():
                 termination_reason = "output_limit_exceeded"
-                process_tree_cleanup = self._terminate_tree(
-                    process, request.limits.termination_grace_seconds
-                )
                 break
             if time.monotonic() >= deadline:
                 termination_reason = "timeout"
-                process_tree_cleanup = self._terminate_tree(
-                    process, request.limits.termination_grace_seconds
-                )
                 break
             time.sleep(self.poll_interval_seconds)
+
+        process_tree_cleanup = self._terminate_tree(
+            process,
+            request.limits.termination_grace_seconds,
+            windows_job=windows_job,
+        )
 
         try:
             exit_code = process.wait(timeout=request.limits.termination_grace_seconds + 1)
@@ -609,6 +947,8 @@ class LocalCommandAgentRunner:
 
         evidence = _evidence(
             request=request,
+            runner_provenance=self.provenance,
+            executable_hash=executable_hash,
             status=status,
             synthetic=False,
             wall_seconds=time.monotonic() - started,
@@ -665,43 +1005,49 @@ class LocalCommandAgentRunner:
 
     @staticmethod
     def _terminate_tree(
-        process: subprocess.Popen[bytes], grace_seconds: float
+        process: subprocess.Popen[bytes],
+        grace_seconds: float,
+        *,
+        windows_job: _WindowsJobDomain | None = None,
     ) -> Literal["terminated", "killed", "failed"]:
         if os.name == "nt":
-            completed = subprocess.run(
-                ("taskkill.exe", "/PID", str(process.pid), "/T", "/F"),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=max(1.0, grace_seconds),
-                check=False,
-                shell=False,
-            )
-            try:
-                process.wait(timeout=max(1.0, grace_seconds))
-            except subprocess.TimeoutExpired:
-                process.kill()
-                try:
-                    process.wait(timeout=max(1.0, grace_seconds))
-                except subprocess.TimeoutExpired:
-                    return "failed"
-                return "killed"
-            return "killed" if completed.returncode == 0 else "terminated"
+            if windows_job is None:
+                return "failed"
+            return windows_job.terminate_and_verify(grace_seconds)
 
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             return "terminated"
-        try:
-            process.wait(timeout=grace_seconds)
-            return "terminated"
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+        except PermissionError:
+            return "failed"
+
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            process.poll()
+            if not LocalCommandAgentRunner._posix_group_exists(process.pid):
                 return "terminated"
-            try:
-                process.wait(timeout=max(1.0, grace_seconds))
-            except subprocess.TimeoutExpired:
-                return "failed"
-            return "killed"
+            time.sleep(0.01)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return "terminated"
+        except PermissionError:
+            return "failed"
+        deadline = time.monotonic() + max(1.0, grace_seconds)
+        while time.monotonic() < deadline:
+            process.poll()
+            if not LocalCommandAgentRunner._posix_group_exists(process.pid):
+                return "killed"
+            time.sleep(0.01)
+        return "failed"
+
+    @staticmethod
+    def _posix_group_exists(process_group_id: int) -> bool:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True

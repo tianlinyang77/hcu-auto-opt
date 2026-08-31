@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bytes", type=int, default=0)
     parser.add_argument("--seconds", type=float, default=60.0)
     parser.add_argument("--marker")
+    parser.add_argument("--ready")
     parser.add_argument("--environment-name")
     parser.add_argument("--input-path")
     return parser
@@ -83,12 +85,20 @@ def main() -> int:
         sys.stderr.write("token=super-secret-value")
         sys.stdout.buffer.write(b'{"proposal":"safe"}')
         return 0
-    if args.mode == "spawn-child":
+    if args.mode in {"spawn-child", "spawn-background"}:
         child = subprocess.Popen(
             (sys.executable, "-c", f"import time; time.sleep({args.seconds})"),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=tempfile.gettempdir(),
             shell=False,
         )
         Path(str(args.marker)).write_text(str(child.pid), encoding="ascii")
+        Path(str(args.ready)).write_text("ready", encoding="ascii")
+        if args.mode == "spawn-background":
+            sys.stdout.buffer.write(b'{"proposal":"background child cleaned"}')
+            return 0
         time.sleep(args.seconds)
         return 0
     raise ValueError(f"unsupported mode: {args.mode}")

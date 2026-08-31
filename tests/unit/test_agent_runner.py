@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
+import math
 import os
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import UUID
 
@@ -24,6 +27,10 @@ from hcuopt.adapters.agent_runner import (
 ROOT = Path(__file__).parents[2]
 STUB = ROOT / "tests" / "fixtures" / "agent_runner_stub.py"
 REQUEST_HASH = "sha256:" + "a" * 64
+
+
+def _file_hash(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _limits(**updates: object) -> AgentRunLimits:
@@ -49,13 +56,19 @@ def _request(
     inputs: tuple[AgentInputFile, ...] = (),
     limits: AgentRunLimits | None = None,
     executable: Path | None = None,
+    generator_artifact: Path | None = None,
+    generator_artifact_hash: str | None = None,
+    argv_artifact: Path | None = None,
 ) -> AgentRunRequest:
+    artifact = generator_artifact or STUB
     return AgentRunRequest(
         attempt_id=UUID("00000000-0000-0000-0000-000000000114"),
         generation_run_id=UUID("00000000-0000-0000-0000-000000000112"),
         request_hash=REQUEST_HASH,
         executable=executable or Path(sys.executable),
-        argv=(str(STUB), mode, *values, *options),
+        generator_artifact=artifact,
+        generator_artifact_hash=generator_artifact_hash or _file_hash(artifact),
+        argv=(str(argv_artifact or artifact), mode, *values, *options),
         environment=environment,
         input_files=inputs,
         limits=limits or _limits(),
@@ -106,15 +119,23 @@ def test_deterministic_runner_uses_the_runtime_protocol_and_budget_evidence(
         proposal_bytes=b'{"proposal":"fixture"}',
         reported_tokens=9,
     )
+    request = _request()
 
     assert isinstance(runner, AgentRunnerAdapter)
-    result = runner.run(_request(), tmp_path)
+    result = runner.run(request, tmp_path)
 
     assert result.status == "succeeded"
     assert result.proposal_bytes == b'{"proposal":"fixture"}'
     assert result.evidence.synthetic is True
     assert result.evidence.attempts_consumed == 1
     assert result.evidence.tokens_consumed == 9
+    assert result.evidence.attempt_id == request.attempt_id
+    assert result.evidence.generation_run_id == request.generation_run_id
+    assert result.evidence.request_hash == request.request_hash
+    assert result.evidence.attempt_number == request.limits.attempt_number
+    assert result.evidence.generator_artifact_hash == request.generator_artifact_hash
+    assert result.evidence.runner_provenance.profile == runner.provenance.profile
+    assert result.evidence.runner_provenance.identity_hash.startswith("sha256:")
     assert result.evidence.performance_conclusion == "not_measured"
     assert result.evidence.hcu_access_allowed is False
     assert result.evidence.measurement_access_allowed is False
@@ -130,6 +151,7 @@ def test_local_runner_preserves_literal_argv_without_a_shell(tmp_path: Path) -> 
     assert json.loads(result.proposal_bytes or b"null") == list(literal_values)
     assert not marker.exists()
     assert result.evidence.executable_name == Path(sys.executable).name
+    assert result.evidence.executable_hash == _file_hash(Path(sys.executable))
     assert result.evidence.argv_hash.startswith("sha256:")
 
 
@@ -226,6 +248,29 @@ def test_local_runner_rejects_unallowlisted_executable_and_hcu_host(
         ).run(_request(), tmp_path)
 
 
+def test_local_runner_rejects_generator_artifact_hash_mismatch(tmp_path: Path) -> None:
+    artifact = tmp_path / "generator.py"
+    artifact.write_bytes(STUB.read_bytes())
+    request = _request(
+        generator_artifact=artifact,
+        generator_artifact_hash="sha256:" + "0" * 64,
+    )
+
+    with pytest.raises(AgentRunnerSafetyError, match="artifact hash"):
+        _runner(allowed_argv_prefixes=((str(artifact),),)).run(request, tmp_path)
+
+
+def test_local_runner_requires_generator_artifact_to_be_executed(tmp_path: Path) -> None:
+    unrelated = tmp_path / "unrelated.py"
+    unrelated.write_text("print('not the generator')", encoding="utf-8")
+
+    with pytest.raises(AgentRunnerSafetyError, match="executable or an exact argv"):
+        _runner().run(
+            _request(generator_artifact=unrelated, argv_artifact=STUB),
+            tmp_path,
+        )
+
+
 def test_nonzero_exit_and_malformed_usage_fail_closed(tmp_path: Path) -> None:
     failed = _runner().run(_request("nonzero"), tmp_path)
     malformed = _runner().run(_request("malformed-usage"), tmp_path)
@@ -281,16 +326,29 @@ def test_stream_and_total_output_limits_terminate_the_process(
     assert result.evidence.process_tree_cleanup in {"terminated", "killed"}
 
 
-def test_timeout_terminates_the_child_process_tree(tmp_path: Path) -> None:
+def test_timeout_terminates_the_child_process_tree_after_ready_handshake(tmp_path: Path) -> None:
     marker = tmp_path / "child.pid"
-    result = _runner().run(
-        _request(
-            "spawn-child",
-            options=("--marker", str(marker), "--seconds", "30"),
-            limits=_limits(timeout_seconds=1.0),
+    ready = tmp_path / "child.ready"
+    request = _request(
+        "spawn-child",
+        options=(
+            "--marker",
+            str(marker),
+            "--ready",
+            str(ready),
+            "--seconds",
+            "30",
         ),
-        tmp_path,
+        limits=_limits(timeout_seconds=3.0),
     )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_runner().run, request, tmp_path)
+        ready_deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < ready_deadline:
+            time.sleep(0.01)
+        assert ready.read_text(encoding="ascii") == "ready"
+        result = future.result(timeout=5)
 
     assert result.status == "timed_out"
     assert result.proposal_bytes is None
@@ -300,6 +358,57 @@ def test_timeout_terminates_the_child_process_tree(tmp_path: Path) -> None:
     while _pid_is_active(child_pid) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _pid_is_active(child_pid)
+
+
+def test_normal_parent_exit_still_terminates_background_child(tmp_path: Path) -> None:
+    marker = tmp_path / "background.pid"
+    ready = tmp_path / "background.ready"
+    result = _runner().run(
+        _request(
+            "spawn-background",
+            options=(
+                "--marker",
+                str(marker),
+                "--ready",
+                str(ready),
+                "--seconds",
+                "30",
+            ),
+        ),
+        tmp_path,
+    )
+
+    assert ready.read_text(encoding="ascii") == "ready"
+    assert result.status == "succeeded"
+    assert result.evidence.process_tree_cleanup in {"terminated", "killed"}
+    child_pid = int(marker.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 3
+    while _pid_is_active(child_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _pid_is_active(child_pid)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"timeout_seconds": math.nan},
+        {"timeout_seconds": math.inf},
+        {"timeout_seconds": -math.inf},
+        {"timeout_seconds": 1},
+        {"termination_grace_seconds": math.nan},
+        {"termination_grace_seconds": math.inf},
+        {"termination_grace_seconds": 1},
+        {"attempt_number": True},
+        {"attempt_number": 1.0},
+        {"max_stdout_bytes": True},
+        {"max_stderr_bytes": 1.0},
+        {"max_total_output_bytes": False},
+        {"max_tokens": 1.0},
+    ],
+)
+def test_limits_reject_non_finite_and_wrong_runtime_types(updates: dict[str, object]) -> None:
+    with pytest.raises(AgentRunnerSafetyError):
+        _limits(**updates)
 
 
 def test_cleanup_failure_suppresses_otherwise_valid_output(tmp_path: Path) -> None:
