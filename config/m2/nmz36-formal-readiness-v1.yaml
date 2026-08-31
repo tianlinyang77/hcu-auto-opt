@@ -1,7 +1,7 @@
 schema_version: m2a-formal-readiness-v1
-audit_id: nmz36-m2a-formal-readiness-20260829-v1
-audit_base_commit: ee7eec92edc268ed36e4f6903b970035f9d48fcc
-observed_at: 2026-08-29T20:19:20+08:00
+audit_id: nmz36-m2a-formal-readiness-20260831-v2
+audit_base_commit: 915861c61843867a8d74145df2d7bb8ed3f4ef8a
+observed_at: 2026-08-31T09:42:47+08:00
 
 profile_draft:
   profile_version: 1
@@ -46,13 +46,21 @@ gates:
   - code: business_candidate_family
     owner: C
     status: block
-    summary: Only one historical business Candidate exists; no immutable 2-member M2a Family is frozen.
-    required_action: Publish and independently verify two business startup-Overlay packages bound to one Baseline, Hotspot, replacement point, and Candidate Store authority.
+    summary: The source-family Contract, deterministic Hash, and fail-closed Store verifier now exist, but only one historical business Candidate is evidenced and no immutable 2-member Manifest is frozen.
+    required_action: Publish a second real business startup-Overlay package, freeze the 2-member source Family, and preserve an independent verification record; scripted fixtures cannot count.
     evidence:
-      - path: src/hcuopt/operator/discovery.py
-        sha256: sha256:e1692bf7ac6b47f21a84379ef8e1b7116c7e13b5fcd3dc5a94e4f6b9f95052c7
+      - path: src/hcuopt/contracts/m2_candidate_family_v1.py
+        sha256: sha256:643583f76c0a4a83846123f8c962c65881c76953ff4eca252c49141e7ed2d4f1
         digest_mode: text_lf
-        evidence_type: scripted_fixture_discovery_implementation
+        evidence_type: business_candidate_source_family_contract
+      - path: src/hcuopt/adapters/business_candidate_family.py
+        sha256: sha256:5189e9d51566457f7f01e1ce546395e5e28eb9aad4ea286e472549dbe9b4d1a7
+        digest_mode: text_lf
+        evidence_type: business_candidate_store_verifier
+      - path: docs/m2a-business-candidate-family.md
+        sha256: sha256:ea1dffcd678d526e4f74e9db8127cfd8153b90f78f1a9dfa62a5b00281b8efc3
+        digest_mode: text_lf
+        evidence_type: candidate_family_freeze_and_handoff_contract
   - code: formal_authority_persistence
     owner: D
     status: hold
@@ -160,7 +168,7 @@ gates:
     required_action: After every A/B/C/D blocker is resolved, request one separate project-owner decision naming the exact host, HCU, time window, Family Hash, and maximum budget.
     evidence:
       - path: docs/adr/0009-m2a-round-barrier.md
-        sha256: sha256:91f70dfa2578996c9b9ca261cc0ecb5a83d26642a2d1af9e26ffdc801e45e7e9
+        sha256: sha256:9ebe62bf486204939d4e766a96a9deb08d4549205bd93efb66db5c5ab35d6aa5
         digest_mode: text_lf
         evidence_type: formal_authorization_policy
   - code: round_signoff_outbox

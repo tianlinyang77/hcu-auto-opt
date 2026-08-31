@@ -49,6 +49,14 @@ Hash，计算 `artifact_family_hash`。两者职责不同：前者证明“提�
 “实际测量或拒绝了哪些不可变制品”。任何后续计划、Barrier 和 Evidence 都必须同时绑定这
 两个 Hash；缺少 Artifact 的失败 Candidate 也不能从家族中删除。
 
+在 Formal Round 尚未创建时，C 先以 `m2a-business-candidate-family-v1` 冻结 2～4 个真实业务
+Package，计算不含 `round_id`、`round_candidate_id` 和 ordinal 的 `source_family_hash`。它回答
+“部署侧准备把哪些源码包交给 A 编译”，用于 A/B/C/D 和项目所有者在资源窗口前审阅，不能
+替代 Intake Close 的 `candidate_family_hash`。Formal Plan Compiler/StartIntent 后续必须把已
+验证的 `source_family_hash` 确定性编译成 Round 成员，并在 Authority、审计事件和最终 Evidence
+中同时保留 source family 到 Candidate Family 的映射；不得临时新增、替换、复制或重新排序成
+另一个语义家族。Scripted fixture 不得进入这个 source family。
+
 ### 3. M1 单次比较证据只读复用
 
 `m1-kernel-performance-evidence-v1` 不改字段、不改语义。M2 每次 Baseline/Candidate 比较仍由
