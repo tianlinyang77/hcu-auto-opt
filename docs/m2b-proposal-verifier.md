@@ -13,6 +13,13 @@ then independently recomputes the Knowledge, Request, Plan and Proposal identity
 hashes. Attempt, Batch, Request, Plan and Generation Run bindings are checked as
 one chain. Producer summaries are not trusted.
 
+Attempt references are canonicalized into Plan generator order, then Attempt and
+Proposal ordinal order. Reversing evidence-reference completion order cannot
+change the retained Proposal or input digest. A generator is conservatively
+terminal only after one successful Attempt or after its bounded Attempt budget is
+exhausted; missing generator evidence fails closed until the durable Apex
+authority snapshot is available for the final integration.
+
 ## Patch identity and elimination order
 
 `normalized_patch_v1` performs only deterministic representation cleanup:
@@ -42,6 +49,11 @@ with its reason code.
 The UI read model copies the D verdict and authority flags. It may filter and
 count rows but must not recalculate hashes, dedupe, infer performance, promote a
 Proposal, or upgrade signoff.
+
+Human review and package promotion are fixed to `pending` in this first tranche.
+The caller cannot submit accepted/promoted lifecycle state. D will only expose a
+transition after C publishes the versioned review and Promotion Receipt evidence
+contracts and D can independently reread their content and bindings.
 
 ## Final vertical acceptance gate
 
