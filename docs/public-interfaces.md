@@ -215,3 +215,11 @@ A 的 Generation Authority 另外公开 `GenerationRunStartRequest`、`Generatio
 它们只管理无 HCU 的 Proposal 生成状态。数据库迁移仍由 `hcuopt db-migrate` 显式执行；FastAPI
 不暴露对应写路由。Proposal 在所有 generator 收敛前保持 `pending`，避免把并发完成顺序误当成
 去重权威；barrier 后的 retained/duplicate 仍需 D 独立复算。
+
+B 的 `AgentRunnerAdapter` 位于 `src/hcuopt/adapters/agent_runner.py`，是上述 Generator 下面的
+非持久化执行边界。它接收绝对 executable、结构化 argv、白名单环境、只读输入和单次生成预算，
+返回 Proposal bytes 与 `AgentRunEvidence`；不直接创建 `CandidateProposalBatch`。Local-command
+实现同时校验 executable/argv prefix allowlist、禁止覆盖内部环境变量、禁止 shell，并在 input、
+timeout、输出/token 超限、畸形 usage、非零退出或 cleanup 未证实时
+failure closed。Deterministic 实现仅用于 synthetic CI。该接口不扩展 `agent_v1`，也不拥有
+Candidate、Package、HCU、Measurement、Holdout 或发布权限。

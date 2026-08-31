@@ -63,6 +63,26 @@ Measurement Plan、Holdout 或 Evidence Authority。
 复用或修改 Round Budget Ledger，也不产生 HCU Lease 秒数。B 的 Agent Runner 固定无 HCU、无
 Holdout 权限，并对超时、子进程、输出超限和临时目录执行 failure-closed cleanup。
 
+#### B 线运行时接口
+
+`AgentRunnerAdapter` 是非持久化运行时接口，不是 `agent_v1` 的第二套 Proposal Contract。一次
+`AgentRunRequest` 只包含 attempt/run 身份、完整 Generation Request Hash、绝对 executable、
+结构化 argv、白名单环境变量、只读输入文件和 attempt/time/input/stdout/stderr/total-output/token
+上限。实现必须同时校验 executable 和 argv prefix allowlist，使用 `shell=false`；工作目录由
+Adapter 创建，不能由调用方指向仓库、Holdout 或部署目录。调用方不能覆盖 Runner 自有的 input、
+usage、request hash 和 Windows 系统环境变量。
+
+`AgentRunResult` 只返回可选 Proposal bytes 和 `AgentRunEvidence`。Evidence 记录 attempt、墙钟、
+输出字节、reported token、退出码、argv/input Hash、脱敏摘要、进程树终止和临时目录清理状态，
+并固定 `performance_conclusion=not_measured`。环境值、凭据、原始 Holdout 和 HCU/Round Budget
+不得进入 Evidence。timeout、输出/token 超限、非零退出、usage 畸形或 cleanup 未证实均不得
+返回可用 Proposal bytes。
+
+Deterministic Runner 仅用于 CI，固定 synthetic。Local-command Runner 仅允许部署在看不到 HCU
+设备和受保护 Holdout 的专用 Worker，并只执行明确 allowlist 的 executable；它不是任意代码的
+通用安全沙箱。C 在该接口之后解析 Proposal，仍必须按本 ADR 的 Hash、审核和晋级规则验证，
+不能信任 Runner 自报的 Candidate 或性能结论。
+
 ### 5. 身份和重放全部内容化
 
 Knowledge Snapshot、Generation Request、Apex Plan 和 Proposal 都有 canonical JSON Hash。
