@@ -72,11 +72,21 @@ def _write(path: Path, value: object | bytes) -> dict[str, str]:
     return {"uri": path.as_uri(), "content_hash": _sha(encoded)}
 
 
-def _provenance() -> AdapterProvenance:
+def _generator_provenance() -> AdapterProvenance:
     return AdapterProvenance(
-        profile="m2b-scripted-test",
+        profile="m2b-generator-scripted-test",
         capability="candidate_proposal_generation",
         adapter_name="ScriptedAgent",
+        adapter_version="1.0.0",
+        implementation_kind="fake",
+    )
+
+
+def _runner_provenance() -> AdapterProvenance:
+    return AdapterProvenance(
+        profile="m2b-runner-scripted-test",
+        capability="agent_runner",
+        adapter_name="ScriptedAgentRunner",
         adapter_version="1.0.0",
         implementation_kind="fake",
     )
@@ -234,7 +244,7 @@ def _build(
             request_id=REQUEST_ID,
             generation_run_id=RUN_ID,
             generator_id="agent-one",
-            adapter_provenance=_provenance(),
+            adapter_provenance=_generator_provenance(),
             status="succeeded",
             proposals=proposal_models,
             raw_output_uri=raw_ref["uri"],
@@ -264,12 +274,15 @@ def _build(
         attempt_id=UUID("10000000-0000-0000-0000-000000000031"),
         generation_run_id=RUN_ID,
         request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
         plan_id=PLAN_ID,
         generator_id="agent-one",
         attempt_ordinal=0,
         status=attempt_status,
         failure_code=failure_code,
         batch=batch_ref,
+        raw_output_uri=raw_ref["uri"] if batch_ref else None,
+        raw_output_hash=raw_ref["content_hash"] if batch_ref else None,
         output_bytes=len(raw_output) if batch_ref else 0,
         output_tokens=10 if batch_ref else 0,
         wall_seconds=1.0,
@@ -277,7 +290,7 @@ def _build(
         cleanup_evidence_hash=_sha(canonical_json_bytes(cleanup)),
         started_at=NOW,
         finished_at=NOW,
-        adapter_provenance=_provenance(),
+        adapter_provenance=_runner_provenance(),
         synthetic=True,
     )
     attempt_ref = _write(root / "attempt.json", attempt.model_dump(mode="json"))
@@ -322,7 +335,7 @@ def _add_second_successful_generator(
         request_id=REQUEST_ID,
         generation_run_id=RUN_ID,
         generator_id="agent-two",
-        adapter_provenance=_provenance(),
+        adapter_provenance=_generator_provenance(),
         status="succeeded",
         proposals=[proposal],
         raw_output_uri=raw_ref["uri"],
@@ -345,11 +358,14 @@ def _add_second_successful_generator(
         attempt_id=UUID("10000000-0000-0000-0000-000000000097"),
         generation_run_id=RUN_ID,
         request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
         plan_id=PLAN_ID,
         generator_id="agent-two",
         attempt_ordinal=0,
         status="succeeded",
         batch=batch_ref,
+        raw_output_uri=raw_ref["uri"],
+        raw_output_hash=raw_ref["content_hash"],
         output_bytes=len(raw_output),
         output_tokens=10,
         wall_seconds=1.0,
@@ -357,7 +373,7 @@ def _add_second_successful_generator(
         cleanup_evidence_hash=_sha(canonical_json_bytes(cleanup)),
         started_at=NOW,
         finished_at=NOW,
-        adapter_provenance=_provenance(),
+        adapter_provenance=_runner_provenance(),
         synthetic=True,
     )
     attempt_ref = _write(root / "attempt-agent-two.json", attempt.model_dump(mode="json"))
@@ -594,7 +610,7 @@ def test_cross_batch_identities_are_rejected(
 def test_attempt_and_batch_usage_must_match(tmp_path: Path) -> None:
     context, verifier = _build(tmp_path)
     attempt = json.loads((tmp_path / "attempt.json").read_text("utf-8"))
-    attempt["wall_seconds"] = 2.0
+    attempt["wall_seconds"] = 0.5
     attempt_ref = _write(tmp_path / "attempt.json", attempt)
     context = context.model_copy(
         update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
@@ -604,3 +620,85 @@ def test_attempt_and_batch_usage_must_match(tmp_path: Path) -> None:
         verifier.verify(context)
 
     assert raised.value.code == "attempt_usage_mismatch"
+
+
+def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path / "valid")
+    result = verifier.verify(context)
+    assert {item.capability for item in result.adapter_provenance} >= {
+        "agent_runner",
+        "candidate_proposal_generation",
+    }
+
+    context, verifier = _build(tmp_path / "bad-runner")
+    attempt_path = tmp_path / "bad-runner" / "attempt.json"
+    attempt = json.loads(attempt_path.read_text("utf-8"))
+    attempt["adapter_provenance"] = _generator_provenance().model_dump(mode="json")
+    attempt_ref = _write(attempt_path, attempt)
+    context = context.model_copy(
+        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    )
+    with pytest.raises(AgentProposalEvidenceError) as runner_error:
+        verifier.verify(context)
+    assert runner_error.value.code == "attempt_provenance_invalid"
+
+    context, verifier = _build(tmp_path / "bad-generator")
+    batch_path = tmp_path / "bad-generator" / "batch.json"
+    attempt_path = tmp_path / "bad-generator" / "attempt.json"
+    batch = json.loads(batch_path.read_text("utf-8"))
+    batch["adapter_provenance"] = _runner_provenance().model_dump(mode="json")
+    batch_ref = _write(batch_path, batch)
+    attempt = json.loads(attempt_path.read_text("utf-8"))
+    attempt["batch"] = batch_ref
+    attempt_ref = _write(attempt_path, attempt)
+    context = context.model_copy(
+        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    )
+    with pytest.raises(AgentProposalEvidenceError) as generator_error:
+        verifier.verify(context)
+    assert generator_error.value.code == "batch_provenance_invalid"
+
+
+def test_attempt_batch_status_and_raw_output_binding(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path / "partial")
+    batch_path = tmp_path / "partial" / "batch.json"
+    attempt_path = tmp_path / "partial" / "attempt.json"
+    batch = json.loads(batch_path.read_text("utf-8"))
+    batch["status"] = "partial"
+    batch_ref = _write(batch_path, batch)
+    attempt = json.loads(attempt_path.read_text("utf-8"))
+    attempt["batch"] = batch_ref
+    attempt_ref = _write(attempt_path, attempt)
+    context = context.model_copy(
+        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    )
+    assert verifier.verify(context).status == "ready_for_review"
+
+    context, verifier = _build(tmp_path / "failed")
+    batch_path = tmp_path / "failed" / "batch.json"
+    attempt_path = tmp_path / "failed" / "attempt.json"
+    batch = json.loads(batch_path.read_text("utf-8"))
+    batch["status"] = "failed"
+    batch["proposals"] = []
+    batch_ref = _write(batch_path, batch)
+    attempt = json.loads(attempt_path.read_text("utf-8"))
+    attempt["batch"] = batch_ref
+    attempt_ref = _write(attempt_path, attempt)
+    context = context.model_copy(
+        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    )
+    with pytest.raises(AgentProposalEvidenceError) as status_error:
+        verifier.verify(context)
+    assert status_error.value.code == "attempt_batch_status_mismatch"
+
+    context, verifier = _build(tmp_path / "raw")
+    attempt_path = tmp_path / "raw" / "attempt.json"
+    attempt = json.loads(attempt_path.read_text("utf-8"))
+    attempt["raw_output_hash"] = _fixed_hash("f")
+    attempt_ref = _write(attempt_path, attempt)
+    context = context.model_copy(
+        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    )
+    with pytest.raises(AgentProposalEvidenceError) as raw_error:
+        verifier.verify(context)
+    assert raw_error.value.code == "raw_output_binding_mismatch"

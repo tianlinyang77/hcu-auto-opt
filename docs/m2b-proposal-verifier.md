@@ -13,6 +13,13 @@ then independently recomputes the Knowledge, Request, Plan and Proposal identity
 hashes. Attempt, Batch, Request, Plan and Generation Run bindings are checked as
 one chain. Producer summaries are not trusted.
 
+Runner Attempt evidence and Candidate Proposal Batch evidence deliberately carry
+different provenance. D requires `agent_runner` provenance on the Attempt and
+`candidate_proposal_generation` provenance on the Batch, then joins the layers by
+Request Hash, Batch evidence Hash, raw-output URI/SHA-256, output bytes and bounded
+usage. A successful Runner Attempt may contain a succeeded or partial Batch, but
+never a failed Batch.
+
 Attempt references are canonicalized into Plan generator order, then Attempt and
 Proposal ordinal order. Reversing evidence-reference completion order cannot
 change the retained Proposal or input digest. A generator is conservatively

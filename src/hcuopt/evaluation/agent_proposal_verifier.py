@@ -224,11 +224,17 @@ class AgentProposalVerifier:
             if (
                 attempt.generation_run_id != context.generation_run_id
                 or attempt.request_id != request.request_id
+                or attempt.request_hash != request_hash
                 or attempt.plan_id != plan.plan_id
                 or attempt.generator_id not in plan_entries
             ):
                 raise AgentProposalEvidenceError(
                     "attempt_binding_mismatch", "Attempt binding does not match the Plan"
+                )
+            if attempt.adapter_provenance.capability != "agent_runner":
+                raise AgentProposalEvidenceError(
+                    "attempt_provenance_invalid",
+                    "Attempt must carry B Agent Runner provenance",
                 )
             entry = plan_entries[attempt.generator_id]
             if attempt.attempt_ordinal >= entry.max_attempts:
@@ -277,12 +283,27 @@ class AgentProposalVerifier:
                     or batch.generation_run_id != context.generation_run_id
                     or batch.generator_id != attempt.generator_id
                     or batch.attempt_count != attempt.attempt_ordinal + 1
-                    or batch.started_at != attempt.started_at
-                    or batch.finished_at != attempt.finished_at
-                    or batch.adapter_provenance != attempt.adapter_provenance
                 ):
                     raise AgentProposalEvidenceError(
                         "batch_binding_mismatch", "Batch binding does not match its Attempt"
+                    )
+                if batch.adapter_provenance.capability != "candidate_proposal_generation":
+                    raise AgentProposalEvidenceError(
+                        "batch_provenance_invalid",
+                        "Batch must carry C Candidate Generator provenance",
+                    )
+                if batch.status == "failed":
+                    raise AgentProposalEvidenceError(
+                        "attempt_batch_status_mismatch",
+                        "successful Runner Attempt cannot bind a failed Proposal Batch",
+                    )
+                if (
+                    attempt.raw_output_uri != batch.raw_output_uri
+                    or attempt.raw_output_hash != batch.raw_output_hash
+                ):
+                    raise AgentProposalEvidenceError(
+                        "raw_output_binding_mismatch",
+                        "Attempt and Batch bind different raw Generator output",
                     )
                 raw = self.reader.read_raw_bytes(batch.raw_output_uri, batch.raw_output_hash)
                 if len(raw) != batch.output_bytes or attempt.output_bytes != batch.output_bytes:
@@ -394,10 +415,10 @@ class AgentProposalVerifier:
                     "generator_proposal_budget_exceeded",
                     "Batch exceeds its Generator Proposal limit",
                 )
-            if attempt.wall_seconds != batch.wall_seconds:
+            if batch.wall_seconds > attempt.wall_seconds:
                 raise AgentProposalEvidenceError(
                     "attempt_usage_mismatch",
-                    "Attempt and Batch wall usage differ",
+                    "Batch wall usage exceeds its Runner Attempt receipt",
                 )
             if attempt.wall_seconds > entry.timeout_seconds:
                 raise AgentProposalEvidenceError(
