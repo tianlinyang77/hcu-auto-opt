@@ -97,6 +97,20 @@ def usage_is_within_reservation(
     )
 
 
+def conservative_failure_usage(
+    reserved: GenerationBudgetUsage,
+) -> GenerationBudgetUsage:
+    """Charge unknown compute/output fully, but never invent accepted Proposals."""
+
+    return GenerationBudgetUsage(
+        attempts=1,
+        wall_milliseconds=reserved.wall_milliseconds,
+        output_bytes=reserved.output_bytes,
+        tokens=reserved.tokens,
+        proposals=0,
+    )
+
+
 def sum_usage(items: Sequence[GenerationBudgetUsage]) -> GenerationBudgetUsage:
     result = GenerationBudgetUsage()
     for item in items:
@@ -373,6 +387,7 @@ __all__ = [
     "actual_usage_for",
     "build_generation_run_start",
     "build_pending_attempt",
+    "conservative_failure_usage",
     "finalize_proposal_dispositions",
     "generation_attempt_id_for",
     "generation_budget_entry_id_for",

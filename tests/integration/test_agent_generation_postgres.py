@@ -255,7 +255,11 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         self.assertEqual(reconciled.state, "running")
         self.assertEqual(attempts[0].state, "failed")
         self.assertEqual(attempts[0].error_code, "attempt_lease_expired")
-        self.assertEqual(attempts[0].actual, attempts[0].reserved)
+        self.assertEqual(
+            attempts[0].actual.model_dump(exclude={"proposals"}),
+            attempts[0].reserved.model_dump(exclude={"proposals"}),
+        )
+        self.assertEqual(attempts[0].actual.proposals, 0)
         self.assertEqual(attempts[1].attempt_number, 2)
         self.assertEqual(attempts[1].state, "pending")
         self.assertEqual(reconciled.budget_consumed.attempts, 1)

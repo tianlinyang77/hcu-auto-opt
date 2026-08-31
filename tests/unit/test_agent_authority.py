@@ -11,6 +11,7 @@ from hcuopt.agent.authority import (
     AgentAuthorityError,
     actual_usage_for,
     build_generation_run_start,
+    conservative_failure_usage,
     finalize_proposal_dispositions,
     generation_plan_id_for,
     generation_run_id_for,
@@ -214,6 +215,9 @@ def test_batch_usage_and_refs_are_bound_to_the_claimed_attempt() -> None:
 
     assert usage.wall_milliseconds == 250
     assert usage_is_within_reservation(usage, attempt.reserved)
+    conservative = conservative_failure_usage(attempt.reserved)
+    assert conservative.proposals == 0
+    assert conservative.output_bytes == attempt.reserved.output_bytes
     assert refs[0].disposition == "pending"
     assert refs[0].attempt_id == attempt.attempt_id
 

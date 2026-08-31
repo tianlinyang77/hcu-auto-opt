@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from hcuopt.agent.authority import (
     actual_usage_for,
     build_pending_attempt,
+    conservative_failure_usage,
     finalize_proposal_dispositions,
     generation_budget_entry_id_for,
     generation_budget_idempotency_key,
@@ -308,6 +309,7 @@ class AgentGenerationRepositoryMixin:
         attempt: GeneratorAttempt,
         now: datetime,
     ) -> None:
+        actual = conservative_failure_usage(attempt.reserved)
         connection.execute(
             """
             UPDATE agent_generator_attempts
@@ -318,7 +320,7 @@ class AgentGenerationRepositoryMixin:
             WHERE attempt_id = %s AND state = 'running'
             """,
             (
-                Jsonb(attempt.reserved.model_dump(mode="json")),
+                Jsonb(actual.model_dump(mode="json")),
                 now,
                 now,
                 attempt.attempt_id,
@@ -326,7 +328,7 @@ class AgentGenerationRepositoryMixin:
         )
         self._insert_budget_entry(
             connection,
-            self._settle_entry(attempt, attempt.reserved, now),
+            self._settle_entry(attempt, actual, now),
         )
 
     def _insert_retry(
@@ -774,7 +776,7 @@ class AgentGenerationRepositoryMixin:
                 error_message = None
                 if not usage_is_within_reservation(actual, attempt.reserved):
                     state = "failed"
-                    actual = attempt.reserved
+                    actual = conservative_failure_usage(attempt.reserved)
                     refs = ()
                     error_code = "generation_budget_exceeded"
                     error_message = "generator output exceeded its immutable Attempt reservation"

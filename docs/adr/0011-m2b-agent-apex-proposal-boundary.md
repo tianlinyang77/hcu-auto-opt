@@ -94,6 +94,8 @@ A 使用独立的 `GenerationRun`、`GeneratorAttempt`、`GenerationBudgetLedger
 `created → running → awaiting_review → completed/failed/cancelled`；Attempt 只允许
 `pending → running → succeeded/failed/cancelled`。PostgreSQL 原子领取使用短事务和 claim token，
 过期 Attempt 按其完整 reservation 保守结算，再按冻结 Plan 决定是否创建下一次有限重试。
+其中墙钟、输出字节和 token 按上限结算；`proposals` 只统计真正进入 Proposal Ref 的输出，失败或
+丢弃 Attempt 固定记 0，不能凭 reservation 虚构已接受 Proposal。
 
 Proposal 到达时先标记为 `pending`，不能用并发完成顺序决定保留者。全部 generator 收敛后，A
 按 `normalized_patch_hash → generator ordinal → proposal ordinal → proposal hash/id` 排序，一次性
