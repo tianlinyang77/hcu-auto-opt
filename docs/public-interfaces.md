@@ -172,3 +172,15 @@ Patch Hash、Baseline、Hotspot、replacement point、审核人、决定、原�
 `formal_intake_allowed=false`，只引用现有 `CandidateSourcePackageRef`、M2a
 `source_family_hash` 及 `BusinessCandidateFamilyVerifier` 的持久化证据/Provenance；后续 Formal
 Intake 必须继续消费既有 M2a Family Authority，不能把回执本身当成 Candidate 或 Family。
+
+A 的 Generation Authority 另外公开 `GenerationRunStartRequest`、`GenerationRun`、
+`GeneratorAttempt`、`GenerationAttemptClaim`、`GenerationBudgetLedgerEntry`、
+`CandidateProposalRef` 与 `GenerationRunStatusView`。CLI 是：
+
+- `hcuopt agent-generation-start <start-request.json>`；
+- `hcuopt agent-generation-status <generation-run-id>`；
+- `hcuopt agent-generation-reconcile <generation-run-id>`。
+
+它们只管理无 HCU 的 Proposal 生成状态。数据库迁移仍由 `hcuopt db-migrate` 显式执行；FastAPI
+不暴露对应写路由。Proposal 在所有 generator 收敛前保持 `pending`，避免把并发完成顺序误当成
+去重权威；barrier 后的 retained/duplicate 仍需 D 独立复算。

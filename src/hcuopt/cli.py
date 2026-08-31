@@ -6,6 +6,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from hcuopt.agent.cli import (
+    configure_agent_generation_parsers,
+    run_agent_generation_command,
+)
 from hcuopt.domain.enums import (
     GateResult,
     HotPatchCapability,
@@ -83,11 +87,15 @@ def build_parser() -> argparse.ArgumentParser:
         sub,
         default_api_url=os.getenv("HCUOPT_API_URL", "http://localhost:8000"),
     )
+    configure_agent_generation_parsers(sub)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    agent_generation_result = run_agent_generation_command(args)
+    if agent_generation_result is not None:
+        return agent_generation_result
     operator_result = run_operator_command(args)
     if operator_result is not None:
         return operator_result

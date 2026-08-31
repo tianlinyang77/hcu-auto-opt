@@ -27,6 +27,28 @@ Package、B 的唯一 Harness、D 的独立验证、Round Barrier/FWER 和人工
 5. A/B/C/D 在 #112 分别签收 dev-only MVP；
 6. 真实 Formal 激活回到 #102/#110，不在本周 MVP PR 中偷开开关。
 
+## A 线当前实现切片
+
+A 线的 durable authority 使用四类 PostgreSQL 记录：
+
+- `agent_generation_runs`：冻结 Request、Plan、Hash、状态、计数和当前预算；
+- `agent_generator_attempts`：记录原子领取、claim token、短租约、Batch/Provenance 和安全错误；
+- `agent_generation_budget_ledger`：append-only reserve/settle/release，独立于 Round Budget；
+- `agent_candidate_proposal_refs`：只保存 Proposal/Patch 引用和 barrier 后的去重处置。
+
+正常操作入口是：
+
+```text
+hcuopt db-migrate
+hcuopt agent-generation-start <start-request.json>
+hcuopt agent-generation-status <generation-run-id>
+hcuopt agent-generation-reconcile <generation-run-id>
+```
+
+这三个 Agent Generation 命令直接访问 PostgreSQL，Web 写入口仍关闭。B 后续消费原子 claim、
+renew 和 settle 方法；C 消费 awaiting_review 的 retained Proposal；D 独立重读 Attempt、预算账本
+和 Proposal Ref。A 不从 CLI 启动 HCU Worker，也不创建 RoundCandidate。
+
 ## 固定边界
 
 ```text

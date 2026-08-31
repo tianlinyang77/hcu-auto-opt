@@ -83,12 +83,52 @@ class GenerationBudget(ContractModel):
     max_proposals: int = Field(ge=1, le=32)
 
 
+class GenerationBudgetUsage(ContractModel):
+    attempts: int = Field(default=0, ge=0, le=64)
+    wall_milliseconds: int = Field(default=0, ge=0, le=86_400_000)
+    output_bytes: int = Field(default=0, ge=0, le=100_000_000)
+    tokens: int = Field(default=0, ge=0, le=100_000_000)
+    proposals: int = Field(default=0, ge=0, le=32)
+
+    def is_zero(self) -> bool:
+        return all(
+            value == 0
+            for value in (
+                self.attempts,
+                self.wall_milliseconds,
+                self.output_bytes,
+                self.tokens,
+                self.proposals,
+            )
+        )
+
+    def fits(self, budget: GenerationBudget) -> bool:
+        return (
+            self.attempts <= budget.max_generator_attempts
+            and self.wall_milliseconds <= budget.max_wall_seconds * 1000
+            and self.output_bytes <= budget.max_total_output_bytes
+            and self.tokens <= budget.max_total_tokens
+            and self.proposals <= budget.max_proposals
+        )
+
+    def plus(self, other: GenerationBudgetUsage) -> GenerationBudgetUsage:
+        return GenerationBudgetUsage(
+            attempts=self.attempts + other.attempts,
+            wall_milliseconds=self.wall_milliseconds + other.wall_milliseconds,
+            output_bytes=self.output_bytes + other.output_bytes,
+            tokens=self.tokens + other.tokens,
+            proposals=self.proposals + other.proposals,
+        )
+
+
 class GeneratorPlanEntry(ContractModel):
     generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
     adapter_profile: str = Field(min_length=1, max_length=200)
     max_attempts: int = Field(ge=1, le=8)
     max_proposals: int = Field(ge=1, le=8)
     timeout_seconds: int = Field(ge=1, le=7_200)
+    max_output_bytes_per_attempt: int = Field(ge=1, le=100_000_000)
+    max_tokens_per_attempt: int = Field(ge=1, le=100_000_000)
 
     @field_validator("adapter_profile")
     @classmethod
@@ -129,6 +169,32 @@ class ApexGenerationPlan(ContractModel):
             raise ValueError("Apex Plan concurrency exceeds its generator count")
         if sum(item.max_attempts for item in self.generators) > self.budget.max_generator_attempts:
             raise ValueError("Apex Plan attempts exceed its generation Budget")
+        if (
+            sum(item.timeout_seconds * item.max_attempts for item in self.generators)
+            > self.budget.max_wall_seconds
+        ):
+            raise ValueError("Apex Plan attempt time exceeds its generation Budget")
+        if (
+            sum(
+                item.max_output_bytes_per_attempt * item.max_attempts
+                for item in self.generators
+            )
+            > self.budget.max_total_output_bytes
+        ):
+            raise ValueError("Apex Plan output bytes exceed its generation Budget")
+        if (
+            sum(
+                item.max_tokens_per_attempt * item.max_attempts
+                for item in self.generators
+            )
+            > self.budget.max_total_tokens
+        ):
+            raise ValueError("Apex Plan tokens exceed its generation Budget")
+        if (
+            sum(item.max_proposals for item in self.generators)
+            > self.budget.max_proposals
+        ):
+            raise ValueError("Apex Plan proposals exceed its generation Budget")
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise ValueError("Apex Plan creation time must be timezone-aware")
         return self
@@ -226,11 +292,16 @@ class CandidateProposalBatch(ContractModel):
     raw_output_uri: str = Field(min_length=1, max_length=4000)
     raw_output_hash: str = Field(pattern=SHA256_PATTERN)
     output_bytes: int = Field(ge=0)
+    token_count: int = Field(default=0, ge=0, le=100_000_000)
     attempt_count: int = Field(ge=1, le=8)
     wall_seconds: float = Field(ge=0)
     started_at: datetime
     finished_at: datetime
     synthetic: bool
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+    error_message: str | None = Field(default=None, min_length=1, max_length=1000)
     performance_conclusion: Literal["not_measured"] = "not_measured"
     automatic_release_allowed: Literal[False] = False
 
@@ -247,6 +318,12 @@ class CandidateProposalBatch(ContractModel):
             raise ValueError("partial Candidate Proposal Batch must contain proposals")
         if self.status == "failed" and self.proposals:
             raise ValueError("failed Candidate Proposal Batch cannot contain proposals")
+        if (self.error_code is None) != (self.error_message is None):
+            raise ValueError("Candidate Proposal Batch error fields must be atomic")
+        if self.status == "succeeded" and self.error_code is not None:
+            raise ValueError("successful Candidate Proposal Batch cannot contain an error")
+        if self.status in {"partial", "failed"} and self.error_code is None:
+            raise ValueError("partial/failed Candidate Proposal Batch requires one safe error")
         if any(item.request_id != self.request_id for item in self.proposals):
             raise ValueError("Candidate Proposal Batch contains a cross-request proposal")
         if any(item.request_hash != self.request_hash for item in self.proposals):
@@ -410,4 +487,347 @@ class CandidateProposalPromotionReceipt(ContractModel):
             and not self.synthetic
         ):
             raise ValueError("fake source Family verification must remain synthetic")
+        return self
+
+
+class GenerationBudgetLedgerEntry(ContractModel):
+    schema_version: Literal["m2b-generation-budget-ledger-v1"] = (
+        "m2b-generation-budget-ledger-v1"
+    )
+    ledger_entry_id: UUID
+    generation_run_id: UUID
+    attempt_id: UUID
+    entry_type: Literal["reserve", "settle", "release"]
+    reserved: GenerationBudgetUsage
+    actual: GenerationBudgetUsage = Field(default_factory=GenerationBudgetUsage)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    created_at: datetime
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_budget_entry_semantics(self) -> GenerationBudgetLedgerEntry:
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("generation Budget Ledger time must be timezone-aware")
+        if self.reserved.attempts != 1:
+            raise ValueError("generation Budget reservation must cover one attempt")
+        if self.entry_type in {"reserve", "release"} and not self.actual.is_zero():
+            raise ValueError("generation Budget reserve/release cannot report actual usage")
+        if self.entry_type == "settle":
+            if self.actual.attempts != 1:
+                raise ValueError("generation Budget settlement must consume one attempt")
+            if any(
+                actual > reserved
+                for actual, reserved in (
+                    (self.actual.wall_milliseconds, self.reserved.wall_milliseconds),
+                    (self.actual.output_bytes, self.reserved.output_bytes),
+                    (self.actual.tokens, self.reserved.tokens),
+                    (self.actual.proposals, self.reserved.proposals),
+                )
+            ):
+                raise ValueError("generation Budget actual usage exceeds its reservation")
+        return self
+
+
+class CandidateProposalRef(ContractModel):
+    schema_version: Literal["m2b-candidate-proposal-ref-v1"] = (
+        "m2b-candidate-proposal-ref-v1"
+    )
+    proposal_id: UUID
+    proposal_hash: str = Field(pattern=SHA256_PATTERN)
+    generation_run_id: UUID
+    request_id: UUID
+    attempt_id: UUID
+    batch_id: UUID
+    generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
+    generator_ordinal: int = Field(ge=0, le=7)
+    proposal_ordinal: int = Field(ge=0, le=31)
+    patch_uri: str = Field(min_length=1, max_length=4000)
+    patch_hash: str = Field(pattern=SHA256_PATTERN)
+    normalized_patch_hash: str = Field(pattern=SHA256_PATTERN)
+    disposition: Literal["pending", "retained", "duplicate"]
+    duplicate_of_proposal_id: UUID | None = None
+    review_required: Literal[True] = True
+    formal_intake_allowed: Literal[False] = False
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_dedupe_binding(self) -> CandidateProposalRef:
+        if (self.disposition == "duplicate") != (self.duplicate_of_proposal_id is not None):
+            raise ValueError("duplicate Proposal Ref requires its retained identity")
+        if self.duplicate_of_proposal_id == self.proposal_id:
+            raise ValueError("Proposal Ref cannot duplicate itself")
+        return self
+
+
+class GeneratorAttempt(ContractModel):
+    schema_version: Literal["m2b-generator-attempt-v1"] = "m2b-generator-attempt-v1"
+    attempt_id: UUID
+    generation_run_id: UUID
+    plan_id: UUID
+    request_id: UUID
+    generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
+    generator_ordinal: int = Field(ge=0, le=7)
+    attempt_number: int = Field(ge=1, le=8)
+    adapter_profile: str = Field(min_length=1, max_length=200)
+    state: Literal["pending", "running", "succeeded", "failed", "cancelled"]
+    reserved: GenerationBudgetUsage
+    actual: GenerationBudgetUsage = Field(default_factory=GenerationBudgetUsage)
+    worker_id: str | None = Field(default=None, min_length=1, max_length=200)
+    claim_token: UUID | None = None
+    lease_expires_at: datetime | None = None
+    batch_id: UUID | None = None
+    batch_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    batch_status: Literal["succeeded", "partial", "failed"] | None = None
+    raw_output_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    raw_output_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    adapter_provenance: AdapterProvenance | None = None
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+    error_message: str | None = Field(default=None, min_length=1, max_length=1000)
+    dev_only: Literal[True] = True
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_attempt_state_binding(self) -> GeneratorAttempt:
+        for timestamp in (
+            self.created_at,
+            self.updated_at,
+            self.lease_expires_at,
+            self.started_at,
+            self.finished_at,
+        ):
+            if timestamp is not None and (
+                timestamp.tzinfo is None or timestamp.utcoffset() is None
+            ):
+                raise ValueError("Generator Attempt times must be timezone-aware")
+        if self.updated_at < self.created_at:
+            raise ValueError("Generator Attempt update precedes creation")
+        claimed = all(
+            value is not None
+            for value in (
+                self.worker_id,
+                self.claim_token,
+                self.lease_expires_at,
+                self.started_at,
+            )
+        )
+        if any(
+            value is not None
+            for value in (
+                self.worker_id,
+                self.claim_token,
+                self.lease_expires_at,
+                self.started_at,
+            )
+        ) != claimed:
+            raise ValueError("Generator Attempt claim fields must resolve atomically")
+        terminal = self.state in {"succeeded", "failed", "cancelled"}
+        if self.state == "pending" and (claimed or not self.actual.is_zero()):
+            raise ValueError("pending Generator Attempt cannot contain execution state")
+        if self.state == "running" and (not claimed or self.finished_at is not None):
+            raise ValueError("running Generator Attempt requires one live claim")
+        if terminal != (self.finished_at is not None):
+            raise ValueError("terminal Generator Attempt requires finished_at")
+        if self.state == "succeeded" and (
+            not claimed or self.batch_id is None or self.batch_hash is None
+        ):
+            raise ValueError("successful Generator Attempt requires its Proposal Batch")
+        batch_fields = (
+            self.batch_id,
+            self.batch_hash,
+            self.batch_status,
+            self.raw_output_uri,
+            self.raw_output_hash,
+            self.adapter_provenance,
+        )
+        if any(value is not None for value in batch_fields) != all(
+            value is not None for value in batch_fields
+        ):
+            raise ValueError("Generator Attempt Proposal Batch fields must be atomic")
+        if self.state in {"pending", "running", "cancelled"} and self.batch_id is not None:
+            raise ValueError("unfinished/cancelled Generator Attempt cannot bind a Proposal Batch")
+        if self.adapter_provenance is not None and (
+            self.adapter_provenance.profile != self.adapter_profile
+        ):
+            raise ValueError("Generator Attempt Adapter Provenance differs from its Plan")
+        if (self.error_code is None) != (self.error_message is None):
+            raise ValueError("Generator Attempt error fields must be atomic")
+        if (self.state == "failed") != (self.error_code is not None):
+            raise ValueError("failed Generator Attempt requires one safe error")
+        if self.state in {"succeeded", "failed"} and self.actual.attempts != 1:
+            raise ValueError("executed Generator Attempt must consume one attempt")
+        if self.finished_at is not None and self.started_at is not None:
+            if self.finished_at < self.started_at:
+                raise ValueError("Generator Attempt finishes before it starts")
+        return self
+
+
+class GenerationRun(ContractModel):
+    schema_version: Literal["m2b-generation-run-v1"] = "m2b-generation-run-v1"
+    generation_run_id: UUID
+    request: CandidateGenerationRequest
+    request_hash: str = Field(pattern=SHA256_PATTERN)
+    plan: ApexGenerationPlan
+    plan_hash: str = Field(pattern=SHA256_PATTERN)
+    actor: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    state: Literal[
+        "created",
+        "running",
+        "awaiting_review",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    planned_generator_count: int = Field(ge=1, le=8)
+    attempt_count: int = Field(ge=0, le=64)
+    terminal_attempt_count: int = Field(ge=0, le=64)
+    terminal_generator_count: int = Field(ge=0, le=8)
+    proposal_count: int = Field(ge=0, le=32)
+    retained_proposal_count: int = Field(ge=0, le=32)
+    budget_reserved: GenerationBudgetUsage = Field(default_factory=GenerationBudgetUsage)
+    budget_consumed: GenerationBudgetUsage = Field(default_factory=GenerationBudgetUsage)
+    review_evidence_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    review_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    error_code: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
+    )
+    error_message: str | None = Field(default=None, min_length=1, max_length=1000)
+    dev_only: Literal[True] = True
+    formal_intake_allowed: Literal[False] = False
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def require_generation_run_binding(self) -> GenerationRun:
+        for timestamp in (self.created_at, self.updated_at, self.finished_at):
+            if timestamp is not None and (
+                timestamp.tzinfo is None or timestamp.utcoffset() is None
+            ):
+                raise ValueError("Generation Run times must be timezone-aware")
+        if self.updated_at < self.created_at:
+            raise ValueError("Generation Run update precedes creation")
+        if self.generation_run_id != self.request.generation_run_id:
+            raise ValueError("Generation Run and Request identities differ")
+        if self.generation_run_id != self.plan.generation_run_id:
+            raise ValueError("Generation Run and Plan identities differ")
+        if self.plan.request_id != self.request.request_id:
+            raise ValueError("Generation Plan and Request identities differ")
+        if self.plan.request_hash != self.request_hash:
+            raise ValueError("Generation Plan does not bind the Request Hash")
+        if self.planned_generator_count != len(self.plan.generators):
+            raise ValueError("Generation Run generator count differs from its Plan")
+        if self.terminal_attempt_count > self.attempt_count:
+            raise ValueError("Generation Run terminal attempts exceed all attempts")
+        if self.terminal_generator_count > self.planned_generator_count:
+            raise ValueError("Generation Run terminal generators exceed its Plan")
+        if self.retained_proposal_count > self.proposal_count:
+            raise ValueError("Generation Run retained Proposals exceed all Proposals")
+        if not self.budget_reserved.fits(self.plan.budget):
+            raise ValueError("Generation Run reservations exceed its generation Budget")
+        if not self.budget_consumed.fits(self.plan.budget):
+            raise ValueError("Generation Run consumption exceeds its generation Budget")
+        if not self.budget_reserved.plus(self.budget_consumed).fits(self.plan.budget):
+            raise ValueError("Generation Run active and consumed Budget exceeds its limit")
+        if (self.review_evidence_uri is None) != (self.review_evidence_hash is None):
+            raise ValueError("Generation Run review evidence fields must be atomic")
+        if (self.error_code is None) != (self.error_message is None):
+            raise ValueError("Generation Run error fields must be atomic")
+        if (self.state == "failed") != (self.error_code is not None):
+            raise ValueError("failed Generation Run requires one safe error")
+        terminal = self.state in {"completed", "failed", "cancelled"}
+        if terminal != (self.finished_at is not None):
+            raise ValueError("terminal Generation Run requires finished_at")
+        if self.state in {"awaiting_review", "completed"} and (
+            self.terminal_generator_count != self.planned_generator_count
+            or self.retained_proposal_count < 1
+        ):
+            raise ValueError("reviewable Generation Run requires retained Proposals")
+        if self.state == "completed" and self.review_evidence_uri is None:
+            raise ValueError("completed Generation Run requires review evidence")
+        if self.state != "completed" and self.review_evidence_uri is not None:
+            raise ValueError("only completed Generation Run can bind review evidence")
+        return self
+
+
+class GenerationRunStartRequest(ContractModel):
+    schema_version: Literal["m2b-generation-run-start-request-v1"] = (
+        "m2b-generation-run-start-request-v1"
+    )
+    request: CandidateGenerationRequest
+    plan: ApexGenerationPlan
+    actor: str = Field(min_length=1, max_length=200)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    dev_only: Literal[True] = True
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+
+class GenerationRunStartView(GenerationRun):
+    replayed: bool
+
+
+class GenerationAttemptClaim(ContractModel):
+    schema_version: Literal["m2b-generation-attempt-claim-v1"] = (
+        "m2b-generation-attempt-claim-v1"
+    )
+    run: GenerationRun
+    attempt: GeneratorAttempt
+    generator: GeneratorPlanEntry
+    request: CandidateGenerationRequest
+    dev_only: Literal[True] = True
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_claim_binding(self) -> GenerationAttemptClaim:
+        if self.attempt.state != "running":
+            raise ValueError("Generation Attempt Claim requires a running attempt")
+        if self.run.generation_run_id != self.attempt.generation_run_id:
+            raise ValueError("Generation Attempt Claim crosses Runs")
+        if self.attempt.plan_id != self.run.plan.plan_id:
+            raise ValueError("Generation Attempt Claim crosses Plans")
+        if self.attempt.request_id != self.run.request.request_id:
+            raise ValueError("Generation Attempt Claim crosses Requests")
+        if self.request != self.run.request:
+            raise ValueError("Generation Attempt Claim Request differs from its Run")
+        if self.generator.generator_id != self.attempt.generator_id:
+            raise ValueError("Generation Attempt Claim generator differs from its Attempt")
+        if self.run.plan.generators[self.attempt.generator_ordinal] != self.generator:
+            raise ValueError("Generation Attempt Claim generator ordinal is invalid")
+        return self
+
+
+class GenerationRunStatusView(ContractModel):
+    schema_version: Literal["m2b-generation-run-status-v1"] = (
+        "m2b-generation-run-status-v1"
+    )
+    run: GenerationRun
+    attempts: tuple[GeneratorAttempt, ...]
+    proposals: tuple[CandidateProposalRef, ...]
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_status_binding(self) -> GenerationRunStatusView:
+        if any(
+            item.generation_run_id != self.run.generation_run_id
+            for item in (*self.attempts, *self.proposals)
+        ):
+            raise ValueError("Generation Run Status contains a cross-run member")
         return self

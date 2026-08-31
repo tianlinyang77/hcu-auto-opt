@@ -87,6 +87,21 @@ C/D 都必须重读原始 Patch，先复算原始字节 SHA256，再按上述公
 调度、CLI 和只读 UI。真实 Agent Proposal 晋级为业务 Candidate、真实 M2a Formal Start 或生产
 Web 写入口必须继续满足 #102、#110、A/B/C/D 接受和项目所有者资源窗口授权。
 
+### 7. Generation Authority 独立持久化并按轮次收敛
+
+A 使用独立的 `GenerationRun`、`GeneratorAttempt`、`GenerationBudgetLedgerEntry` 和
+`CandidateProposalRef`。Run 只允许
+`created → running → awaiting_review → completed/failed/cancelled`；Attempt 只允许
+`pending → running → succeeded/failed/cancelled`。PostgreSQL 原子领取使用短事务和 claim token，
+过期 Attempt 按其完整 reservation 保守结算，再按冻结 Plan 决定是否创建下一次有限重试。
+
+Proposal 到达时先标记为 `pending`，不能用并发完成顺序决定保留者。全部 generator 收敛后，A
+按 `normalized_patch_hash → generator ordinal → proposal ordinal → proposal hash/id` 排序，一次性
+形成 retained/duplicate 结果。D 仍需独立重算，A 的去重结果不是性能或正确性 verdict。
+
+生成预算账本与 Round Budget 使用不同表、不同 Contract 和不同 idempotency key。数据库约束
+永久禁止 HCU、Measurement、Formal Intake 和自动发布字段被打开。
+
 ## A/B/C/D 分工
 
 | DRI | 权责 | Issue |
