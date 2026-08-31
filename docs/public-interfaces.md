@@ -172,3 +172,11 @@ Patch Hash、Baseline、Hotspot、replacement point、审核人、决定、原�
 `formal_intake_allowed=false`，只引用现有 `CandidateSourcePackageRef`、M2a
 `source_family_hash` 及 `BusinessCandidateFamilyVerifier` 的持久化证据/Provenance；后续 Formal
 Intake 必须继续消费既有 M2a Family Authority，不能把回执本身当成 Candidate 或 Family。
+
+B 的 `AgentRunnerAdapter` 位于 `src/hcuopt/adapters/agent_runner.py`，是上述 Generator 下面的
+非持久化执行边界。它接收绝对 executable、结构化 argv、白名单环境、只读输入和单次生成预算，
+返回 Proposal bytes 与 `AgentRunEvidence`；不直接创建 `CandidateProposalBatch`。Local-command
+实现同时校验 executable/argv prefix allowlist、禁止覆盖内部环境变量、禁止 shell，并在 input、
+timeout、输出/token 超限、畸形 usage、非零退出或 cleanup 未证实时
+failure closed。Deterministic 实现仅用于 synthetic CI。该接口不扩展 `agent_v1`，也不拥有
+Candidate、Package、HCU、Measurement、Holdout 或发布权限。
