@@ -120,11 +120,13 @@
   Windows 全量结果为 `458 passed, 21 skipped, 18 failed`：16 项仍为符号链接权限，2 项仍为
   只读临时制品删除，新增 readiness 定向测试 `10 passed`。Linux CI 继续作为这些文件语义的
   正式门禁。M2a Formal Authority 切片复验为 `464 passed, 21 skipped, 18 failed`；失败集合
-  未增加，仍是同样的 16 项符号链接权限和 2 项只读临时制品删除。
+  未增加，仍是同样的 16 项符号链接权限和 2 项只读临时制品删除。M2b Agent Contract
+  #117 联审修复在 2026-08-31 的全量结果为 `516 passed, 92 skipped, 19 failed`；19 项仍全部
+  属于相同的符号链接或只读临时制品删除限制，新增 Contract 定向回归为 `33 passed, 1 skipped`。
 - Applies to: 普通权限 Windows Python 3.10+ 的仓库全量单测。
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。
-- Last updated: 2026-08-29
+- Last updated: 2026-08-31
 
 ## Windows 可编辑安装可能指向同项目的旧 checkout
 

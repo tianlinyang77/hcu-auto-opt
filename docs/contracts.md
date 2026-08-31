@@ -23,7 +23,9 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | ExperimentEvidence | A/D | Registry/KB | 区分事实、复验知识和 Agent 推测 |
 | KnowledgeSnapshot | C | Agent/A/D | 知识来源、版本、许可证和 Hash 不可变；只提供建议 |
 | CandidateGenerationRequest | A | Agent/C/D | 绑定 Target、Stage 0、Baseline、Hotspot、Workload 与知识快照；禁止 HCU/Holdout/测量访问 |
-| CandidateProposal | Agent | A/C/D | 只保存待审 Patch、意图、风险和 provenance；不是 Candidate 或性能结论 |
+| CandidateProposal | Agent | A/C/D | 同时冻结完整 Request Hash 与待审 Patch 身份；不是 Candidate 或性能结论 |
+| CandidateProposalReviewRecord | C/人工审核人 | A/C/D | 决策绑定 Proposal、Request、Patch、Baseline、Hotspot、审核人、原因、时间、幂等键和审核证据 |
+| CandidateProposalPromotionReceipt | C | A/D | 只引用既有 `CandidateSourcePackageRef` 与 M2a source-family verifier 证据；不得新造 Candidate/Artifact/Family |
 | ApexGenerationPlan | A | Agent/B/C/D | 只控制生成器、重试、去重和生成预算；不控制 Round/HCU |
 
 ## M1 签核后的兼容边界

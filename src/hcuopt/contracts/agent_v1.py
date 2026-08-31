@@ -10,6 +10,7 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from hcuopt.contracts.base import ContractModel
+from hcuopt.contracts.m2 import CandidateSourcePackageRef
 from hcuopt.contracts.platform_v1 import SHA256_PATTERN, AdapterProvenance
 
 AGENT_CONTRACT_VERSION = "m2b-agent-v1"
@@ -171,6 +172,7 @@ class CandidateProposal(ContractModel):
     schema_version: Literal["m2b-candidate-proposal-v1"] = "m2b-candidate-proposal-v1"
     proposal_id: UUID
     request_id: UUID
+    request_hash: str = Field(pattern=SHA256_PATTERN)
     generation_run_id: UUID
     generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
     ordinal: int = Field(ge=0, le=31)
@@ -215,6 +217,7 @@ class CandidateProposalBatch(ContractModel):
     )
     batch_id: UUID
     request_id: UUID
+    request_hash: str = Field(pattern=SHA256_PATTERN)
     generation_run_id: UUID
     generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
     adapter_provenance: AdapterProvenance
@@ -246,6 +249,8 @@ class CandidateProposalBatch(ContractModel):
             raise ValueError("failed Candidate Proposal Batch cannot contain proposals")
         if any(item.request_id != self.request_id for item in self.proposals):
             raise ValueError("Candidate Proposal Batch contains a cross-request proposal")
+        if any(item.request_hash != self.request_hash for item in self.proposals):
+            raise ValueError("Candidate Proposal Batch contains a cross-request Hash proposal")
         if any(item.generation_run_id != self.generation_run_id for item in self.proposals):
             raise ValueError("Candidate Proposal Batch contains a cross-run proposal")
         if any(item.generator_id != self.generator_id for item in self.proposals):
@@ -256,4 +261,153 @@ class CandidateProposalBatch(ContractModel):
             raise ValueError("Candidate Proposal Batch contains duplicate member identities")
         if self.adapter_provenance.implementation_kind == "fake" and not self.synthetic:
             raise ValueError("fake Candidate Generator output must be synthetic")
+        return self
+
+
+class CandidateProposalReviewRecord(ContractModel):
+    """Human decision over one fully bound, independently replayable Proposal."""
+
+    schema_version: Literal["m2b-candidate-proposal-review-v1"] = (
+        "m2b-candidate-proposal-review-v1"
+    )
+    review_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    proposal_id: UUID
+    proposal_hash: str = Field(pattern=SHA256_PATTERN)
+    request_id: UUID
+    request_hash: str = Field(pattern=SHA256_PATTERN)
+    generation_run_id: UUID
+    patch_uri: str = Field(min_length=1, max_length=4000)
+    patch_hash: str = Field(pattern=SHA256_PATTERN)
+    normalized_patch_hash: str = Field(pattern=SHA256_PATTERN)
+    baseline_epoch_id: UUID
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    hotspot_id: UUID
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    decision: Literal["approved", "rejected"]
+    reviewer: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=4000)
+    review_evidence_uri: str = Field(min_length=1, max_length=4000)
+    review_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    reviewed_at: datetime
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    formal_intake_allowed: Literal[False] = False
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+    automatic_release_allowed: Literal[False] = False
+
+    @field_validator(
+        "idempotency_key",
+        "patch_uri",
+        "replacement_point",
+        "reviewer",
+        "reason",
+        "review_evidence_uri",
+    )
+    @classmethod
+    def require_normalized_text(cls, value: str) -> str:
+        return _normalized_text(value)
+
+    @model_validator(mode="after")
+    def require_timezone_aware_review(self) -> CandidateProposalReviewRecord:
+        if self.reviewed_at.tzinfo is None or self.reviewed_at.utcoffset() is None:
+            raise ValueError("Candidate Proposal review time must be timezone-aware")
+        return self
+
+
+class CandidateProposalPromotionReceipt(ContractModel):
+    """Receipt linking an approved Proposal to existing M2a package authority."""
+
+    schema_version: Literal["m2b-candidate-proposal-promotion-v1"] = (
+        "m2b-candidate-proposal-promotion-v1"
+    )
+    promotion_id: UUID
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    proposal_id: UUID
+    proposal_hash: str = Field(pattern=SHA256_PATTERN)
+    request_id: UUID
+    request_hash: str = Field(pattern=SHA256_PATTERN)
+    generation_run_id: UUID
+    patch_uri: str = Field(min_length=1, max_length=4000)
+    patch_hash: str = Field(pattern=SHA256_PATTERN)
+    normalized_patch_hash: str = Field(pattern=SHA256_PATTERN)
+    baseline_epoch_id: UUID
+    baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    hotspot_id: UUID
+    replacement_point: str = Field(min_length=1, max_length=1000)
+    review: CandidateProposalReviewRecord
+    review_record_hash: str = Field(pattern=SHA256_PATTERN)
+    candidate_id: UUID
+    source_package_ref: CandidateSourcePackageRef
+    source_family_hash: str = Field(pattern=SHA256_PATTERN)
+    source_family_verification_evidence_uri: str = Field(min_length=1, max_length=4000)
+    source_family_verification_evidence_hash: str = Field(pattern=SHA256_PATTERN)
+    source_family_verifier_provenance: AdapterProvenance
+    promoted_by: str = Field(min_length=1, max_length=200)
+    promoted_at: datetime
+    promotion_outcome: Literal["source_package_and_family_verified"] = (
+        "source_package_and_family_verified"
+    )
+    candidate_authority: Literal["existing_m2a_source_package_and_family_only"] = (
+        "existing_m2a_source_package_and_family_only"
+    )
+    synthetic: bool
+    hcu_access_allowed: Literal[False] = False
+    measurement_access_allowed: Literal[False] = False
+    formal_intake_allowed: Literal[False] = False
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+    automatic_release_allowed: Literal[False] = False
+
+    @field_validator(
+        "idempotency_key",
+        "patch_uri",
+        "replacement_point",
+        "source_family_verification_evidence_uri",
+        "promoted_by",
+    )
+    @classmethod
+    def require_normalized_text(cls, value: str) -> str:
+        return _normalized_text(value)
+
+    @model_validator(mode="after")
+    def require_approved_bound_review(self) -> CandidateProposalPromotionReceipt:
+        if self.promoted_at.tzinfo is None or self.promoted_at.utcoffset() is None:
+            raise ValueError("Candidate Proposal promotion time must be timezone-aware")
+        if self.review.decision != "approved":
+            raise ValueError("Candidate Proposal promotion requires an approved review")
+        expected = (
+            self.proposal_id,
+            self.proposal_hash,
+            self.request_id,
+            self.request_hash,
+            self.generation_run_id,
+            self.patch_uri,
+            self.patch_hash,
+            self.normalized_patch_hash,
+            self.baseline_epoch_id,
+            self.baseline_source_hash,
+            self.hotspot_id,
+            self.replacement_point,
+        )
+        actual = (
+            self.review.proposal_id,
+            self.review.proposal_hash,
+            self.review.request_id,
+            self.review.request_hash,
+            self.review.generation_run_id,
+            self.review.patch_uri,
+            self.review.patch_hash,
+            self.review.normalized_patch_hash,
+            self.review.baseline_epoch_id,
+            self.review.baseline_source_hash,
+            self.review.hotspot_id,
+            self.review.replacement_point,
+        )
+        if actual != expected:
+            raise ValueError("Candidate Proposal promotion drifted from its approved review")
+        if (
+            self.source_family_verifier_provenance.implementation_kind == "fake"
+            and not self.synthetic
+        ):
+            raise ValueError("fake source Family verification must remain synthetic")
         return self

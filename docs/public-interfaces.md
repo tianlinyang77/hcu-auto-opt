@@ -152,9 +152,23 @@ OX-1 CLI 和 Operator Read Model 使用同一 API：
 M2b 的第一层公共接口位于 `src/hcuopt/contracts/agent_v1.py` 和
 `CandidateGeneratorAdapter.generate_proposals()`。输入固定 Target、Stage 0、Baseline、Hotspot、
 Workload、Profiler Evidence 与 `KnowledgeSnapshot`；输出只能是带 Patch/意图/风险/provenance
-的 `CandidateProposalBatch`。
+的 `CandidateProposalBatch`。每个 Proposal 和 Batch 都必须保存完整 `request_hash`，消费方从权威
+Store 重读 `CandidateGenerationRequest` 后调用 `candidate_generation_request_hash()` 复算；只有
+`request_id` 相同而 Hash 不同必须 fail closed。
+
+`src/hcuopt/agent/patch_identity.py` 是 `normalized_patch_v1` 的唯一实现：输入必须是 strict UTF-8
+且不得含 NUL；CRLF/CR 统一为 LF，删除 Git `index` 行，删除 `---`/`+++` 行 Tab 后时间戳，去除
+每行末尾空格与 Tab，最终只保留一个尾部 LF。C 和 D 必须重读 `patch_uri` 原始字节并分别复算
+原始 SHA256 与规范化 SHA256，不能接受生成器自报结果，也不能复制一套私有规范化函数。
 
 Proposal 固定需要人工复核、禁止 Formal Intake、没有性能结论且不能自动发布。Apex Plan 只
 拥有 generator、并发、有限重试、去重和 generation budget；HCU、Measurement、Holdout、
 Barrier、FWER、Signoff 和 Release 均不在该 Protocol 中。完整决定见
 [ADR-0011](adr/0011-m2b-agent-apex-proposal-boundary.md)。
+
+人工决策必须写入 `CandidateProposalReviewRecord`，冻结 Proposal/Request Hash、原始/规范化
+Patch Hash、Baseline、Hotspot、replacement point、审核人、决定、原因、时间、幂等键和审核
+证据。只有 approved 记录可生成 `CandidateProposalPromotionReceipt`。晋级回执仍固定
+`formal_intake_allowed=false`，只引用现有 `CandidateSourcePackageRef`、M2a
+`source_family_hash` 及 `BusinessCandidateFamilyVerifier` 的持久化证据/Provenance；后续 Formal
+Intake 必须继续消费既有 M2a Family Authority，不能把回执本身当成 Candidate 或 Family。

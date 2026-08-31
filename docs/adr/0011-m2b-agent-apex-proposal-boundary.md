@@ -22,7 +22,8 @@ M2a 先跑通再开始 M2b，目的是避免同时调试候选生成、测量和
 
 `CandidateGeneratorAdapter` 只接收不可变 `CandidateGenerationRequest`，输出
 `CandidateProposalBatch`。Proposal 保存优化意图、理由、风险、Patch URI/Hash、规范化 Patch
-Hash、触碰路径和生成来源，并固定：
+Hash、触碰路径和生成来源。Proposal 与 Batch 都保存完整 `request_hash`；C/D 必须从权威 Store
+重读 Request 并复算，不能只信任 `request_id`。Proposal 还固定：
 
 - `review_required=true`；
 - `formal_intake_allowed=false`；
@@ -32,6 +33,15 @@ Hash、触碰路径和生成来源，并固定：
 Proposal 不是 SourceSnapshot、Candidate、Artifact 或性能结论。C 必须从批准的 Proposal 重新
 读取 Patch、验证 Baseline/Hotspot/replacement point、重建源码并发布内容寻址业务 Package。
 只有这个 Package 才能进入 #110 的 source family verifier 和后续 M2a Intake。
+
+人工决定使用 `CandidateProposalReviewRecord`，同时冻结 Proposal/Request Hash、原始/规范化
+Patch Hash、Baseline Epoch/Source Hash、Hotspot、replacement point、审核人、决定、原因、时间、
+幂等键和审核证据。rejected 或缺少审核记录的 Proposal 不能晋级。
+
+approved Proposal 的受控晋级使用 `CandidateProposalPromotionReceipt`。回执只能引用既有
+`CandidateSourcePackageRef`、`BusinessCandidateFamilyVerifier` 产生的 `source_family_hash` 和
+持久化 verifier 证据/Provenance，不定义第二套 Candidate、Artifact 或 Family。回执本身继续
+固定 `formal_intake_allowed=false`；后续权威 Intake 仍以现有 M2a Family 为唯一输入。
 
 ### 2. Skills 形成不可变知识快照，但没有系统权威
 
@@ -58,6 +68,18 @@ Holdout 权限，并对超时、子进程、输出超限和临时目录执行 fa
 Knowledge Snapshot、Generation Request、Apex Plan 和 Proposal 都有 canonical JSON Hash。
 集合类字段在 Hash 前按稳定身份排序；改变 Target/Baseline/Hotspot、知识、Patch、意图、Adapter
 或预算都会改变身份。重试使用相同 Request/Plan，不允许悄悄扩大输入或预算。
+
+`normalized_patch_v1` 的唯一公共实现位于 `hcuopt.agent.patch_identity`，规则固定为：
+
+1. 输入按 strict UTF-8 解码，拒绝 NUL；
+2. CRLF 和 CR 统一为 LF；
+3. 每行删除尾部空格与 Tab；
+4. 删除 Git `index ` 元数据行；
+5. `--- ` 与 `+++ ` 文件头删除首个 Tab 及其后的时间戳；
+6. 删除末尾空行并写入唯一尾部 LF。
+
+C/D 都必须重读原始 Patch，先复算原始字节 SHA256，再按上述公共函数复算规范化 SHA256；任一
+声明值不一致即 fail closed。路径或代码内容改变必须产生不同的规范化 Hash。
 
 ### 6. dev-only 完成不等于真实自动优化启用
 

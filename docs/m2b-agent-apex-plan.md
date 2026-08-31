@@ -35,7 +35,7 @@ Agent / Apex
   不可以：写 Round Candidate、占 HCU、测性能、关 Barrier、做 FWER、签核、发布
 
 C Promotion
-  可以：人工批准、重读 Patch、构建 Source Package、进入 source family verifier
+  可以：复算 Request/Patch、人工批准、构建既有 Source Package、进入既有 source family verifier
   不可以：复制 fixture、跳过 provenance、把 Agent 自评当性能结论
 
 现有 M2a
