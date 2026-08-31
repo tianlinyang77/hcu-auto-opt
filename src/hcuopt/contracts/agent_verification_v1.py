@@ -44,6 +44,7 @@ class AgentAttemptEvidence(ContractModel):
     attempt_id: UUID
     generation_run_id: UUID
     request_id: UUID
+    request_hash: str = Field(pattern=SHA256_PATTERN)
     plan_id: UUID
     generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
     attempt_ordinal: int = Field(ge=0, le=7)
@@ -52,6 +53,8 @@ class AgentAttemptEvidence(ContractModel):
         Literal["runner_timeout", "runner_failed", "cleanup_failed", "invalid_output"] | None
     ) = None
     batch: AgentEvidenceRef | None = None
+    raw_output_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    raw_output_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     output_bytes: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     wall_seconds: float = Field(ge=0)
@@ -69,10 +72,17 @@ class AgentAttemptEvidence(ContractModel):
         if self.finished_at < self.started_at:
             raise ValueError("Agent attempt finishes before it starts")
         if self.status == "succeeded":
-            if self.batch is None or self.failure_code is not None:
-                raise ValueError("successful attempt requires a Batch and no failure")
+            if (
+                self.batch is None
+                or self.failure_code is not None
+                or self.raw_output_uri is None
+                or self.raw_output_hash is None
+            ):
+                raise ValueError("successful attempt requires its Batch/raw output and no failure")
         elif self.batch is not None or self.failure_code is None:
             raise ValueError("unsuccessful attempt requires a failure and no Batch")
+        if (self.raw_output_uri is None) != (self.raw_output_hash is None):
+            raise ValueError("Attempt raw output reference must be atomic")
         if self.status == "timed_out" and self.failure_code != "runner_timeout":
             raise ValueError("timed-out attempt requires runner_timeout")
         return self
