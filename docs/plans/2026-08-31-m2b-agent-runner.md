@@ -123,3 +123,30 @@ active.
 
 Commit the verified implementation on `feat/m2b-agent-runner`. A future PR initially targets
 `feat/m2b-agent-contract`, then retargets `main` after PR #117 merges.
+
+### Task 5: Address PR #120 review findings
+
+**Files:**
+- Modify: `src/hcuopt/adapters/agent_runner.py`
+- Modify: `tests/fixtures/agent_runner_stub.py`
+- Modify: `tests/unit/test_agent_runner.py`
+- Modify: Runner interface and ADR documentation
+
+**Step 1: Make process-domain cleanup unconditional**
+
+Use a pre-resume kill-on-close Job Object on Windows and a verified process group on POSIX. Prove
+that a background child is gone even when the root generator exits normally.
+
+**Step 2: Bind evidence to authority and content identity**
+
+Freeze Attempt/Run/Request identity, attempt number, Runner provenance/profile identity, verified
+Generator Artifact Hash, and actual executable Hash in every local-run Evidence record.
+
+**Step 3: Reject ambiguous budget values**
+
+Reject NaN/Inf and wrong runtime types for all float and integer budgets; add negative tests.
+
+**Step 4: Remove Windows test startup races**
+
+Use an explicit child-ready marker before asserting timeout cleanup, then rerun the focused suite on
+Windows and Linux.

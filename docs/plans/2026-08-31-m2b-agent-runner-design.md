@@ -16,16 +16,19 @@ an argv tuple, a fixed adapter-owned working directory, allowlisted environment 
 normalized read-only input files. It launches with `shell=False` and a new process group.
 
 Stdout and stderr are drained concurrently into bounded buffers. Crossing a stream or total
-output limit, reaching the wall-clock deadline, or observing cancellation terminates the whole
-process tree. POSIX uses a process group; Windows uses a new process group plus `taskkill /T`.
-The adapter always removes its attempt directory. A cleanup failure changes the result to a
-closed failure and suppresses proposal bytes.
+output limit, reaching the wall-clock deadline, or a normal root-process exit triggers verified
+cleanup of the whole process tree. POSIX uses a process group; Windows creates the process
+suspended, assigns it to a kill-on-close Job Object, and only then resumes it. The adapter always
+removes its attempt directory. A cleanup failure changes the result to a closed failure and
+suppresses proposal bytes.
 
 Budget evidence is separate from M2/HCU budgets. Every result records one attempted generation,
 elapsed wall time, stdout/stderr/total bytes, reported tokens, exit code, termination steps, and
-cleanup status. The local command reports token usage through an adapter-owned JSON sidecar;
-missing or malformed usage fails closed. Evidence stores hashes and redacted summaries, never
-environment values or raw credentials.
+cleanup status. Evidence also freezes Attempt/Run/Request authority, attempt number, Runner
+provenance/profile identity, the verified Generator Artifact Hash, and the actual executable Hash.
+The local command reports token usage through an adapter-owned JSON sidecar; missing or malformed
+usage fails closed. Evidence stores hashes and redacted summaries, never environment values or raw
+credentials.
 
 The deterministic runner uses the same result/evidence shape without starting a process. It is
 synthetic and exists for CI/scheduler tests only.
@@ -43,14 +46,16 @@ synthetic and exists for CI/scheduler tests only.
 ## Failure and security boundaries
 
 - Executables must be absolute, resolve to an allowlisted file, match an allowlisted argv prefix,
-  and are recorded by identity.
+  and be recorded by content identity. A declared Generator Artifact must be the executable or an
+  exact argv entry and its bytes must match the request's immutable SHA-256 identity.
 - Input paths must be normalized relative paths and are staged read-only.
 - Total staged input bytes are capped before an attempt directory or process is created.
 - The process receives a constructed environment, not the parent environment. Secret, HCU,
   Holdout, SSH, Docker control, and adapter-reserved variables are rejected even when requested.
 - Known HCU device or protected Holdout paths make the local-command preflight fail closed.
 - Output overflow, timeout, non-zero exit, malformed usage, and cleanup failure never produce
-  usable proposal bytes.
+  usable proposal bytes. Floating budgets reject NaN/Inf and integer budgets reject bool/float
+  runtime values.
 - This MVP is a bounded local-command adapter for a dedicated isolated worker; it is not a
   general-purpose hostile-code sandbox.
 
@@ -58,6 +63,8 @@ synthetic and exists for CI/scheduler tests only.
 
 Unit tests use a cross-platform Python stub and injected process/cleanup seams. They cover argv
 literal preservation, environment filtering, read-only inputs, success evidence, non-zero exit,
-timeout and child-tree termination, stdout/stderr/total limits, malformed usage, token overflow,
-host isolation preflight, and failure-closed cleanup. The focused suite must pass on Windows and
-Linux; repository lint and unit tests run before handoff.
+timeout and child-tree termination, normal parent exit with a detached background child,
+stdout/stderr/total limits, malformed usage, token overflow, identity replay/tamper attempts, host
+isolation preflight, and failure-closed cleanup. Child-process tests use an explicit ready handshake
+instead of a fixed startup sleep. The focused suite must pass on Windows and Linux; repository lint
+and unit tests run before handoff.

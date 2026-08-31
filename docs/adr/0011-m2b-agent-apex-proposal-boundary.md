@@ -62,21 +62,27 @@ Measurement Plan、Holdout 或 Evidence Authority。
 `GenerationBudget` 只限制 generator attempt、墙钟、输出字节、token 和 Proposal 数。它不得
 复用或修改 Round Budget Ledger，也不产生 HCU Lease 秒数。B 的 Agent Runner 固定无 HCU、无
 Holdout 权限，并对超时、子进程、输出超限和临时目录执行 failure-closed cleanup。
+本地生成器无论超限、失败还是根进程正常退出，Runner 返回前都必须验证整个受管进程域已退出；
+Windows 使用启动前绑定的 kill-on-close Job Object，POSIX 使用独立进程组。
 
 #### B 线运行时接口
 
 `AgentRunnerAdapter` 是非持久化运行时接口，不是 `agent_v1` 的第二套 Proposal Contract。一次
 `AgentRunRequest` 只包含 attempt/run 身份、完整 Generation Request Hash、绝对 executable、
-结构化 argv、白名单环境变量、只读输入文件和 attempt/time/input/stdout/stderr/total-output/token
-上限。实现必须同时校验 executable 和 argv prefix allowlist，使用 `shell=false`；工作目录由
-Adapter 创建，不能由调用方指向仓库、Holdout 或部署目录。调用方不能覆盖 Runner 自有的 input、
-usage、request hash 和 Windows 系统环境变量。
+不可变 Generator Artifact 路径与预期内容 Hash、结构化 argv、白名单环境变量、只读输入文件和
+attempt/time/input/stdout/stderr/total-output/token 上限。实现必须同时校验 executable、
+Generator Artifact 内容 Hash 和 argv prefix allowlist，使用 `shell=false`；工作目录由 Adapter
+创建，不能由调用方指向仓库、Holdout 或部署目录。调用方不能覆盖 Runner 自有的 input、usage、
+request hash 和 Windows 系统环境变量。所有浮点预算必须是有限值，整数预算拒绝 bool/float 等
+运行时类型漂移。
 
-`AgentRunResult` 只返回可选 Proposal bytes 和 `AgentRunEvidence`。Evidence 记录 attempt、墙钟、
-输出字节、reported token、退出码、argv/input Hash、脱敏摘要、进程树终止和临时目录清理状态，
-并固定 `performance_conclusion=not_measured`。环境值、凭据、原始 Holdout 和 HCU/Round Budget
-不得进入 Evidence。timeout、输出/token 超限、非零退出、usage 畸形或 cleanup 未证实均不得
-返回可用 Proposal bytes。
+`AgentRunResult` 只返回可选 Proposal bytes 和 `AgentRunEvidence`。Evidence 冻结 `attempt_id`、
+`generation_run_id`、Generation Request Hash、attempt number、Runner provenance/profile identity、
+Generator Artifact Hash 与实际 executable Hash，同时记录墙钟、输出字节、reported token、退出码、
+argv/input Hash、脱敏摘要、进程树终止和临时目录清理状态，并固定
+`performance_conclusion=not_measured`。环境值、凭据、原始 Holdout 和 HCU/Round Budget 不得进入
+Evidence。timeout、输出/token 超限、非零退出、usage 畸形或 cleanup 未证实均不得返回可用
+Proposal bytes。
 
 Deterministic Runner 仅用于 CI，固定 synthetic。Local-command Runner 仅允许部署在看不到 HCU
 设备和受保护 Holdout 的专用 Worker，并只执行明确 allowlist 的 executable；它不是任意代码的
