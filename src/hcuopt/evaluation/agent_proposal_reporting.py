@@ -42,8 +42,8 @@ def build_agent_generation_evidence(
         ],
         attempt_ids=[item.attempt_id for item in result.attempts],
         failure_codes=result.failure_codes,
-        human_review=context.human_review,
-        package_promotion=context.package_promotion,
+        human_review_status=result.human_review_status,
+        package_promotion_status=result.package_promotion_status,
     )
     evidence_id = uuid5(
         NAMESPACE_URL,

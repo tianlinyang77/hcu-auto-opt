@@ -118,8 +118,8 @@ def build_agent_generation_read_model(
             for item in result.proposals
         ],
         failure_codes=result.failure_codes,
-        human_review_status=result.human_review.status,
-        package_promotion_status=result.package_promotion.status,
+        human_review_status=result.human_review_status,
+        package_promotion_status=result.package_promotion_status,
         synthetic=result.synthetic,
         environment=result.environment,
         performance_conclusion=result.performance_conclusion,
@@ -173,6 +173,11 @@ class AgentProposalVerifier:
             raise AgentProposalEvidenceError(
                 "knowledge_binding_mismatch", "Request is not bound to Knowledge"
             )
+        if context.baseline_epoch_id != request.baseline_epoch_id:
+            raise AgentProposalEvidenceError(
+                "baseline_binding_mismatch",
+                "verification Context is bound to another Baseline Epoch",
+            )
         if (
             request.generation_run_id != context.generation_run_id
             or plan.generation_run_id != context.generation_run_id
@@ -184,6 +189,18 @@ class AgentProposalVerifier:
             )
 
         plan_entries = {item.generator_id: item for item in plan.generators}
+        generator_ordinals = {
+            item.generator_id: ordinal for ordinal, item in enumerate(plan.generators)
+        }
+        loaded_attempts = [(ref, self._load(ref, AgentAttemptEvidence)) for ref in context.attempts]
+        loaded_attempts.sort(
+            key=lambda item: (
+                generator_ordinals.get(item[1].generator_id, len(generator_ordinals)),
+                item[1].attempt_ordinal,
+                str(item[1].attempt_id),
+                item[0].content_hash,
+            )
+        )
         attempts: list[AgentAttemptEvidence] = []
         batches: list[tuple[AgentAttemptEvidence, CandidateProposalBatch]] = []
         evidence_uris = [context.knowledge.uri, context.request.uri, context.plan.uri]
@@ -192,9 +209,10 @@ class AgentProposalVerifier:
         failures: set[str] = set()
         attempt_identities: set[tuple[str, int]] = set()
         attempt_ids: set[object] = set()
-        for ref in context.attempts:
+        batch_ids: set[object] = set()
+        proposal_ids: set[object] = set()
+        for ref, attempt in loaded_attempts:
             evidence_uris.append(ref.uri)
-            attempt = self._load(ref, AgentAttemptEvidence)
             attempts.append(attempt)
             identity = (attempt.generator_id, attempt.attempt_ordinal)
             if identity in attempt_identities or attempt.attempt_id in attempt_ids:
@@ -242,11 +260,26 @@ class AgentProposalVerifier:
             if attempt.batch:
                 evidence_uris.append(attempt.batch.uri)
                 batch = self._load(attempt.batch, CandidateProposalBatch)
+                if batch.batch_id in batch_ids:
+                    raise AgentProposalEvidenceError(
+                        "duplicate_batch", "Batch identity is duplicated across Attempts"
+                    )
+                batch_ids.add(batch.batch_id)
+                for proposal in batch.proposals:
+                    if proposal.proposal_id in proposal_ids:
+                        raise AgentProposalEvidenceError(
+                            "duplicate_proposal_identity",
+                            "Proposal identity is duplicated across Batches",
+                        )
+                    proposal_ids.add(proposal.proposal_id)
                 if (
                     batch.request_id != request.request_id
                     or batch.generation_run_id != context.generation_run_id
                     or batch.generator_id != attempt.generator_id
                     or batch.attempt_count != attempt.attempt_ordinal + 1
+                    or batch.started_at != attempt.started_at
+                    or batch.finished_at != attempt.finished_at
+                    or batch.adapter_provenance != attempt.adapter_provenance
                 ):
                     raise AgentProposalEvidenceError(
                         "batch_binding_mismatch", "Batch binding does not match its Attempt"
@@ -260,8 +293,15 @@ class AgentProposalVerifier:
                 provenance.append(batch.adapter_provenance)
                 batches.append((attempt, batch))
 
-        self._validate_budget(plan, attempts, batches)
-        decisions = self._dedupe(context, request, batches, evidence_uris)
+        self._validate_generator_barrier(plan, attempts)
+        self._validate_budget(request, plan, attempts, batches)
+        decisions = self._dedupe(
+            context,
+            request,
+            batches,
+            evidence_uris,
+            generator_ordinals=generator_ordinals,
+        )
         if sum(item.status == "kept" for item in decisions) == 0:
             failures.add("zero_valid_proposals")
         invalid = any(not item.cleanup.healthy for item in attempts) or any(
@@ -277,7 +317,7 @@ class AgentProposalVerifier:
         input_digest = _hash(
             {
                 "verifier": AGENT_PROPOSAL_VERIFIER_VERSION,
-                "context": context.model_dump(mode="json"),
+                "context": _canonical_context(context),
                 "knowledge_hash": knowledge_hash,
                 "request_hash": request_hash,
                 "plan_hash": plan_hash,
@@ -303,17 +343,67 @@ class AgentProposalVerifier:
             failure_codes=sorted(failures),
             evidence_uris=sorted(set(evidence_uris)),
             adapter_provenance=_unique_provenance(provenance),
-            human_review=context.human_review,
-            package_promotion=context.package_promotion,
+            human_review_status="pending",
+            package_promotion_status="pending",
             evidence_created_at=plan.created_at,
         )
 
     @staticmethod
+    def _validate_generator_barrier(
+        plan: ApexGenerationPlan,
+        attempts: list[AgentAttemptEvidence],
+    ) -> None:
+        for entry in plan.generators:
+            members = [item for item in attempts if item.generator_id == entry.generator_id]
+            ordinals = [item.attempt_ordinal for item in members]
+            if ordinals != list(range(len(ordinals))):
+                raise AgentProposalEvidenceError(
+                    "attempt_sequence_invalid",
+                    f"Generator {entry.generator_id} Attempt sequence is incomplete",
+                )
+            succeeded = [item for item in members if item.status == "succeeded"]
+            if len(succeeded) > 1 or (succeeded and succeeded[-1] is not members[-1]):
+                raise AgentProposalEvidenceError(
+                    "attempt_sequence_invalid",
+                    f"Generator {entry.generator_id} continued after success",
+                )
+            terminal = bool(succeeded) or len(members) == entry.max_attempts
+            if not terminal:
+                raise AgentProposalEvidenceError(
+                    "attempt_barrier_incomplete",
+                    f"Generator {entry.generator_id} has not reached a terminal outcome",
+                )
+
+    @staticmethod
     def _validate_budget(
+        request: CandidateGenerationRequest,
         plan: ApexGenerationPlan,
         attempts: list[AgentAttemptEvidence],
         batches: list[tuple[AgentAttemptEvidence, CandidateProposalBatch]],
     ) -> None:
+        if plan.budget.max_proposals > request.max_proposals:
+            raise AgentProposalEvidenceError(
+                "request_proposal_budget_exceeded",
+                "Plan Proposal budget exceeds the Request limit",
+            )
+        plan_entries = {item.generator_id: item for item in plan.generators}
+        for attempt, batch in batches:
+            entry = plan_entries[attempt.generator_id]
+            if len(batch.proposals) > entry.max_proposals:
+                raise AgentProposalEvidenceError(
+                    "generator_proposal_budget_exceeded",
+                    "Batch exceeds its Generator Proposal limit",
+                )
+            if attempt.wall_seconds != batch.wall_seconds:
+                raise AgentProposalEvidenceError(
+                    "attempt_usage_mismatch",
+                    "Attempt and Batch wall usage differ",
+                )
+            if attempt.wall_seconds > entry.timeout_seconds:
+                raise AgentProposalEvidenceError(
+                    "generator_timeout_budget_exceeded",
+                    "Attempt exceeds its Generator timeout",
+                )
         usage = (
             len(attempts),
             sum(item.wall_seconds for item in attempts),
@@ -339,14 +429,32 @@ class AgentProposalVerifier:
         request: CandidateGenerationRequest,
         batches: list[tuple[AgentAttemptEvidence, CandidateProposalBatch]],
         evidence_uris: list[str],
+        *,
+        generator_ordinals: dict[str, int],
     ) -> list[AgentProposalDecision]:
         seen_exact = set(context.previous_exact_patch_hashes)
         seen_normalized = set(context.previous_normalized_patch_hashes)
         seen_identity = set(context.previous_candidate_identity_hashes)
         seen_intent = set(context.previous_intent_hashes)
         decisions: list[AgentProposalDecision] = []
-        for attempt, batch in batches:
-            for proposal in sorted(batch.proposals, key=lambda item: item.ordinal):
+        ordered_batches = sorted(
+            batches,
+            key=lambda item: (
+                generator_ordinals[item[0].generator_id],
+                item[0].attempt_ordinal,
+                str(item[0].attempt_id),
+                str(item[1].batch_id),
+            ),
+        )
+        for attempt, batch in ordered_batches:
+            for proposal in sorted(
+                batch.proposals,
+                key=lambda item: (
+                    item.ordinal,
+                    candidate_proposal_hash(item),
+                    str(item.proposal_id),
+                ),
+            ):
                 if proposal.replacement_point != request.replacement_point:
                     raise AgentProposalEvidenceError(
                         "proposal_binding_mismatch", "Proposal replacement point mismatches Request"
@@ -427,3 +535,18 @@ def _unique_provenance(
         key = (value.profile, value.capability, value.adapter_name, value.adapter_version)
         found[key] = value
     return tuple(found[key] for key in sorted(found))
+
+
+def _canonical_context(context: AgentProposalVerificationContext) -> dict[str, object]:
+    value = context.model_dump(mode="json")
+    value["attempts"] = sorted(
+        value["attempts"], key=lambda item: (item["uri"], item["content_hash"])
+    )
+    for field in (
+        "previous_exact_patch_hashes",
+        "previous_normalized_patch_hashes",
+        "previous_candidate_identity_hashes",
+        "previous_intent_hashes",
+    ):
+        value[field] = sorted(value[field])
+    return value

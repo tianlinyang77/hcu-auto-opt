@@ -39,17 +39,6 @@ class AgentCleanupEvidence(ContractModel):
         )
 
 
-class AgentLifecycleEvidence(ContractModel):
-    status: Literal["pending", "accepted", "promoted"] = "pending"
-    evidence: AgentEvidenceRef | None = None
-
-    @model_validator(mode="after")
-    def require_evidence_after_transition(self) -> AgentLifecycleEvidence:
-        if (self.status == "pending") != (self.evidence is None):
-            raise ValueError("lifecycle evidence must exist exactly after transition")
-        return self
-
-
 class AgentAttemptEvidence(ContractModel):
     schema_version: Literal["m2b-agent-attempt-evidence-v1"] = "m2b-agent-attempt-evidence-v1"
     attempt_id: UUID
@@ -102,8 +91,6 @@ class AgentProposalVerificationContext(ContractModel):
     previous_normalized_patch_hashes: frozenset[str] = frozenset()
     previous_candidate_identity_hashes: frozenset[str] = frozenset()
     previous_intent_hashes: frozenset[str] = frozenset()
-    human_review: AgentLifecycleEvidence = Field(default_factory=AgentLifecycleEvidence)
-    package_promotion: AgentLifecycleEvidence = Field(default_factory=AgentLifecycleEvidence)
     synthetic: Literal[True] = True
     environment: Literal["scripted_dev_only"] = "scripted_dev_only"
     performance_conclusion: Literal["not_measured"] = "not_measured"
@@ -156,8 +143,8 @@ class AgentProposalVerificationResult(ContractModel):
     failure_codes: tuple[str, ...]
     evidence_uris: tuple[str, ...]
     adapter_provenance: tuple[AdapterProvenance, ...] = Field(min_length=1)
-    human_review: AgentLifecycleEvidence
-    package_promotion: AgentLifecycleEvidence
+    human_review_status: Literal["pending"] = "pending"
+    package_promotion_status: Literal["pending"] = "pending"
     evidence_created_at: datetime
     synthetic: Literal[True] = True
     environment: Literal["scripted_dev_only"] = "scripted_dev_only"
@@ -181,8 +168,8 @@ class AgentGenerationEvidenceSummaryV1(ContractModel):
     eliminated_proposal_ids: tuple[UUID, ...]
     attempt_ids: tuple[UUID, ...]
     failure_codes: tuple[str, ...]
-    human_review: AgentLifecycleEvidence
-    package_promotion: AgentLifecycleEvidence
+    human_review_status: Literal["pending"] = "pending"
+    package_promotion_status: Literal["pending"] = "pending"
     verifier_version: Literal["m2b-proposal-verifier-v1"] = AGENT_PROPOSAL_VERIFIER_VERSION
     environment: Literal["scripted_dev_only"] = "scripted_dev_only"
     performance_conclusion: Literal["not_measured"] = "not_measured"
