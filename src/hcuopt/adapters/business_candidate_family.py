@@ -77,6 +77,7 @@ class BusinessCandidateFamilyVerifier:
             )
 
         packages: list[LoadedCandidateSourcePackage] = []
+        overlay_content_hashes: set[str] = set()
         for member in sorted(manifest.members, key=lambda item: str(item.candidate_id)):
             reference = member.source_package_ref
             package = self.source_packages.read(
@@ -121,6 +122,12 @@ class BusinessCandidateFamilyVerifier:
                 raise SourceArtifactError(
                     "business Candidate Package does not match its frozen Family authority"
                 )
+            overlay_content_hash = source.files[0].content_hash
+            if overlay_content_hash in overlay_content_hashes:
+                raise SourceArtifactError(
+                    "business Candidate Family contains duplicate Overlay source content"
+                )
+            overlay_content_hashes.add(overlay_content_hash)
             packages.append(package)
 
         return VerifiedBusinessCandidateFamily(
