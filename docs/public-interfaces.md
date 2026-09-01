@@ -172,6 +172,37 @@ Patch Hash、Baseline、Hotspot、replacement point、审核人、决定、原�
 `formal_intake_allowed=false`，只引用现有 `CandidateSourcePackageRef`、M2a
 `source_family_hash` 及 `BusinessCandidateFamilyVerifier` 的持久化证据/Provenance；后续 Formal
 Intake 必须继续消费既有 M2a Family Authority，不能把回执本身当成 Candidate 或 Family。
+Review 与 Promotion ID 均绑定完整记录内容；Store 还会冻结幂等键到内容 Hash 的映射，并在
+每次重读时复算内容 ID 与其引用 Evidence，防止发布后改写决定或回执。
+
+C 的实现边界位于：
+
+- `src/hcuopt/adapters/agent_knowledge.py`：按内容 Hash 保存 Knowledge source，并从部署方 Store
+  独立重读 Snapshot/Source Hash；Skill 只能作为带版本和许可证的只读知识输入，不能被导入为
+  运行时代码；
+- `src/hcuopt/adapters/agent_generator.py`：Proposal Patch/Batch 的不可变内容寻址 Store，以及供
+  CI 使用的 deterministic synthetic Generator；
+- `src/hcuopt/adapters/agent_promotion.py`：消费 A 的 `awaiting_review` + retained Proposal，重读
+  Batch/Patch、记录不可变人工决策，通过现有 `SourceManagerAdapter` 创建并清理隔离 Candidate
+  Worktree，在完整 Baseline 源码树上应用单文件受限 Patch，并发布现有 M1/M2a
+  `CandidateSourcePackageManifest` / `CandidateSourcePackageRef`；其中 `candidate_source_hash`
+  是应用 Overlay 后的完整 Candidate Worktree Hash，不是 Overlay 文件目录 Hash；
+- `src/hcuopt/adapters/business_candidate_family.py`：继续作为 2–4 个 business Package 的唯一
+  source-family Verifier，并公开真实 Adapter Provenance 供 Promotion Receipt 冻结。
+
+受控晋级固定为两阶段：
+
+```text
+retained Proposal
+  → immutable human Review
+  → reviewed Candidate Source Package
+  → 2–4 member Business Family verification
+  → Promotion Receipt
+```
+
+Proposal、Review Record 和 Promotion Receipt 始终是不同对象。Package 发布和 Family 验证不会
+触发 Build、HCU、Measurement 或 Formal Intake；fake/synthetic、未保留、未批准、Baseline 漂移、
+越界路径及 Family Authority 漂移全部 fail closed。
 
 A 的 Generation Authority 另外公开 `GenerationRunStartRequest`、`GenerationRun`、
 `GeneratorAttempt`、`GenerationAttemptClaim`、`GenerationBudgetLedgerEntry`、

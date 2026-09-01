@@ -4,7 +4,8 @@
 
 本周目标是让系统能够从冻结 Hotspot 和证据出发，调用一个或多个可插拔 Agent，经过 Apex-like
 调度、有限重试、预算和去重，产出可解释、可人工复核的 Candidate Proposal。最终结果可通过
-CLI 和只读 UI 查看，并可在 Scripted 环境中完成 Proposal review 到 fixture Intake 的闭环。
+CLI 和只读 UI 查看，并可在 dev-only 环境中完成 Proposal review、既有 business Source Package
+发布和 source-family 验证闭环。
 
 这不表示真实 HCU 自动优化已开启。真实 Proposal 变成业务 Candidate 后，仍必须走 C 的源码
 Package、B 的唯一 Harness、D 的独立验证、Round Barrier/FWER 和人工 Signoff。
@@ -63,3 +64,31 @@ C Promotion
 现有 M2a
   继续拥有：Build、Correctness、Search/Holdout、Barrier、FWER、Evidence、Signoff
 ```
+
+## C 线受控晋级实现
+
+C 不把 Proposal 直接改名为 Candidate，也不创建第二套 Package 或 Family 格式。实现链固定为：
+
+```text
+Knowledge Snapshot 内容寻址保存与独立重读
+  → deterministic CandidateProposalBatch（CI synthetic）
+  → A barrier 产生 retained Proposal
+  → C 重读 Request / Batch / Patch / Baseline SourceSnapshot authority
+  → 不可变人工 Review
+  → 现有 SourceManager 创建隔离 Candidate Worktree并应用 approved Patch
+  → 以完整 Candidate Worktree Hash 发布既有 CandidateSourcePackageRef并清理 Worktree
+  → 2–4 member BusinessCandidateFamilyVerifier
+  → 不可变 Promotion Receipt
+```
+
+实现分别位于 `agent_knowledge.py`、`agent_generator.py` 和 `agent_promotion.py`。Promotion 只接受
+`awaiting_review` Run 中唯一 retained Proposal；pending/duplicate、rejected、fake/synthetic、
+Request/Batch/Patch Hash 漂移、Baseline 漂移和越界 touched path 均拒绝。Family Verifier 继续
+重读部署方 Source Package Store，拒绝 fixture、重复 Package 和 Store/Family Authority 漂移。
+`candidate_source_hash` 固定表示应用 Overlay 后的完整 Candidate Worktree Hash，不得退化为
+Overlay-only Hash。Review/Promotion 使用内容绑定 ID 和幂等索引，Store 重读时复算 ID 与引用
+Evidence；相同幂等键不能绑定不同内容，发布后的决定或回执篡改必须 fail closed。
+
+整条 C 链仍为 dev-only，固定 `performance_conclusion=not_measured`、
+`formal_intake_allowed=false`、`automatic_release_allowed=false`，不会运行 Build/HCU，也不会进入
+Measurement、Holdout、Barrier、FWER、Signoff 或 Release。
