@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +50,7 @@ from hcuopt.contracts.agent_v1 import (
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.platform_v1 import AdapterProvenance, SourceSnapshot
 from hcuopt.domain.errors import SourceArtifactError
+from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 
 NOW = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
@@ -85,6 +87,55 @@ class PromotionFixture:
     publisher: CandidateSourcePackagePublisher
     service: ProposalPromotionService
     baseline: BaselineOverlaySource
+    candidate_output_dir: Path
+
+
+class CopySourceManager:
+    """Test Source Manager preserving the same full-tree hash contract as F1-C."""
+
+    def __init__(self) -> None:
+        self.provenance = AdapterProvenance(
+            profile="m2b-copy-source-test-v1",
+            capability="source_manager",
+            adapter_name=type(self).__name__,
+            adapter_version="1.0.0",
+            implementation_kind="real",
+        )
+
+    def create_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate_id: UUID,
+        output_dir: Path,
+    ) -> SourceSnapshot:
+        source = file_uri_to_path(baseline.worktree_uri)
+        destination = output_dir / "worktrees" / str(candidate_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination, symlinks=True)
+        return SourceSnapshot(
+            kind="candidate",
+            repository=baseline.repository,
+            commit=baseline.commit,
+            tree_hash=baseline.tree_hash,
+            source_hash=canonical_source_hash(destination),
+            worktree_uri=destination.resolve(strict=True).as_uri(),
+            clean=True,
+            parent_snapshot_id=baseline.snapshot_id,
+            created_at=NOW,
+        )
+
+    def remove_candidate(
+        self,
+        baseline: SourceSnapshot,
+        candidate: SourceSnapshot,
+        output_dir: Path,
+    ) -> None:
+        del output_dir
+        shutil.rmtree(file_uri_to_path(candidate.worktree_uri))
+        if canonical_source_hash(file_uri_to_path(baseline.worktree_uri)) != (
+            baseline.source_hash
+        ):
+            raise SourceArtifactError("test Baseline changed during Candidate cleanup")
 
 
 def _running(attempt: GeneratorAttempt, ordinal: int) -> GeneratorAttempt:
@@ -283,6 +334,7 @@ def _fixture(
     publisher = CandidateSourcePackagePublisher(
         tmp_path / "source-packages",
         profile="m2b-promotion-v1",
+        source_manager=CopySourceManager(),
         allowed_overlay_roots=("sglang",),
         approved_mount_targets={REPLACEMENT_POINT: MOUNT_TARGET},
     )
@@ -303,6 +355,7 @@ def _fixture(
             snapshot=baseline_snapshot,
             path=path,
         ),
+        candidate_output_dir=tmp_path / "candidate-work",
     )
 
 
@@ -332,6 +385,7 @@ def _prepare(
         review.review_id,
         baseline=fixture.baseline,
         candidate_id=candidate_id,
+        candidate_output_dir=fixture.candidate_output_dir,
     )
 
 
@@ -367,7 +421,8 @@ def test_review_rejects_unretained_proposal(
     if disposition == "duplicate":
         update["duplicate_of_proposal_id"] = UUID(int=99_999)
     changed = reference.model_copy(update=update)
-    status = fixture.status.model_copy(update={"proposals": (changed,)})
+    run = fixture.status.run.model_copy(update={"retained_proposal_count": 0})
+    status = fixture.status.model_copy(update={"run": run, "proposals": (changed,)})
 
     with pytest.raises(SourceArtifactError, match="retained Proposal"):
         fixture.authority.resolve(status, reference.proposal_id)
@@ -420,6 +475,13 @@ def test_review_rejects_run_request_and_reference_authority_drift(tmp_path: Path
             proposal_id,
         )
 
+    changed_counts = fixture.status.run.model_copy(update={"proposal_count": 2})
+    with pytest.raises(SourceArtifactError, match="Status counts"):
+        fixture.authority.resolve(
+            fixture.status.model_copy(update={"run": changed_counts}),
+            proposal_id,
+        )
+
 
 def test_rejected_or_synthetic_proposal_cannot_publish_business_package(
     tmp_path: Path,
@@ -433,6 +495,7 @@ def test_rejected_or_synthetic_proposal_cannot_publish_business_package(
             review.review_id,
             baseline=rejected.baseline,
             candidate_id=UUID(int=5_001),
+            candidate_output_dir=rejected.candidate_output_dir,
         )
 
     synthetic = _fixture(tmp_path / "synthetic", real=False)
@@ -444,6 +507,34 @@ def test_rejected_or_synthetic_proposal_cannot_publish_business_package(
             review.review_id,
             baseline=synthetic.baseline,
             candidate_id=UUID(int=5_002),
+            candidate_output_dir=synthetic.candidate_output_dir,
+        )
+
+
+def test_review_store_rejects_post_publication_tampering_and_key_reuse(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    review = _review(fixture, decision="rejected")
+    review_path = fixture.decision_store.root / "reviews" / f"{review.review_id}.json"
+    review_path.write_bytes(
+        canonical_json_bytes(review.model_copy(update={"decision": "approved"}))
+    )
+
+    with pytest.raises(SourceArtifactError, match="review content changed"):
+        fixture.decision_store.load_review(review.review_id)
+
+    review_path.write_bytes(canonical_json_bytes(review))
+    with pytest.raises(SourceArtifactError, match="different bytes"):
+        fixture.authority.review(
+            fixture.status,
+            fixture.status.proposals[0].proposal_id,
+            decision="rejected",
+            reviewer="proposal-reviewer",
+            reason="A different decision under the same idempotency key is forbidden.",
+            review_evidence=b'{"review": "bounded-source-only"}\n',
+            idempotency_key=f"review-{fixture.status.proposals[0].proposal_id}",
+            reviewed_at=NOW,
         )
 
 
@@ -458,6 +549,7 @@ def test_publisher_rejects_unapproved_overlay_root(tmp_path: Path) -> None:
             review.review_id,
             baseline=fixture.baseline,
             candidate_id=UUID(int=5_003),
+            candidate_output_dir=fixture.candidate_output_dir,
         )
 
 
@@ -476,6 +568,7 @@ def test_publisher_rereads_and_rejects_baseline_worktree_drift(tmp_path: Path) -
             review.review_id,
             baseline=fixture.baseline,
             candidate_id=UUID(int=5_004),
+            candidate_output_dir=fixture.candidate_output_dir,
         )
 
 
@@ -486,6 +579,20 @@ def test_two_real_packages_verify_and_produce_replayable_promotion_receipt(
     second_fixture = _fixture(tmp_path, ordinal=2)
     first = _prepare(first_fixture, candidate_id=UUID(int=6_001))
     second = _prepare(second_fixture, candidate_id=UUID(int=6_002))
+    replay_root = tmp_path / "replayed-first-candidate"
+    shutil.copytree(
+        file_uri_to_path(first_fixture.baseline.snapshot.worktree_uri),
+        replay_root,
+        symlinks=True,
+    )
+    replayed_package = first_fixture.publisher.source_packages.read(
+        candidate_source_hash=first.source_package_ref.candidate_source_hash
+    )
+    first_fixture.publisher.source_packages.apply(replayed_package, replay_root)
+    assert canonical_source_hash(replay_root) == (
+        first.source_package_ref.candidate_source_hash
+    )
+    assert not any(first_fixture.candidate_output_dir.joinpath("worktrees").iterdir())
     request = first.resolved.status.run.request
     store_hash = _sha256(b"deployment-owned-source-store")
     family = BusinessCandidateFamilyManifest(
@@ -546,6 +653,25 @@ def test_two_real_packages_verify_and_produce_replayable_promotion_receipt(
     assert reread.formal_intake_allowed is False
     assert reread.automatic_release_allowed is False
     assert reread.performance_conclusion == "not_measured"
+
+    receipt_path = (
+        first_fixture.decision_store.root
+        / "promotions"
+        / f"{receipt.promotion_id}.json"
+    )
+    receipt_path.write_bytes(
+        canonical_json_bytes(receipt.model_copy(update={"promoted_by": "tampered"}))
+    )
+    with pytest.raises(SourceArtifactError, match="promotion content changed"):
+        first_fixture.decision_store.load_receipt(receipt.promotion_id)
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    review_evidence_path = file_uri_to_path(receipt.review.review_evidence_uri)
+    review_evidence = review_evidence_path.read_bytes()
+    review_evidence_path.write_bytes(review_evidence + b"tampered\n")
+    with pytest.raises(SourceArtifactError, match="evidence Hash changed"):
+        first_fixture.decision_store.load_receipt(receipt.promotion_id)
+    review_evidence_path.write_bytes(review_evidence)
 
     family_file = file_uri_to_path(reread.source_family_verification_evidence_uri)
     family_file.write_bytes(evidence + b"tampered\n")

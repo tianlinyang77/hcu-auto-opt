@@ -75,7 +75,8 @@ Knowledge Snapshot 内容寻址保存与独立重读
   → A barrier 产生 retained Proposal
   → C 重读 Request / Batch / Patch / Baseline SourceSnapshot authority
   → 不可变人工 Review
-  → approved Proposal 发布既有 CandidateSourcePackageRef
+  → 现有 SourceManager 创建隔离 Candidate Worktree并应用 approved Patch
+  → 以完整 Candidate Worktree Hash 发布既有 CandidateSourcePackageRef并清理 Worktree
   → 2–4 member BusinessCandidateFamilyVerifier
   → 不可变 Promotion Receipt
 ```
@@ -84,6 +85,9 @@ Knowledge Snapshot 内容寻址保存与独立重读
 `awaiting_review` Run 中唯一 retained Proposal；pending/duplicate、rejected、fake/synthetic、
 Request/Batch/Patch Hash 漂移、Baseline 漂移和越界 touched path 均拒绝。Family Verifier 继续
 重读部署方 Source Package Store，拒绝 fixture、重复 Package 和 Store/Family Authority 漂移。
+`candidate_source_hash` 固定表示应用 Overlay 后的完整 Candidate Worktree Hash，不得退化为
+Overlay-only Hash。Review/Promotion 使用内容绑定 ID 和幂等索引，Store 重读时复算 ID 与引用
+Evidence；相同幂等键不能绑定不同内容，发布后的决定或回执篡改必须 fail closed。
 
 整条 C 链仍为 dev-only，固定 `performance_conclusion=not_measured`、
 `formal_intake_allowed=false`、`automatic_release_allowed=false`，不会运行 Build/HCU，也不会进入

@@ -20,6 +20,7 @@ from hcuopt.adapters.agent_generator import (
     _read_regular,
 )
 from hcuopt.adapters.business_candidate_family import BusinessCandidateFamilyVerifier
+from hcuopt.adapters.interfaces import SourceManagerAdapter
 from hcuopt.adapters.m2_candidate import candidate_source_package_hash
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.agent.authority import proposal_refs_for_batch
@@ -62,6 +63,20 @@ def _sha256(payload: bytes) -> str:
 
 def _model_path(root: Path, namespace: str, identity: UUID) -> Path:
     return root / namespace / f"{identity}.json"
+
+
+def _review_id_for(review: CandidateProposalReviewRecord) -> UUID:
+    document = review.model_dump(mode="json")
+    document.pop("review_id")
+    digest = _sha256(canonical_json_bytes(document))
+    return uuid5(NAMESPACE_URL, f"hcuopt:m2b-proposal-review:{digest}")
+
+
+def _promotion_id_for(receipt: CandidateProposalPromotionReceipt) -> UUID:
+    document = receipt.model_dump(mode="json")
+    document.pop("promotion_id")
+    digest = _sha256(canonical_json_bytes(document))
+    return uuid5(NAMESPACE_URL, f"hcuopt:m2b-proposal-promotion:{digest}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +142,14 @@ class ProposalDecisionStore:
         self,
         review: CandidateProposalReviewRecord,
     ) -> CandidateProposalReviewRecord:
+        if review.review_id != _review_id_for(review):
+            raise SourceArtifactError("Candidate Proposal review ID is not content-bound")
+        self._publish_idempotency_binding(
+            "review",
+            review.idempotency_key,
+            review.review_id,
+            candidate_proposal_review_record_hash(review),
+        )
         path = _model_path(self.root, "reviews", review.review_id)
         _publish_once(path, canonical_json_bytes(review))
         return self.load_review(review.review_id)
@@ -137,12 +160,26 @@ class ProposalDecisionStore:
         review = CandidateProposalReviewRecord.model_validate_json(payload)
         if review.review_id != review_id:
             raise SourceArtifactError("Candidate Proposal review identity changed in Store")
+        if review.review_id != _review_id_for(review):
+            raise SourceArtifactError("Candidate Proposal review content changed in Store")
+        self.read_evidence(
+            review.review_evidence_uri,
+            expected_hash=review.review_evidence_hash,
+        )
         return review
 
     def publish_receipt(
         self,
         receipt: CandidateProposalPromotionReceipt,
     ) -> CandidateProposalPromotionReceipt:
+        if receipt.promotion_id != _promotion_id_for(receipt):
+            raise SourceArtifactError("Candidate Proposal promotion ID is not content-bound")
+        self._publish_idempotency_binding(
+            "promotion",
+            receipt.idempotency_key,
+            receipt.promotion_id,
+            candidate_proposal_promotion_receipt_hash(receipt),
+        )
         path = _model_path(self.root, "promotions", receipt.promotion_id)
         _publish_once(path, canonical_json_bytes(receipt))
         return self.load_receipt(receipt.promotion_id)
@@ -153,7 +190,46 @@ class ProposalDecisionStore:
         receipt = CandidateProposalPromotionReceipt.model_validate_json(payload)
         if receipt.promotion_id != promotion_id:
             raise SourceArtifactError("Candidate Proposal promotion identity changed in Store")
+        if receipt.promotion_id != _promotion_id_for(receipt):
+            raise SourceArtifactError("Candidate Proposal promotion content changed in Store")
+        stored_review = self.load_review(receipt.review.review_id)
+        if (
+            stored_review != receipt.review
+            or candidate_proposal_review_record_hash(stored_review)
+            != receipt.review_record_hash
+        ):
+            raise SourceArtifactError(
+                "Candidate Proposal promotion Review authority changed in Store"
+            )
+        self.read_evidence(
+            receipt.source_family_verification_evidence_uri,
+            expected_hash=receipt.source_family_verification_evidence_hash,
+        )
         return receipt
+
+    def _publish_idempotency_binding(
+        self,
+        kind: str,
+        idempotency_key: str,
+        identity: UUID,
+        content_hash: str,
+    ) -> None:
+        key_id = uuid5(
+            NAMESPACE_URL,
+            f"hcuopt:m2b-{kind}-idempotency:{idempotency_key}",
+        )
+        payload = canonical_json_bytes(
+            {
+                "schema_version": f"m2b-{kind}-idempotency-binding-v1",
+                "idempotency_key": idempotency_key,
+                "identity": str(identity),
+                "content_hash": content_hash,
+            }
+        )
+        _publish_once(
+            _model_path(self.root, f"{kind}-idempotency", key_id),
+            payload,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +271,27 @@ class ProposalReviewAuthority:
             raise SourceArtifactError("Generation Request authority changed before review")
         if run.plan_hash != apex_generation_plan_hash(run.plan):
             raise SourceArtifactError("Apex Generation Plan authority changed before review")
+        terminal_attempts = tuple(
+            item
+            for item in status.attempts
+            if item.state in {"succeeded", "failed", "cancelled"}
+        )
+        terminal_generators = {item.generator_ordinal for item in terminal_attempts}
+        retained_count = sum(
+            item.disposition == "retained" for item in status.proposals
+        )
+        if (
+            run.attempt_count != len(status.attempts)
+            or run.terminal_attempt_count != len(terminal_attempts)
+            or run.terminal_generator_count != len(terminal_generators)
+            or run.proposal_count != len(status.proposals)
+            or run.retained_proposal_count != retained_count
+            or len({item.proposal_id for item in status.proposals})
+            != len(status.proposals)
+        ):
+            raise SourceArtifactError(
+                "Generation Run Status counts differ from its review authority"
+            )
         references = [item for item in status.proposals if item.proposal_id == proposal_id]
         if len(references) != 1 or references[0].disposition != "retained":
             raise SourceArtifactError(
@@ -291,11 +388,8 @@ class ProposalReviewAuthority:
         )
         request = resolved.status.run.request
         proposal = resolved.proposal
-        review = CandidateProposalReviewRecord(
-            review_id=uuid5(
-                NAMESPACE_URL,
-                f"hcuopt:m2b-proposal-review:{idempotency_key}",
-            ),
+        provisional_review = CandidateProposalReviewRecord(
+            review_id=UUID(int=0),
             idempotency_key=idempotency_key,
             proposal_id=proposal.proposal_id,
             proposal_hash=candidate_proposal_hash(proposal),
@@ -315,6 +409,12 @@ class ProposalReviewAuthority:
             review_evidence_uri=evidence.uri,
             review_evidence_hash=evidence.content_hash,
             reviewed_at=reviewed_at,
+        )
+        review = CandidateProposalReviewRecord.model_validate(
+            {
+                **provisional_review.model_dump(mode="json"),
+                "review_id": str(_review_id_for(provisional_review)),
+            }
         )
         verify_candidate_proposal_review_record(
             request,
@@ -448,10 +548,14 @@ class CandidateSourcePackagePublisher:
         root: Path,
         *,
         profile: str,
+        source_manager: SourceManagerAdapter,
         allowed_overlay_roots: tuple[str, ...],
         approved_mount_targets: dict[str, str],
     ) -> None:
+        if source_manager.provenance.implementation_kind != "real":
+            raise ValueError("Candidate Package Publisher requires a real Source Manager")
         self.root = root.resolve()
+        self.source_manager = source_manager
         self.allowed_overlay_roots = tuple(value.strip("/") for value in allowed_overlay_roots)
         self.approved_mount_targets = dict(approved_mount_targets)
         self.source_packages = CandidateSourcePackageStore(
@@ -523,6 +627,7 @@ class CandidateSourcePackagePublisher:
         *,
         baseline: BaselineOverlaySource,
         candidate_id: UUID,
+        candidate_output_dir: Path,
     ) -> PreparedCandidatePackage:
         request = resolved.status.run.request
         proposal = resolved.proposal
@@ -561,6 +666,54 @@ class CandidateSourcePackagePublisher:
             expected_path=baseline.path,
         )
 
+        candidate = self.source_manager.create_candidate(
+            baseline.snapshot,
+            candidate_id,
+            candidate_output_dir,
+        )
+        try:
+            if (
+                candidate.kind != "candidate"
+                or candidate.parent_snapshot_id != baseline.snapshot.snapshot_id
+                or candidate.repository != baseline.snapshot.repository
+                or candidate.commit != baseline.snapshot.commit
+                or candidate.source_hash != baseline.snapshot.source_hash
+                or not candidate.clean
+            ):
+                raise SourceArtifactError(
+                    "Source Manager returned a Candidate outside Baseline authority"
+                )
+            candidate_root = file_uri_to_path(candidate.worktree_uri)
+            if candidate_root.is_symlink() or not candidate_root.is_dir():
+                raise SourceArtifactError("Candidate Worktree is not a regular directory")
+            candidate_root = candidate_root.resolve(strict=True)
+            if canonical_source_hash(candidate_root) != baseline.snapshot.source_hash:
+                raise SourceArtifactError(
+                    "Candidate Worktree does not start from the frozen Baseline"
+                )
+            candidate_source = candidate_root / baseline.path
+            if candidate_source.is_symlink() or not candidate_source.is_file():
+                raise SourceArtifactError(
+                    "Candidate Overlay target is not an existing regular source file"
+                )
+            resolved_candidate_source = candidate_source.resolve(strict=True)
+            try:
+                resolved_candidate_source.relative_to(candidate_root)
+            except ValueError as error:
+                raise SourceArtifactError(
+                    "Candidate Overlay target escapes its managed Worktree"
+                ) from error
+            candidate_source.write_bytes(candidate_content)
+            candidate_source_hash = canonical_source_hash(candidate_root)
+            if candidate_source_hash == baseline.snapshot.source_hash:
+                raise SourceArtifactError("Candidate Package cannot publish a No-op source")
+        finally:
+            self.source_manager.remove_candidate(
+                baseline.snapshot,
+                candidate,
+                candidate_output_dir,
+            )
+
         self.root.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix=".candidate-source-", dir=self.root))
         moved = False
@@ -568,7 +721,6 @@ class CandidateSourcePackagePublisher:
             source = staging / "files" / baseline.path
             source.parent.mkdir(parents=True)
             source.write_bytes(candidate_content)
-            candidate_source_hash = canonical_source_hash(staging / "files")
             manifest = CandidateSourcePackageManifest(
                 candidate_id=candidate_id,
                 hotspot_id=request.hotspot_id,
@@ -663,6 +815,7 @@ class ProposalPromotionService:
         *,
         baseline: BaselineOverlaySource,
         candidate_id: UUID,
+        candidate_output_dir: Path,
     ) -> PreparedCandidatePackage:
         resolved = self.review_authority.resolve(status, proposal_id)
         review = self.decision_store.load_review(review_id)
@@ -671,6 +824,7 @@ class ProposalPromotionService:
             review,
             baseline=baseline,
             candidate_id=candidate_id,
+            candidate_output_dir=candidate_output_dir,
         )
 
     def finalize(
@@ -717,13 +871,8 @@ class ProposalPromotionService:
                 "Candidate Family does not bind the approved Proposal authority"
             )
         verified_family = family_verifier.verify(family_manifest)
-        promotion_id = uuid5(
-            NAMESPACE_URL,
-            f"hcuopt:m2b-proposal-promotion:{idempotency_key}",
-        )
         evidence_document = {
             "schema_version": "m2b-source-family-verification-evidence-v1",
-            "promotion_id": str(promotion_id),
             "proposal_id": str(proposal.proposal_id),
             "candidate_id": str(prepared.candidate_id),
             "source_package_ref": prepared.source_package_ref.model_dump(mode="json"),
@@ -736,8 +885,8 @@ class ProposalPromotionService:
             canonical_json_bytes(evidence_document),
         )
         review = prepared.review
-        receipt = CandidateProposalPromotionReceipt(
-            promotion_id=promotion_id,
+        provisional_receipt = CandidateProposalPromotionReceipt(
+            promotion_id=UUID(int=0),
             idempotency_key=idempotency_key,
             proposal_id=review.proposal_id,
             proposal_hash=review.proposal_hash,
@@ -762,6 +911,12 @@ class ProposalPromotionService:
             promoted_by=promoted_by,
             promoted_at=promoted_at,
             synthetic=False,
+        )
+        receipt = CandidateProposalPromotionReceipt.model_validate(
+            {
+                **provisional_receipt.model_dump(mode="json"),
+                "promotion_id": str(_promotion_id_for(provisional_receipt)),
+            }
         )
         verify_candidate_proposal_promotion_receipt(
             request,
