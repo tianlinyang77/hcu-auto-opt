@@ -54,7 +54,7 @@ gates:
         digest_mode: text_lf
         evidence_type: business_candidate_source_family_contract
       - path: src/hcuopt/adapters/business_candidate_family.py
-        sha256: sha256:5189e9d51566457f7f01e1ce546395e5e28eb9aad4ea286e472549dbe9b4d1a7
+        sha256: sha256:e5dfb2ca510b5518c0cd7f66a983a151e8bd16e048946bc8a2764c6aa677550a
         digest_mode: text_lf
         evidence_type: business_candidate_store_verifier
       - path: docs/m2a-business-candidate-family.md

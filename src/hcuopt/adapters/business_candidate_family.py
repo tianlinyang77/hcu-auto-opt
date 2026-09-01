@@ -11,6 +11,7 @@ from hcuopt.adapters.manual_candidate import (
     LoadedCandidateSourcePackage,
 )
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
+from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.domain.enums import ManualCandidateKind
 from hcuopt.domain.errors import SourceArtifactError
 from hcuopt.measurement.evidence import canonical_json_bytes
@@ -63,6 +64,13 @@ class BusinessCandidateFamilyVerifier:
         self.source_packages = source_packages
         self.store_id = store_id
         self.store_hash = store_hash
+        self.provenance = AdapterProvenance(
+            profile=source_packages.provenance.profile,
+            capability="business_candidate_family_verification",
+            adapter_name=type(self).__name__,
+            adapter_version="1.0.0",
+            implementation_kind="real",
+        )
 
     def verify(
         self,
