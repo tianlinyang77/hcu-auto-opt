@@ -8,7 +8,6 @@ from hcuopt.evaluation.agent_proposal_verifier import (
     AgentProposalVerifier,
     build_agent_generation_read_model,
     candidate_identity_hash,
-    normalize_patch_v1,
     normalized_intent_hash,
 )
 from hcuopt.evaluation.evidence_reader import EvidenceReadError, HashedEvidenceReader
@@ -136,7 +135,6 @@ __all__ = [
     "load_registered_m1_protocol",
     "load_workload_spec",
     "normalize_response",
-    "normalize_patch_v1",
     "normalized_intent_hash",
     "candidate_identity_hash",
     "validate_variant_pair",

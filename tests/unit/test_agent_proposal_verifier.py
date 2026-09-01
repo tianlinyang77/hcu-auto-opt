@@ -16,6 +16,7 @@ from hcuopt.agent.identity import (
     candidate_generation_request_hash,
     knowledge_snapshot_hash,
 )
+from hcuopt.agent.patch_identity import normalize_patch_v1
 from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
     CandidateGenerationRequest,
@@ -38,7 +39,6 @@ from hcuopt.evaluation.agent_proposal_verifier import (
     AgentProposalEvidenceError,
     AgentProposalVerifier,
     build_agent_generation_read_model,
-    normalize_patch_v1,
 )
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.measurement.evidence import canonical_json_bytes
@@ -213,6 +213,7 @@ def _build(
     knowledge_ref = _write(root / "knowledge.json", knowledge.model_dump(mode="json"))
     request_ref = _write(root / "request.json", request.model_dump(mode="json"))
     plan_ref = _write(root / "plan.json", plan.model_dump(mode="json"))
+    request_hash = candidate_generation_request_hash(request)
     proposal_models: list[CandidateProposal] = []
     for ordinal, raw in enumerate(proposals):
         patch_ref = _write(root / f"proposal-{ordinal}.diff", raw)
@@ -220,6 +221,7 @@ def _build(
             CandidateProposal(
                 proposal_id=UUID(f"10000000-0000-0000-0000-{ordinal + 20:012d}"),
                 request_id=REQUEST_ID,
+                request_hash=request_hash,
                 generation_run_id=RUN_ID,
                 generator_id="agent-one",
                 ordinal=ordinal,
@@ -242,6 +244,7 @@ def _build(
         batch = CandidateProposalBatch(
             batch_id=UUID("10000000-0000-0000-0000-000000000030"),
             request_id=REQUEST_ID,
+            request_hash=request_hash,
             generation_run_id=RUN_ID,
             generator_id="agent-one",
             adapter_provenance=_generator_provenance(),
@@ -316,6 +319,7 @@ def _add_second_successful_generator(
     proposal = CandidateProposal(
         proposal_id=UUID("10000000-0000-0000-0000-000000000099"),
         request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
         generation_run_id=RUN_ID,
         generator_id="agent-two",
         ordinal=0,
@@ -333,6 +337,7 @@ def _add_second_successful_generator(
     batch = CandidateProposalBatch(
         batch_id=UUID("10000000-0000-0000-0000-000000000098"),
         request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
         generation_run_id=RUN_ID,
         generator_id="agent-two",
         adapter_provenance=_generator_provenance(),

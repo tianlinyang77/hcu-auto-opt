@@ -16,6 +16,7 @@ from hcuopt.agent.identity import (
     candidate_proposal_hash,
     knowledge_snapshot_hash,
 )
+from hcuopt.agent.patch_identity import PatchIdentityError, normalize_patch_v1
 from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
     CandidateGenerationRequest,
@@ -54,26 +55,6 @@ def _bytes_hash(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
-def normalize_patch_v1(raw: bytes) -> bytes:
-    try:
-        text = raw.decode("utf-8", errors="strict")
-    except UnicodeError as exc:
-        raise AgentProposalEvidenceError("patch_invalid_utf8", "patch is not UTF-8") from exc
-    if "\x00" in text:
-        raise AgentProposalEvidenceError("patch_invalid", "patch contains NUL")
-    lines: list[str] = []
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        line = line.rstrip(" \t")
-        if line.startswith("index "):
-            continue
-        if line.startswith(("--- ", "+++ ")):
-            line = line.split("\t", 1)[0]
-        lines.append(line)
-    while lines and not lines[-1]:
-        lines.pop()
-    return ("\n".join(lines) + "\n").encode()
-
-
 def normalized_intent_hash(intent: str) -> str:
     normalized = " ".join(unicodedata.normalize("NFKC", intent).casefold().split())
     return _hash({"normalization": "intent-nfkc-casefold-v1", "value": normalized})
@@ -84,6 +65,7 @@ def candidate_identity_hash(proposal: CandidateProposal, *, normalized_patch_has
         {
             "schema_version": "m2b-candidate-identity-v1",
             "request_id": str(proposal.request_id),
+            "request_hash": proposal.request_hash,
             "generation_run_id": str(proposal.generation_run_id),
             "normalized_patch_hash": normalized_patch_hash,
             "touched_paths": sorted(proposal.touched_paths),
@@ -280,6 +262,7 @@ class AgentProposalVerifier:
                     proposal_ids.add(proposal.proposal_id)
                 if (
                     batch.request_id != request.request_id
+                    or batch.request_hash != request_hash
                     or batch.generation_run_id != context.generation_run_id
                     or batch.generator_id != attempt.generator_id
                     or batch.attempt_count != attempt.attempt_ordinal + 1
@@ -453,6 +436,7 @@ class AgentProposalVerifier:
         *,
         generator_ordinals: dict[str, int],
     ) -> list[AgentProposalDecision]:
+        request_hash = candidate_generation_request_hash(request)
         seen_exact = set(context.previous_exact_patch_hashes)
         seen_normalized = set(context.previous_normalized_patch_hashes)
         seen_identity = set(context.previous_candidate_identity_hashes)
@@ -476,6 +460,14 @@ class AgentProposalVerifier:
                     str(item.proposal_id),
                 ),
             ):
+                if (
+                    proposal.request_id != request.request_id
+                    or proposal.request_hash != request_hash
+                ):
+                    raise AgentProposalEvidenceError(
+                        "proposal_binding_mismatch",
+                        "Proposal Request identity does not match the verified Request",
+                    )
                 if proposal.replacement_point != request.replacement_point:
                     raise AgentProposalEvidenceError(
                         "proposal_binding_mismatch", "Proposal replacement point mismatches Request"
@@ -483,7 +475,13 @@ class AgentProposalVerifier:
                 raw = self.reader.read_raw_bytes(proposal.patch_uri, proposal.patch_hash)
                 evidence_uris.append(proposal.patch_uri)
                 exact_hash = _bytes_hash(raw)
-                normalized = normalize_patch_v1(raw)
+                try:
+                    normalized = normalize_patch_v1(raw)
+                except PatchIdentityError as exc:
+                    raise AgentProposalEvidenceError(
+                        "patch_identity_invalid",
+                        "Proposal patch cannot be normalized by normalized_patch_v1",
+                    ) from exc
                 normalized_hash = _bytes_hash(normalized)
                 if normalized_hash != proposal.normalized_patch_hash:
                     raise AgentProposalEvidenceError(

@@ -29,7 +29,9 @@ authority snapshot is available for the final integration.
 
 ## Patch identity and elimination order
 
-`normalized_patch_v1` performs only deterministic representation cleanup:
+The verifier imports the sole public
+`hcuopt.agent.patch_identity.normalize_patch_v1` implementation from the M2b
+Contract layer. It performs only deterministic representation cleanup:
 
 1. require strict UTF-8 and reject NUL;
 2. normalize line endings to LF and remove trailing horizontal whitespace;
@@ -58,9 +60,10 @@ count rows but must not recalculate hashes, dedupe, infer performance, promote a
 Proposal, or upgrade signoff.
 
 Human review and package promotion are fixed to `pending` in this first tranche.
-The caller cannot submit accepted/promoted lifecycle state. D will only expose a
-transition after C publishes the versioned review and Promotion Receipt evidence
-contracts and D can independently reread their content and bindings.
+The caller cannot submit accepted/promoted lifecycle state. Although the shared
+Contract now defines versioned Review and Promotion Receipt records, D will only
+expose a transition after it re-reads the durable C-owned evidence and
+independently verifies its content Hash and authority bindings.
 
 ## Final vertical acceptance gate
 
