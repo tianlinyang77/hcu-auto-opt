@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from hcuopt.agent.authority import (
+    AgentAuthorityError,
     actual_usage_for,
     build_pending_attempt,
     conservative_failure_usage,
@@ -769,7 +770,12 @@ class AgentGenerationRepositoryMixin:
                 stale = True
             else:
                 generator = run.plan.generators[attempt.generator_ordinal]
-                refs = proposal_refs_for_batch(attempt, generator, batch)
+                try:
+                    refs = proposal_refs_for_batch(run, attempt, generator, batch)
+                except AgentAuthorityError as error:
+                    raise Conflict(
+                        "Agent Generation settlement rejected an unbound Proposal Batch"
+                    ) from error
                 actual = actual_usage_for(batch)
                 state = "succeeded"
                 error_code = None

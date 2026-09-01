@@ -24,6 +24,7 @@ from hcuopt.contracts.agent_v1 import (
     GeneratorAttempt,
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.domain.errors import Conflict
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -112,6 +113,7 @@ def _start_request(
 def _batch(
     attempt: GeneratorAttempt,
     *,
+    request_hash: str,
     normalized_patch_hash: str,
     failed: bool = False,
     output_bytes: int = 1024,
@@ -120,6 +122,7 @@ def _batch(
     return CandidateProposalBatch(
         batch_id=uuid5(attempt.attempt_id, "batch"),
         request_id=attempt.request_id,
+        request_hash=request_hash,
         generation_run_id=attempt.generation_run_id,
         generator_id=attempt.generator_id,
         adapter_provenance=AdapterProvenance(
@@ -136,6 +139,7 @@ def _batch(
             {
                 "proposal_id": proposal_id,
                 "request_id": attempt.request_id,
+                "request_hash": request_hash,
                 "generation_run_id": attempt.generation_run_id,
                 "generator_id": attempt.generator_id,
                 "ordinal": 0,
@@ -202,7 +206,11 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         self.repository.settle_generation_attempt(
             claim_b.attempt.attempt_id,
             claim_b.attempt.claim_token,
-            _batch(claim_b.attempt, normalized_patch_hash=duplicate_hash),
+            _batch(
+                claim_b.attempt,
+                request_hash=claim_b.run.request_hash,
+                normalized_patch_hash=duplicate_hash,
+            ),
             now=NOW + timedelta(seconds=1),
         )
         interim = self.repository.generation_run_status(first.generation_run_id)
@@ -212,7 +220,11 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         self.repository.settle_generation_attempt(
             claim_a.attempt.attempt_id,
             claim_a.attempt.claim_token,
-            _batch(claim_a.attempt, normalized_patch_hash=duplicate_hash),
+            _batch(
+                claim_a.attempt,
+                request_hash=claim_a.run.request_hash,
+                normalized_patch_hash=duplicate_hash,
+            ),
             now=NOW + timedelta(seconds=2),
         )
         status = self.repository.generation_run_status(first.generation_run_id)
@@ -305,6 +317,7 @@ class AgentGenerationPostgresTests(unittest.TestCase):
             claim.attempt.claim_token,
             _batch(
                 claim.attempt,
+                request_hash=claim.run.request_hash,
                 normalized_patch_hash=_hash("b"),
                 output_bytes=20_001,
             ),
@@ -317,6 +330,49 @@ class AgentGenerationPostgresTests(unittest.TestCase):
             self.repository.list_candidate_proposal_refs(start.generation_run_id),
             (),
         )
+
+    def test_request_hash_drift_fails_closed_before_proposal_persistence(self) -> None:
+        drift_cases: tuple[tuple[str, str | UUID], ...] = (
+            ("baseline_source_hash", _hash("a")),
+            ("hotspot_id", UUID("51000000-0000-0000-0000-000000000099")),
+            ("knowledge_snapshot_hash", _hash("b")),
+        )
+        for field, value in drift_cases:
+            with self.subTest(field=field):
+                start = self.coordinator.start(
+                    _start_request(f"agent-postgres-request-drift-{field}-v1"),
+                    self.repository,
+                )
+                claim = self.repository.claim_generation_attempt(
+                    "worker-a",
+                    lease_seconds=10,
+                    generation_run_id=start.generation_run_id,
+                    now=NOW,
+                )
+                assert claim is not None
+                drifted_request = claim.request.model_copy(update={field: value})
+
+                with self.assertRaises(Conflict):
+                    self.repository.settle_generation_attempt(
+                        claim.attempt.attempt_id,
+                        claim.attempt.claim_token,
+                        _batch(
+                            claim.attempt,
+                            request_hash=candidate_generation_request_hash(
+                                drifted_request
+                            ),
+                            normalized_patch_hash=_hash("c"),
+                        ),
+                        now=NOW + timedelta(seconds=1),
+                    )
+
+                status = self.repository.generation_run_status(start.generation_run_id)
+                self.assertEqual(status.run.state, "running")
+                self.assertEqual(status.proposals, ())
+                attempts = self.repository.list_generation_attempts(
+                    start.generation_run_id
+                )
+                self.assertEqual(attempts[0].state, "running")
 
     def test_generation_budget_ledger_is_append_only(self) -> None:
         start = self.coordinator.start(

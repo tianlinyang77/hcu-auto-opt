@@ -235,14 +235,38 @@ def build_generation_run_start(
 
 
 def proposal_refs_for_batch(
+    run: GenerationRun,
     attempt: GeneratorAttempt,
     generator: GeneratorPlanEntry,
     batch: CandidateProposalBatch,
 ) -> tuple[CandidateProposalRef, ...]:
-    if batch.generation_run_id != attempt.generation_run_id:
+    authoritative_request_hash = candidate_generation_request_hash(run.request)
+    if (
+        run.request_hash != authoritative_request_hash
+        or run.plan.request_hash != authoritative_request_hash
+    ):
+        raise AgentAuthorityError(
+            "generation_request_authority_mismatch",
+            "stored Generation Request does not match its authoritative Hash",
+        )
+    if (
+        attempt.generation_run_id != run.generation_run_id
+        or batch.generation_run_id != run.generation_run_id
+    ):
         raise AgentAuthorityError("proposal_batch_cross_run", "Proposal Batch crosses Runs")
-    if batch.request_id != attempt.request_id:
+    if (
+        attempt.request_id != run.request.request_id
+        or batch.request_id != run.request.request_id
+    ):
         raise AgentAuthorityError("proposal_batch_cross_request", "Proposal Batch crosses Requests")
+    if batch.request_hash != authoritative_request_hash or any(
+        proposal.request_hash != authoritative_request_hash
+        for proposal in batch.proposals
+    ):
+        raise AgentAuthorityError(
+            "proposal_batch_request_hash_mismatch",
+            "Proposal Batch does not bind the authoritative Generation Request Hash",
+        )
     if batch.generator_id != attempt.generator_id or generator.generator_id != attempt.generator_id:
         raise AgentAuthorityError(
             "proposal_batch_cross_generator",

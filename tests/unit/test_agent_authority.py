@@ -23,6 +23,7 @@ from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
     CandidateGenerationRequest,
     CandidateProposalBatch,
+    GenerationRun,
     GenerationRunStartRequest,
     GeneratorAttempt,
 )
@@ -117,14 +118,18 @@ def _running(attempt: GeneratorAttempt) -> GeneratorAttempt:
 
 
 def _batch(
+    run: GenerationRun,
     attempt: GeneratorAttempt,
     *,
     normalized_patch_hash: str,
     proposal_id: UUID,
+    request_hash: str | None = None,
 ) -> CandidateProposalBatch:
+    bound_request_hash = request_hash or run.request_hash
     return CandidateProposalBatch(
         batch_id=UUID(int=proposal_id.int + 1000),
         request_id=attempt.request_id,
+        request_hash=bound_request_hash,
         generation_run_id=attempt.generation_run_id,
         generator_id=attempt.generator_id,
         adapter_provenance=AdapterProvenance(
@@ -139,6 +144,7 @@ def _batch(
             {
                 "proposal_id": proposal_id,
                 "request_id": attempt.request_id,
+                "request_hash": bound_request_hash,
                 "generation_run_id": attempt.generation_run_id,
                 "generator_id": attempt.generator_id,
                 "ordinal": 0,
@@ -205,13 +211,14 @@ def test_batch_usage_and_refs_are_bound_to_the_claimed_attempt() -> None:
     run, attempts, _ledger = build_generation_run_start(_start_request(), created_at=NOW)
     attempt = _running(attempts[0])
     batch = _batch(
+        run,
         attempt,
         normalized_patch_hash=_hash("9"),
         proposal_id=UUID("30000000-0000-0000-0000-000000000001"),
     )
 
     usage = actual_usage_for(batch)
-    refs = proposal_refs_for_batch(attempt, run.plan.generators[0], batch)
+    refs = proposal_refs_for_batch(run, attempt, run.plan.generators[0], batch)
 
     assert usage.wall_milliseconds == 250
     assert usage_is_within_reservation(usage, attempt.reserved)
@@ -223,7 +230,69 @@ def test_batch_usage_and_refs_are_bound_to_the_claimed_attempt() -> None:
 
     mismatched = batch.model_copy(update={"attempt_count": 2})
     with pytest.raises(AgentAuthorityError, match="attempt count"):
-        proposal_refs_for_batch(attempt, run.plan.generators[0], mismatched)
+        proposal_refs_for_batch(run, attempt, run.plan.generators[0], mismatched)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("baseline_source_hash", _hash("a")),
+        ("hotspot_id", UUID("30000000-0000-0000-0000-000000000099")),
+        ("knowledge_snapshot_hash", _hash("b")),
+    ),
+)
+def test_request_hash_drift_is_rejected_against_stored_authority(
+    field: str,
+    value: str | UUID,
+) -> None:
+    run, attempts, _ledger = build_generation_run_start(_start_request(), created_at=NOW)
+    attempt = _running(attempts[0])
+    proposal_id = UUID("30000000-0000-0000-0000-000000000002")
+    authoritative_batch = _batch(
+        run,
+        attempt,
+        normalized_patch_hash=_hash("9"),
+        proposal_id=proposal_id,
+    )
+    drifted_request = run.request.model_copy(update={field: value})
+    drifted_batch = _batch(
+        run,
+        attempt,
+        normalized_patch_hash=_hash("9"),
+        proposal_id=proposal_id,
+        request_hash=candidate_generation_request_hash(drifted_request),
+    )
+
+    with pytest.raises(AgentAuthorityError, match="authoritative"):
+        proposal_refs_for_batch(
+            run,
+            attempt,
+            run.plan.generators[0],
+            drifted_batch,
+        )
+
+    tampered_run = run.model_copy(update={"request": drifted_request})
+    with pytest.raises(AgentAuthorityError, match="authoritative"):
+        proposal_refs_for_batch(
+            tampered_run,
+            attempt,
+            run.plan.generators[0],
+            authoritative_batch,
+        )
+
+    drifted_proposal = authoritative_batch.proposals[0].model_copy(
+        update={"request_hash": candidate_generation_request_hash(drifted_request)}
+    )
+    member_drifted_batch = authoritative_batch.model_copy(
+        update={"proposals": (drifted_proposal,)}
+    )
+    with pytest.raises(AgentAuthorityError, match="authoritative"):
+        proposal_refs_for_batch(
+            run,
+            attempt,
+            run.plan.generators[0],
+            member_drifted_batch,
+        )
 
 
 def test_barrier_dedupe_is_deterministic_not_completion_order() -> None:
@@ -232,18 +301,22 @@ def test_barrier_dedupe_is_deterministic_not_completion_order() -> None:
     second_attempt = _running(attempts[1])
     normalized = _hash("a")
     first = proposal_refs_for_batch(
+        run,
         first_attempt,
         run.plan.generators[0],
         _batch(
+            run,
             first_attempt,
             normalized_patch_hash=normalized,
             proposal_id=UUID("40000000-0000-0000-0000-000000000001"),
         ),
     )[0]
     second = proposal_refs_for_batch(
+        run,
         second_attempt,
         run.plan.generators[1],
         _batch(
+            run,
             second_attempt,
             normalized_patch_hash=normalized,
             proposal_id=UUID("40000000-0000-0000-0000-000000000002"),
