@@ -16,11 +16,16 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
+from hcuopt.contracts.agent_runner_v1 import (
+    RunnerExecutionRecord,
+    RunnerExecutionStatus,
+    RunnerProvenance,
+)
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 
 SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -49,15 +54,7 @@ RESERVED_ENVIRONMENT_NAMES = frozenset(
     )
 )
 
-AgentRunStatus = Literal[
-    "succeeded",
-    "failed",
-    "timed_out",
-    "output_limit_exceeded",
-    "token_limit_exceeded",
-    "invalid_output",
-    "cleanup_failed",
-]
+AgentRunStatus = RunnerExecutionStatus
 
 
 class AgentRunnerSafetyError(ValueError):
@@ -184,7 +181,10 @@ class AgentRunLimits:
 class AgentRunRequest:
     attempt_id: UUID
     generation_run_id: UUID
+    request_id: UUID
     request_hash: str
+    plan_id: UUID
+    generator_id: str
     executable: Path
     generator_artifact: Path
     generator_artifact_hash: str
@@ -194,8 +194,18 @@ class AgentRunRequest:
     input_files: tuple[AgentInputFile, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.attempt_id, UUID) or not isinstance(self.generation_run_id, UUID):
+        if not all(
+            isinstance(value, UUID)
+            for value in (
+                self.attempt_id,
+                self.generation_run_id,
+                self.request_id,
+                self.plan_id,
+            )
+        ):
             raise AgentRunnerSafetyError("Agent authority identifiers must be UUIDs")
+        if not re.fullmatch(r"^[a-z0-9][a-z0-9._-]{2,99}$", self.generator_id):
+            raise AgentRunnerSafetyError("Agent generator identity is invalid")
         if not isinstance(self.request_hash, str) or not SHA256_PATTERN.fullmatch(
             self.request_hash
         ):
@@ -233,57 +243,9 @@ class AgentRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentRunnerProvenance:
-    profile: str
-    capability: str
-    adapter_name: str
-    adapter_version: str
-    implementation_kind: Literal["real", "fake"]
-    source_commit: str | None
-    identity_hash: str
-
-
-@dataclass(frozen=True, slots=True)
-class AgentRunEvidence:
-    attempt_id: UUID
-    generation_run_id: UUID
-    request_hash: str
-    attempt_number: int
-    runner_provenance: AgentRunnerProvenance
-    generator_artifact_hash: str
-    executable_hash: str | None
-    status: AgentRunStatus
-    synthetic: bool
-    attempts_consumed: int
-    wall_seconds_consumed: float
-    stdout_bytes_consumed: int
-    stderr_bytes_consumed: int
-    total_output_bytes_consumed: int
-    tokens_consumed: int | None
-    exit_code: int | None
-    executable_name: str
-    argv_hash: str
-    input_manifest_hash: str
-    stdout_hash: str
-    stderr_hash: str
-    stdout_summary: str
-    stderr_summary: str
-    environment_names: tuple[str, ...]
-    termination_reason: str | None
-    process_tree_cleanup: Literal["not_needed", "terminated", "killed", "failed"]
-    cleanup_status: Literal["verified", "failed"]
-    cleanup_summary: str
-    performance_conclusion: Literal["not_measured"] = "not_measured"
-    hcu_access_allowed: Literal[False] = False
-    holdout_access_allowed: Literal[False] = False
-    measurement_access_allowed: Literal[False] = False
-    automatic_release_allowed: Literal[False] = False
-
-
-@dataclass(frozen=True, slots=True)
 class AgentRunResult:
     proposal_bytes: bytes | None
-    evidence: AgentRunEvidence
+    evidence: RunnerExecutionRecord
 
     @property
     def status(self) -> AgentRunStatus:
@@ -317,9 +279,9 @@ def _input_manifest_hash(request: AgentRunRequest) -> str:
     return _sha256_bytes(_canonical_json_bytes(manifest))
 
 
-def _freeze_provenance(provenance: AdapterProvenance) -> AgentRunnerProvenance:
+def _freeze_provenance(provenance: AdapterProvenance) -> RunnerProvenance:
     payload = provenance.model_dump(mode="json")
-    return AgentRunnerProvenance(
+    return RunnerProvenance(
         profile=provenance.profile,
         capability=provenance.capability,
         adapter_name=provenance.adapter_name,
@@ -348,12 +310,15 @@ def _evidence(
     process_tree_cleanup: Literal["not_needed", "terminated", "killed", "failed"],
     cleanup_status: Literal["verified", "failed"] = "verified",
     cleanup_summary: str = "adapter-owned attempt directory removed",
-) -> AgentRunEvidence:
+) -> RunnerExecutionRecord:
     _executable, argv_hash, _paths = _request_identity(request)
-    return AgentRunEvidence(
+    return RunnerExecutionRecord(
         attempt_id=request.attempt_id,
         generation_run_id=request.generation_run_id,
+        request_id=request.request_id,
         request_hash=request.request_hash,
+        plan_id=request.plan_id,
+        generator_id=request.generator_id,
         attempt_number=request.limits.attempt_number,
         runner_provenance=_freeze_provenance(runner_provenance),
         generator_artifact_hash=request.generator_artifact_hash,
@@ -761,11 +726,13 @@ class LocalCommandAgentRunner:
                         "Agent attempt setup failed and temporary cleanup also failed"
                     ) from exc
                 summary = _redacted_summary(str(exc).encode("utf-8", errors="replace"))
-                evidence = replace(
-                    result.evidence,
-                    status="cleanup_failed",
-                    cleanup_status="failed",
-                    cleanup_summary=summary,
+                evidence = RunnerExecutionRecord.model_validate(
+                    {
+                        **result.evidence.model_dump(mode="json"),
+                        "status": "cleanup_failed",
+                        "cleanup_status": "failed",
+                        "cleanup_summary": summary,
+                    }
                 )
                 result = AgentRunResult(proposal_bytes=None, evidence=evidence)
         if result is None:

@@ -8,24 +8,32 @@ measure performance, promote a package, or grant Formal Intake/release authority
 ## Independent inputs
 
 The verifier securely reopens canonical Knowledge Snapshot, Generation Request,
-Apex Plan, Attempt and Proposal Batch evidence. It checks each file SHA-256 and
-then independently recomputes the Knowledge, Request, Plan and Proposal identity
-hashes. Attempt, Batch, Request, Plan and Generation Run bindings are checked as
-one chain. Producer summaries are not trusted.
+Apex Plan and A's `GenerationRunStatusView`. From that status it independently
+reopens B's content-addressed Runner Execution Receipt and C's Proposal Batch,
+raw output and Patch evidence. It checks each file SHA-256 and then independently
+recomputes the Knowledge, Request, Plan, Receipt, Batch and Proposal identity
+hashes. Attempt, Receipt, Batch, Request, Plan and Generation Run bindings are
+checked as one chain. Producer summaries are not trusted.
 
-Runner Attempt evidence and Candidate Proposal Batch evidence deliberately carry
-different provenance. D requires `agent_runner` provenance on the Attempt and
-`candidate_proposal_generation` provenance on the Batch, then joins the layers by
-Request Hash, Batch evidence Hash, raw-output URI/SHA-256, output bytes and bounded
-usage. A successful Runner Attempt may contain a succeeded or partial Batch, but
-never a failed Batch.
+Runner Receipt and Candidate Proposal Batch deliberately carry different provenance.
+D requires `agent_runner` provenance on the Receipt and
+`candidate_proposal_generation` provenance on the Batch, then joins A/B/C by
+Attempt/Run/Request/Plan/generator identity, Generator Artifact Hash, Receipt and
+Batch content Hashes, raw-output URI/SHA-256/bytes, cleanup and bounded usage. A
+successful Runner Attempt may contain a succeeded or partial Batch, but never a
+failed Batch. `GeneratorAttempt.actual`, the immutable Budget Ledger and the Receipt
+must agree; failed no-Batch executions remain conservatively charged.
 
-Attempt references are canonicalized into Plan generator order, then Attempt and
+Every A `CandidateProposalRef` must bind one C Proposal identity/Hash/Batch/Patch.
+D independently reproduces A's stable normalized-patch retained/duplicate relation,
+then applies its stricter exact/normalized/identity/intent elimination order. A
+duplicate must remain eliminated in D and point to the same retained normalized Patch.
+
+Status members are canonicalized into Plan generator order, then Attempt and
 Proposal ordinal order. Reversing evidence-reference completion order cannot
 change the retained Proposal or input digest. A generator is conservatively
 terminal only after one successful Attempt or after its bounded Attempt budget is
-exhausted; missing generator evidence fails closed until the durable Apex
-authority snapshot is available for the final integration.
+exhausted; missing generator evidence fails closed.
 
 ## Patch identity and elimination order
 
@@ -64,9 +72,8 @@ contracts and D can independently reread their content and bindings.
 
 ## Final vertical acceptance gate
 
-This first tranche deliberately stops before promotion because the stable A/B/C
-outputs from Issues #113–#115 are not yet present on the parent branch. Issue
-#116 is not complete until a later stacked change proves this real chain:
+Issue #116 is not complete until the stacked integration proves this chain with
+the public A/B/C/D interfaces:
 
 ```text
 Hotspot -> two Agent generators -> Apex retry/dedupe -> human approval

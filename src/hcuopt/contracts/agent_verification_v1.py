@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from hcuopt.contracts.base import ContractModel, ReadModel
 from hcuopt.contracts.platform_v1 import SHA256_PATTERN, AdapterProvenance
@@ -23,71 +23,6 @@ class AgentDomainEvidenceRef(AgentEvidenceRef):
     identity_hash: str = Field(pattern=SHA256_PATTERN)
 
 
-class AgentCleanupEvidence(ContractModel):
-    process_reaped: bool
-    sandbox_removed: bool
-    output_sealed: bool
-    failure_codes: tuple[str, ...] = ()
-
-    @property
-    def healthy(self) -> bool:
-        return (
-            self.process_reaped
-            and self.sandbox_removed
-            and self.output_sealed
-            and not self.failure_codes
-        )
-
-
-class AgentAttemptEvidence(ContractModel):
-    schema_version: Literal["m2b-agent-attempt-evidence-v1"] = "m2b-agent-attempt-evidence-v1"
-    attempt_id: UUID
-    generation_run_id: UUID
-    request_id: UUID
-    request_hash: str = Field(pattern=SHA256_PATTERN)
-    plan_id: UUID
-    generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
-    attempt_ordinal: int = Field(ge=0, le=7)
-    status: Literal["succeeded", "failed", "timed_out"]
-    failure_code: (
-        Literal["runner_timeout", "runner_failed", "cleanup_failed", "invalid_output"] | None
-    ) = None
-    batch: AgentEvidenceRef | None = None
-    raw_output_uri: str | None = Field(default=None, min_length=1, max_length=4000)
-    raw_output_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
-    output_bytes: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
-    wall_seconds: float = Field(ge=0)
-    cleanup: AgentCleanupEvidence
-    cleanup_evidence_hash: str = Field(pattern=SHA256_PATTERN)
-    started_at: datetime
-    finished_at: datetime
-    adapter_provenance: AdapterProvenance
-    synthetic: Literal[True] = True
-
-    @model_validator(mode="after")
-    def require_coherent_attempt(self) -> AgentAttemptEvidence:
-        if self.started_at.tzinfo is None or self.finished_at.tzinfo is None:
-            raise ValueError("Agent attempt timestamps must be timezone-aware")
-        if self.finished_at < self.started_at:
-            raise ValueError("Agent attempt finishes before it starts")
-        if self.status == "succeeded":
-            if (
-                self.batch is None
-                or self.failure_code is not None
-                or self.raw_output_uri is None
-                or self.raw_output_hash is None
-            ):
-                raise ValueError("successful attempt requires its Batch/raw output and no failure")
-        elif self.batch is not None or self.failure_code is None:
-            raise ValueError("unsuccessful attempt requires a failure and no Batch")
-        if (self.raw_output_uri is None) != (self.raw_output_hash is None):
-            raise ValueError("Attempt raw output reference must be atomic")
-        if self.status == "timed_out" and self.failure_code != "runner_timeout":
-            raise ValueError("timed-out attempt requires runner_timeout")
-        return self
-
-
 class AgentProposalVerificationContext(ContractModel):
     task_id: UUID
     target_id: str = Field(min_length=1, max_length=300)
@@ -96,7 +31,7 @@ class AgentProposalVerificationContext(ContractModel):
     knowledge: AgentDomainEvidenceRef
     request: AgentDomainEvidenceRef
     plan: AgentDomainEvidenceRef
-    attempts: tuple[AgentEvidenceRef, ...] = Field(min_length=1, max_length=64)
+    generation_status: AgentEvidenceRef
     previous_exact_patch_hashes: frozenset[str] = frozenset()
     previous_normalized_patch_hashes: frozenset[str] = frozenset()
     previous_candidate_identity_hashes: frozenset[str] = frozenset()

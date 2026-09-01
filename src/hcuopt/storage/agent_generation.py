@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
 from hcuopt.agent.authority import (
     AgentAuthorityError,
-    actual_usage_for,
+    actual_usage_for_runner_receipt,
     build_pending_attempt,
     conservative_failure_usage,
     finalize_proposal_dispositions,
@@ -19,8 +19,13 @@ from hcuopt.agent.authority import (
     proposal_refs_for_batch,
     sum_usage,
     usage_is_within_reservation,
+    validate_runner_receipt,
 )
 from hcuopt.agent.identity import candidate_proposal_batch_hash
+from hcuopt.contracts.agent_runner_v1 import (
+    RunnerExecutionReceipt,
+    RunnerExecutionReceiptRef,
+)
 from hcuopt.contracts.agent_v1 import (
     CandidateProposalBatch,
     CandidateProposalRef,
@@ -31,7 +36,12 @@ from hcuopt.contracts.agent_v1 import (
     GenerationRunStatusView,
     GeneratorAttempt,
 )
+from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.domain.errors import Conflict, NotFound, StaleClaimToken
+
+
+class RunnerExecutionReceiptReader(Protocol):
+    def load(self, reference: RunnerExecutionReceiptRef) -> RunnerExecutionReceipt: ...
 
 
 class AgentGenerationRepositoryMixin:
@@ -63,6 +73,16 @@ class AgentGenerationRepositoryMixin:
             {
                 name: row[name]
                 for name in CandidateProposalRef.model_fields
+                if name != "schema_version"
+            }
+        )
+
+    @staticmethod
+    def _budget_entry(row: dict[str, Any]) -> GenerationBudgetLedgerEntry:
+        return GenerationBudgetLedgerEntry.model_validate(
+            {
+                name: row[name]
+                for name in GenerationBudgetLedgerEntry.model_fields
                 if name != "schema_version"
             }
         )
@@ -255,12 +275,28 @@ class AgentGenerationRepositoryMixin:
             ).fetchall()
         return tuple(self._proposal_ref(row) for row in rows)
 
+    def list_generation_budget_ledger(
+        self,
+        generation_run_id: UUID,
+    ) -> tuple[GenerationBudgetLedgerEntry, ...]:
+        with self.connection() as connection:  # type: ignore[attr-defined]
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_generation_budget_ledger
+                WHERE generation_run_id = %s
+                ORDER BY created_at, attempt_id, entry_type, ledger_entry_id
+                """,
+                (generation_run_id,),
+            ).fetchall()
+        return tuple(self._budget_entry(row) for row in rows)
+
     def generation_run_status(self, generation_run_id: UUID) -> GenerationRunStatusView:
         run = self.get_generation_run(generation_run_id)
         return GenerationRunStatusView(
             run=run,
             attempts=self.list_generation_attempts(generation_run_id),
             proposals=self.list_candidate_proposal_refs(generation_run_id),
+            budget_ledger=self.list_generation_budget_ledger(generation_run_id),
         )
 
     @staticmethod
@@ -725,12 +761,21 @@ class AgentGenerationRepositoryMixin:
         self,
         attempt_id: UUID,
         claim_token: UUID,
-        batch: CandidateProposalBatch,
+        batch: CandidateProposalBatch | None,
+        runner_receipt_ref: RunnerExecutionReceiptRef,
         *,
+        runner_receipt_reader: RunnerExecutionReceiptReader,
+        batch_uri: str | None = None,
         now: datetime | None = None,
     ) -> GeneratorAttempt:
         effective_now = now or datetime.now(timezone.utc)
-        batch_hash = candidate_proposal_batch_hash(batch)
+        try:
+            runner_receipt = runner_receipt_reader.load(runner_receipt_ref)
+        except Exception as error:
+            raise Conflict("Agent Runner Receipt could not be independently reread") from error
+        batch_hash = candidate_proposal_batch_hash(batch) if batch is not None else None
+        if (batch is None) != (batch_uri is None):
+            raise Conflict("Agent Proposal Batch and its immutable URI must be atomic")
         stale = False
         result: GeneratorAttempt | None = None
         with self.connection() as connection:  # type: ignore[attr-defined]
@@ -756,7 +801,11 @@ class AgentGenerationRepositoryMixin:
             attempt = self._generator_attempt(attempt_row)
             run = self._generation_run(run_row)
             if attempt.state in {"succeeded", "failed"}:
-                if attempt.claim_token == claim_token and attempt.batch_hash == batch_hash:
+                if (
+                    attempt.claim_token == claim_token
+                    and attempt.batch_hash == batch_hash
+                    and attempt.runner_receipt_hash == runner_receipt_ref.content_hash
+                ):
                     return attempt
                 raise StaleClaimToken("Agent generator settlement replay is stale")
             if (
@@ -771,32 +820,80 @@ class AgentGenerationRepositoryMixin:
             else:
                 generator = run.plan.generators[attempt.generator_ordinal]
                 try:
-                    refs = proposal_refs_for_batch(run, attempt, generator, batch)
+                    validate_runner_receipt(
+                        run,
+                        attempt,
+                        generator,
+                        runner_receipt,
+                        batch,
+                    )
+                    refs = (
+                        proposal_refs_for_batch(run, attempt, generator, batch)
+                        if batch is not None
+                        else ()
+                    )
                 except AgentAuthorityError as error:
                     raise Conflict(
-                        "Agent Generation settlement rejected an unbound Proposal Batch"
+                        "Agent Generation settlement rejected unbound Runner evidence"
                     ) from error
-                actual = actual_usage_for(batch)
-                state = "succeeded"
-                error_code = None
-                error_message = None
-                if not usage_is_within_reservation(actual, attempt.reserved):
-                    state = "failed"
+                execution = runner_receipt.execution
+                if batch is None:
                     actual = conservative_failure_usage(attempt.reserved)
-                    refs = ()
-                    error_code = "generation_budget_exceeded"
-                    error_message = "generator output exceeded its immutable Attempt reservation"
-                elif batch.status == "failed":
                     state = "failed"
-                    error_code = batch.error_code or "generator_failed"
-                    error_message = batch.error_message or "generator failed without safe detail"
-                provenance = batch.adapter_provenance.model_dump(mode="json")
+                    error_code = {
+                        "failed": "runner_failed",
+                        "timed_out": "runner_timeout",
+                        "output_limit_exceeded": "runner_output_limit_exceeded",
+                        "token_limit_exceeded": "runner_token_limit_exceeded",
+                        "invalid_output": "runner_invalid_output",
+                        "cleanup_failed": "runner_cleanup_failed",
+                    }.get(execution.status, "runner_failed")
+                    error_message = "Runner Attempt terminated without an accepted Proposal Batch"
+                else:
+                    actual = actual_usage_for_runner_receipt(
+                        runner_receipt,
+                        proposal_count=len(batch.proposals),
+                    )
+                    state = "succeeded"
+                    error_code = None
+                    error_message = None
+                    if not usage_is_within_reservation(actual, attempt.reserved):
+                        state = "failed"
+                        actual = conservative_failure_usage(attempt.reserved)
+                        refs = ()
+                        error_code = "generation_budget_exceeded"
+                        error_message = (
+                            "Runner output exceeded its immutable Attempt reservation"
+                        )
+                    elif batch.status == "failed":
+                        state = "failed"
+                        error_code = batch.error_code or "generator_failed"
+                        error_message = (
+                            batch.error_message or "generator failed without safe detail"
+                        )
+                provenance = (
+                    batch.adapter_provenance.model_dump(mode="json")
+                    if batch is not None
+                    else None
+                )
+                runner_provenance = AdapterProvenance(
+                    profile=execution.runner_provenance.profile,
+                    capability=execution.runner_provenance.capability,
+                    adapter_name=execution.runner_provenance.adapter_name,
+                    adapter_version=execution.runner_provenance.adapter_version,
+                    implementation_kind=execution.runner_provenance.implementation_kind,
+                    source_commit=execution.runner_provenance.source_commit,
+                )
                 row = connection.execute(
                     """
                     UPDATE agent_generator_attempts
-                    SET state = %s, actual = %s, batch_id = %s, batch_hash = %s,
+                    SET state = %s, actual = %s, batch_id = %s, batch_uri = %s,
+                        batch_hash = %s,
                         batch_status = %s, raw_output_uri = %s, raw_output_hash = %s,
-                        adapter_provenance = %s, error_code = %s, error_message = %s,
+                        adapter_provenance = %s,
+                        runner_receipt_id = %s, runner_receipt_uri = %s,
+                        runner_receipt_hash = %s, runner_receipt_schema_version = %s,
+                        runner_provenance = %s, error_code = %s, error_message = %s,
                         finished_at = %s, updated_at = %s, version = version + 1
                     WHERE attempt_id = %s AND state = 'running' AND claim_token = %s
                     RETURNING *
@@ -804,12 +901,18 @@ class AgentGenerationRepositoryMixin:
                     (
                         state,
                         Jsonb(actual.model_dump(mode="json")),
-                        batch.batch_id,
+                        batch.batch_id if batch is not None else None,
+                        batch_uri,
                         batch_hash,
-                        batch.status,
-                        batch.raw_output_uri,
-                        batch.raw_output_hash,
-                        Jsonb(provenance),
+                        batch.status if batch is not None else None,
+                        batch.raw_output_uri if batch is not None else None,
+                        batch.raw_output_hash if batch is not None else None,
+                        Jsonb(provenance) if provenance is not None else None,
+                        runner_receipt.receipt_id,
+                        runner_receipt_ref.uri,
+                        runner_receipt_ref.content_hash,
+                        runner_receipt.schema_version,
+                        Jsonb(runner_provenance.model_dump(mode="json")),
                         error_code,
                         error_message,
                         effective_now,

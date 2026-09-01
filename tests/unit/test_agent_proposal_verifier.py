@@ -6,25 +6,39 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import pytest
 from pydantic import ValidationError
 
+from hcuopt.agent.authority import finalize_proposal_dispositions
 from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
+    candidate_proposal_batch_hash,
+    candidate_proposal_hash,
     knowledge_snapshot_hash,
+)
+from hcuopt.contracts.agent_runner_v1 import (
+    RunnerExecutionReceipt,
+    RunnerExecutionRecord,
+    RunnerProvenance,
+    runner_execution_receipt_id_for,
 )
 from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
     CandidateGenerationRequest,
     CandidateProposal,
     CandidateProposalBatch,
+    CandidateProposalRef,
+    GenerationBudgetLedgerEntry,
+    GenerationBudgetUsage,
+    GenerationRun,
+    GenerationRunStatusView,
+    GeneratorAttempt,
     KnowledgeSnapshot,
 )
 from hcuopt.contracts.agent_verification_v1 import (
-    AgentAttemptEvidence,
     AgentEvidenceRef,
     AgentProposalVerificationContext,
 )
@@ -72,9 +86,11 @@ def _write(path: Path, value: object | bytes) -> dict[str, str]:
     return {"uri": path.as_uri(), "content_hash": _sha(encoded)}
 
 
-def _generator_provenance() -> AdapterProvenance:
+def _generator_provenance(
+    profile: str = "m2b-generator-scripted-test",
+) -> AdapterProvenance:
     return AdapterProvenance(
-        profile="m2b-generator-scripted-test",
+        profile=profile,
         capability="candidate_proposal_generation",
         adapter_name="ScriptedAgent",
         adapter_version="1.0.0",
@@ -144,9 +160,12 @@ def _plan(
         {
             "generator_id": "agent-one",
             "adapter_profile": "m2b-agent-one",
+            "generator_artifact_hash": _fixed_hash("a"),
             "max_attempts": max_attempts,
             "max_proposals": generator_max_proposals,
             "timeout_seconds": 30,
+            "max_output_bytes_per_attempt": 20_000,
+            "max_tokens_per_attempt": 2_000,
         }
     ]
     if include_second_generator:
@@ -154,9 +173,12 @@ def _plan(
             {
                 "generator_id": "agent-two",
                 "adapter_profile": "m2b-agent-two",
+                "generator_artifact_hash": _fixed_hash("b"),
                 "max_attempts": 1,
                 "max_proposals": 2,
                 "timeout_seconds": 30,
+                "max_output_bytes_per_attempt": 20_000,
+                "max_tokens_per_attempt": 2_000,
             }
         )
     return ApexGenerationPlan(
@@ -168,10 +190,10 @@ def _plan(
         max_concurrency=1,
         budget={
             "max_generator_attempts": max_attempts + int(include_second_generator),
-            "max_wall_seconds": 60,
+            "max_wall_seconds": 90,
             "max_total_output_bytes": 100_000,
             "max_total_tokens": 10_000,
-            "max_proposals": budget_max_proposals,
+            "max_proposals": budget_max_proposals + (2 if include_second_generator else 0),
         },
         created_by="scripted-apex",
         created_at=NOW,
@@ -190,6 +212,219 @@ def _patch(body: str = "+    return x + 1") -> bytes:
     ).encode()
 
 
+def _terminal_attempt(
+    root: Path,
+    *,
+    request: CandidateGenerationRequest,
+    plan: ApexGenerationPlan,
+    generator_id: str,
+    attempt_id: UUID,
+    proposals: tuple[CandidateProposal, ...],
+    suffix: str,
+    attempt_status: str = "succeeded",
+    cleanup_healthy: bool = True,
+) -> tuple[
+    GeneratorAttempt,
+    tuple[GenerationBudgetLedgerEntry, GenerationBudgetLedgerEntry],
+    CandidateProposalBatch | None,
+]:
+    generator_ordinal = next(
+        index for index, item in enumerate(plan.generators) if item.generator_id == generator_id
+    )
+    generator = plan.generators[generator_ordinal]
+    runner_status = "cleanup_failed" if not cleanup_healthy else attempt_status
+    successful = runner_status == "succeeded"
+    raw_output = (
+        canonical_json_bytes({"proposal_ids": [str(item.proposal_id) for item in proposals]})
+        if successful
+        else b""
+    )
+    raw_ref = _write(root / f"raw-output{suffix}.json", raw_output) if successful else None
+    runner_adapter = _runner_provenance()
+    runner_contract = RunnerProvenance(
+        profile=runner_adapter.profile,
+        adapter_name=runner_adapter.adapter_name,
+        adapter_version=runner_adapter.adapter_version,
+        implementation_kind=runner_adapter.implementation_kind,
+        source_commit=runner_adapter.source_commit,
+        identity_hash=_sha(canonical_json_bytes(runner_adapter.model_dump(mode="json"))),
+    )
+    record = RunnerExecutionRecord(
+        attempt_id=attempt_id,
+        generation_run_id=RUN_ID,
+        request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
+        plan_id=PLAN_ID,
+        generator_id=generator_id,
+        attempt_number=1,
+        runner_provenance=runner_contract,
+        generator_artifact_hash=generator.generator_artifact_hash,
+        status=runner_status,
+        synthetic=True,
+        wall_seconds_consumed=1.0,
+        stdout_bytes_consumed=len(raw_output),
+        stderr_bytes_consumed=0,
+        total_output_bytes_consumed=len(raw_output),
+        tokens_consumed=10 if successful else 0,
+        exit_code=0 if successful else None,
+        executable_name="scripted-agent",
+        argv_hash=_fixed_hash("c"),
+        input_manifest_hash=_fixed_hash("d"),
+        stdout_hash=_sha(raw_output),
+        stderr_hash=_sha(b""),
+        stdout_summary="scripted output" if successful else "",
+        stderr_summary="",
+        termination_reason=None if successful else runner_status,
+        process_tree_cleanup="not_needed" if cleanup_healthy else "failed",
+        cleanup_status="verified" if cleanup_healthy else "failed",
+        cleanup_summary=(
+            "scripted process domain clean" if cleanup_healthy else "scripted cleanup failure"
+        ),
+    )
+    receipt = RunnerExecutionReceipt(
+        receipt_id=runner_execution_receipt_id_for(attempt_id),
+        execution=record,
+        raw_output_uri=raw_ref["uri"] if raw_ref else None,
+        raw_output_hash=raw_ref["content_hash"] if raw_ref else None,
+        raw_output_bytes=len(raw_output),
+    )
+    receipt_ref = _write(root / f"receipt{suffix}.json", receipt.model_dump(mode="json"))
+
+    batch = None
+    batch_ref = None
+    if successful:
+        assert raw_ref is not None
+        batch = CandidateProposalBatch(
+            batch_id=uuid5(attempt_id, "batch"),
+            request_id=REQUEST_ID,
+            request_hash=candidate_generation_request_hash(request),
+            generation_run_id=RUN_ID,
+            generator_id=generator_id,
+            adapter_provenance=_generator_provenance(generator.adapter_profile),
+            status="succeeded",
+            proposals=proposals,
+            raw_output_uri=raw_ref["uri"],
+            raw_output_hash=raw_ref["content_hash"],
+            output_bytes=len(raw_output),
+            token_count=10,
+            attempt_count=1,
+            wall_seconds=1.0,
+            started_at=NOW,
+            finished_at=NOW,
+            synthetic=True,
+        )
+        batch_ref = _write(root / f"batch{suffix}.json", batch.model_dump(mode="json"))
+        assert batch_ref["content_hash"] == candidate_proposal_batch_hash(batch)
+
+    reserved = GenerationBudgetUsage(
+        attempts=1,
+        wall_milliseconds=generator.timeout_seconds * 1000,
+        output_bytes=generator.max_output_bytes_per_attempt,
+        tokens=generator.max_tokens_per_attempt,
+        proposals=max(generator.max_proposals, len(proposals)),
+    )
+    actual = GenerationBudgetUsage(
+        attempts=1,
+        wall_milliseconds=1000,
+        output_bytes=len(raw_output),
+        tokens=10 if successful else 0,
+        proposals=len(proposals) if successful else 0,
+    )
+    if not successful:
+        actual = reserved.model_copy(update={"proposals": 0})
+    error_code = (
+        None
+        if successful
+        else "runner_cleanup_failed"
+        if not cleanup_healthy
+        else "runner_timeout"
+        if attempt_status == "timed_out"
+        else "runner_failed"
+    )
+    attempt = GeneratorAttempt(
+        attempt_id=attempt_id,
+        generation_run_id=RUN_ID,
+        plan_id=PLAN_ID,
+        request_id=REQUEST_ID,
+        generator_id=generator_id,
+        generator_ordinal=generator_ordinal,
+        attempt_number=1,
+        adapter_profile=generator.adapter_profile,
+        state="succeeded" if successful else "failed",
+        reserved=reserved,
+        actual=actual,
+        worker_id="scripted-worker",
+        claim_token=uuid5(attempt_id, "claim"),
+        lease_expires_at=NOW,
+        batch_id=batch.batch_id if batch else None,
+        batch_uri=batch_ref["uri"] if batch_ref else None,
+        batch_hash=batch_ref["content_hash"] if batch_ref else None,
+        batch_status=batch.status if batch else None,
+        raw_output_uri=batch.raw_output_uri if batch else None,
+        raw_output_hash=batch.raw_output_hash if batch else None,
+        adapter_provenance=batch.adapter_provenance if batch else None,
+        runner_receipt_id=receipt.receipt_id,
+        runner_receipt_uri=receipt_ref["uri"],
+        runner_receipt_hash=receipt_ref["content_hash"],
+        runner_receipt_schema_version=receipt.schema_version,
+        runner_provenance=runner_adapter,
+        error_code=error_code,
+        error_message=(
+            "scripted Runner terminated without a Proposal Batch" if error_code else None
+        ),
+        version=3,
+        created_at=NOW,
+        updated_at=NOW,
+        started_at=NOW,
+        finished_at=NOW,
+    )
+    reserve = GenerationBudgetLedgerEntry(
+        ledger_entry_id=uuid5(attempt_id, "reserve"),
+        generation_run_id=RUN_ID,
+        attempt_id=attempt_id,
+        entry_type="reserve",
+        reserved=reserved,
+        idempotency_key=f"reserve-{attempt_id}",
+        created_at=NOW,
+    )
+    settle = GenerationBudgetLedgerEntry(
+        ledger_entry_id=uuid5(attempt_id, "settle"),
+        generation_run_id=RUN_ID,
+        attempt_id=attempt_id,
+        entry_type="settle",
+        reserved=reserved,
+        actual=actual,
+        idempotency_key=f"settle-{attempt_id}",
+        created_at=NOW,
+    )
+    return attempt, (reserve, settle), batch
+
+
+def _proposal_refs_for_fixture(
+    attempt: GeneratorAttempt,
+    batch: CandidateProposalBatch,
+) -> tuple[CandidateProposalRef, ...]:
+    pending = tuple(
+        CandidateProposalRef(
+            proposal_id=proposal.proposal_id,
+            proposal_hash=candidate_proposal_hash(proposal),
+            generation_run_id=attempt.generation_run_id,
+            request_id=attempt.request_id,
+            attempt_id=attempt.attempt_id,
+            batch_id=batch.batch_id,
+            generator_id=attempt.generator_id,
+            generator_ordinal=attempt.generator_ordinal,
+            proposal_ordinal=proposal.ordinal,
+            patch_uri=proposal.patch_uri,
+            patch_hash=proposal.patch_hash,
+            normalized_patch_hash=proposal.normalized_patch_hash,
+            disposition="pending",
+        )
+        for proposal in sorted(batch.proposals, key=lambda item: (item.ordinal, item.proposal_id))
+    )
+    return finalize_proposal_dispositions(pending)
+
+
 def _build(
     root: Path,
     *,
@@ -202,10 +437,13 @@ def _build(
     include_second_generator: bool = False,
 ) -> tuple[AgentProposalVerificationContext, AgentProposalVerifier]:
     knowledge = _knowledge()
-    request = _request(knowledge, max_proposals=request_max_proposals)
+    request = _request(
+        knowledge,
+        max_proposals=request_max_proposals + (2 if include_second_generator else 0),
+    )
     plan = _plan(
         request,
-        max_attempts=1 if attempt_status != "succeeded" else 2,
+        max_attempts=(1 if attempt_status != "succeeded" or not cleanup_healthy else 2),
         generator_max_proposals=generator_max_proposals,
         budget_max_proposals=budget_max_proposals,
         include_second_generator=include_second_generator,
@@ -220,6 +458,7 @@ def _build(
             CandidateProposal(
                 proposal_id=UUID(f"10000000-0000-0000-0000-{ordinal + 20:012d}"),
                 request_id=REQUEST_ID,
+                request_hash=candidate_generation_request_hash(request),
                 generation_run_id=RUN_ID,
                 generator_id="agent-one",
                 ordinal=ordinal,
@@ -233,67 +472,56 @@ def _build(
                 replacement_point=request.replacement_point,
             )
         )
-    raw_output = canonical_json_bytes(
-        {"proposal_ids": [str(item.proposal_id) for item in proposal_models]}
-    )
-    raw_ref = _write(root / "raw-output.json", raw_output)
-    batch_ref = None
-    if attempt_status == "succeeded":
-        batch = CandidateProposalBatch(
-            batch_id=UUID("10000000-0000-0000-0000-000000000030"),
-            request_id=REQUEST_ID,
-            generation_run_id=RUN_ID,
-            generator_id="agent-one",
-            adapter_provenance=_generator_provenance(),
-            status="succeeded",
-            proposals=proposal_models,
-            raw_output_uri=raw_ref["uri"],
-            raw_output_hash=raw_ref["content_hash"],
-            output_bytes=len(raw_output),
-            attempt_count=1,
-            wall_seconds=1.0,
-            started_at=NOW,
-            finished_at=NOW,
-            synthetic=True,
-        )
-        batch_ref = _write(root / "batch.json", batch.model_dump(mode="json"))
-    failure_code = (
-        "runner_timeout"
-        if attempt_status == "timed_out"
-        else "runner_failed"
-        if attempt_status == "failed"
-        else None
-    )
-    cleanup = {
-        "process_reaped": cleanup_healthy,
-        "sandbox_removed": cleanup_healthy,
-        "output_sealed": cleanup_healthy,
-        "failure_codes": [] if cleanup_healthy else ["sandbox_cleanup_failed"],
-    }
-    attempt = AgentAttemptEvidence(
-        attempt_id=UUID("10000000-0000-0000-0000-000000000031"),
-        generation_run_id=RUN_ID,
-        request_id=REQUEST_ID,
-        request_hash=candidate_generation_request_hash(request),
-        plan_id=PLAN_ID,
+    attempt, ledger, batch = _terminal_attempt(
+        root,
+        request=request,
+        plan=plan,
         generator_id="agent-one",
-        attempt_ordinal=0,
-        status=attempt_status,
-        failure_code=failure_code,
-        batch=batch_ref,
-        raw_output_uri=raw_ref["uri"] if batch_ref else None,
-        raw_output_hash=raw_ref["content_hash"] if batch_ref else None,
-        output_bytes=len(raw_output) if batch_ref else 0,
-        output_tokens=10 if batch_ref else 0,
-        wall_seconds=1.0,
-        cleanup=cleanup,
-        cleanup_evidence_hash=_sha(canonical_json_bytes(cleanup)),
-        started_at=NOW,
-        finished_at=NOW,
-        adapter_provenance=_runner_provenance(),
-        synthetic=True,
+        attempt_id=UUID("10000000-0000-0000-0000-000000000031"),
+        proposals=tuple(proposal_models),
+        suffix="",
+        attempt_status=attempt_status,
+        cleanup_healthy=cleanup_healthy,
     )
-    attempt_ref = _write(root / "attempt.json", attempt.model_dump(mode="json"))
+    has_proposals = attempt.state == "succeeded" and bool(proposal_models)
+    run_state = (
+        "running" if include_second_generator else "awaiting_review" if has_proposals else "failed"
+    )
+    run = GenerationRun(
+        generation_run_id=RUN_ID,
+        request=request,
+        request_hash=candidate_generation_request_hash(request),
+        plan=plan,
+        plan_hash=apex_generation_plan_hash(plan),
+        actor="scripted-apex",
+        idempotency_key="scripted-verifier-run-v1",
+        state=run_state,
+        planned_generator_count=len(plan.generators),
+        attempt_count=1,
+        terminal_attempt_count=1,
+        terminal_generator_count=1,
+        proposal_count=len(proposal_models) if has_proposals else 0,
+        retained_proposal_count=(
+            len({item.normalized_patch_hash for item in proposal_models}) if has_proposals else 0
+        ),
+        budget_consumed=attempt.actual,
+        error_code="no_retained_proposals" if run_state == "failed" else None,
+        error_message=(
+            "scripted Runner produced no retained Proposal" if run_state == "failed" else None
+        ),
+        version=3,
+        created_at=NOW,
+        updated_at=NOW,
+        finished_at=NOW if run_state == "failed" else None,
+    )
+    proposal_refs = _proposal_refs_for_fixture(attempt, batch) if batch is not None else ()
+    status = GenerationRunStatusView(
+        run=run,
+        attempts=(attempt,),
+        proposals=proposal_refs,
+        budget_ledger=ledger,
+    )
+    status_ref = _write(root / "status.json", status.model_dump(mode="json"))
     context = AgentProposalVerificationContext(
         task_id=UUID("10000000-0000-0000-0000-000000000040"),
         target_id="nmz36-agent-scripted",
@@ -302,7 +530,7 @@ def _build(
         knowledge={**knowledge_ref, "identity_hash": knowledge_snapshot_hash(knowledge)},
         request={**request_ref, "identity_hash": candidate_generation_request_hash(request)},
         plan={**plan_ref, "identity_hash": apex_generation_plan_hash(plan)},
-        attempts=[attempt_ref],
+        generation_status=status_ref,
     )
     return context, AgentProposalVerifier(PortableReader(root))
 
@@ -311,11 +539,14 @@ def _add_second_successful_generator(
     root: Path, context: AgentProposalVerificationContext
 ) -> AgentProposalVerificationContext:
     request = CandidateGenerationRequest.model_validate_json((root / "request.json").read_bytes())
+    plan = ApexGenerationPlan.model_validate_json((root / "plan.json").read_bytes())
+    status = GenerationRunStatusView.model_validate_json((root / "status.json").read_bytes())
     raw_patch = _patch("+    return x + 2")
     patch_ref = _write(root / "proposal-agent-two.diff", raw_patch)
     proposal = CandidateProposal(
         proposal_id=UUID("10000000-0000-0000-0000-000000000099"),
         request_id=REQUEST_ID,
+        request_hash=candidate_generation_request_hash(request),
         generation_run_id=RUN_ID,
         generator_id="agent-two",
         ordinal=0,
@@ -328,57 +559,71 @@ def _add_second_successful_generator(
         touched_paths=["sglang/runtime/operator.py"],
         replacement_point=request.replacement_point,
     )
-    raw_output = canonical_json_bytes({"proposal_ids": [str(proposal.proposal_id)]})
-    raw_ref = _write(root / "raw-output-agent-two.json", raw_output)
-    batch = CandidateProposalBatch(
-        batch_id=UUID("10000000-0000-0000-0000-000000000098"),
-        request_id=REQUEST_ID,
-        generation_run_id=RUN_ID,
+    attempt, ledger, batch = _terminal_attempt(
+        root,
+        request=request,
+        plan=plan,
         generator_id="agent-two",
-        adapter_provenance=_generator_provenance(),
-        status="succeeded",
-        proposals=[proposal],
-        raw_output_uri=raw_ref["uri"],
-        raw_output_hash=raw_ref["content_hash"],
-        output_bytes=len(raw_output),
-        attempt_count=1,
-        wall_seconds=1.0,
-        started_at=NOW,
-        finished_at=NOW,
-        synthetic=True,
-    )
-    batch_ref = _write(root / "batch-agent-two.json", batch.model_dump(mode="json"))
-    cleanup = {
-        "process_reaped": True,
-        "sandbox_removed": True,
-        "output_sealed": True,
-        "failure_codes": [],
-    }
-    attempt = AgentAttemptEvidence(
         attempt_id=UUID("10000000-0000-0000-0000-000000000097"),
-        generation_run_id=RUN_ID,
-        request_id=REQUEST_ID,
-        request_hash=candidate_generation_request_hash(request),
-        plan_id=PLAN_ID,
-        generator_id="agent-two",
-        attempt_ordinal=0,
-        status="succeeded",
-        batch=batch_ref,
-        raw_output_uri=raw_ref["uri"],
-        raw_output_hash=raw_ref["content_hash"],
-        output_bytes=len(raw_output),
-        output_tokens=10,
-        wall_seconds=1.0,
-        cleanup=cleanup,
-        cleanup_evidence_hash=_sha(canonical_json_bytes(cleanup)),
-        started_at=NOW,
-        finished_at=NOW,
-        adapter_provenance=_runner_provenance(),
-        synthetic=True,
+        proposals=(proposal,),
+        suffix="-agent-two",
     )
-    attempt_ref = _write(root / "attempt-agent-two.json", attempt.model_dump(mode="json"))
+    assert batch is not None
+    pending_refs = _proposal_refs_for_fixture(attempt, batch)
+    proposal_refs = finalize_proposal_dispositions((*status.proposals, *pending_refs))
+    run = status.run.model_copy(
+        update={
+            "state": "awaiting_review",
+            "attempt_count": 2,
+            "terminal_attempt_count": 2,
+            "terminal_generator_count": 2,
+            "proposal_count": status.run.proposal_count + 1,
+            "retained_proposal_count": sum(
+                item.disposition == "retained" for item in proposal_refs
+            ),
+            "budget_consumed": status.run.budget_consumed.plus(attempt.actual),
+            "version": status.run.version + 1,
+        }
+    )
+    updated = GenerationRunStatusView(
+        run=run,
+        attempts=(*status.attempts, attempt),
+        proposals=proposal_refs,
+        budget_ledger=(*status.budget_ledger, *ledger),
+    )
+    status_ref = _write(root / "status.json", updated.model_dump(mode="json"))
     return context.model_copy(
-        update={"attempts": (*context.attempts, AgentEvidenceRef.model_validate(attempt_ref))}
+        update={"generation_status": AgentEvidenceRef.model_validate(status_ref)}
+    )
+
+
+def _rewrite_status(
+    root: Path,
+    context: AgentProposalVerificationContext,
+    status: GenerationRunStatusView,
+) -> AgentProposalVerificationContext:
+    status_ref = _write(root / "status.json", status.model_dump(mode="json"))
+    return context.model_copy(
+        update={"generation_status": AgentEvidenceRef.model_validate(status_ref)}
+    )
+
+
+def _replace_status_attempt(
+    root: Path,
+    context: AgentProposalVerificationContext,
+    index: int,
+    **updates: object,
+) -> AgentProposalVerificationContext:
+    status = GenerationRunStatusView.model_validate_json((root / "status.json").read_bytes())
+    payload = status.attempts[index].model_dump(mode="json")
+    payload.update(updates)
+    attempt = GeneratorAttempt.model_validate(payload)
+    attempts = list(status.attempts)
+    attempts[index] = attempt
+    return _rewrite_status(
+        root,
+        context,
+        status.model_copy(update={"attempts": tuple(attempts)}),
     )
 
 
@@ -440,7 +685,7 @@ def test_runner_timeout_and_cleanup_failure_are_preserved(tmp_path: Path) -> Non
     assert cleanup.status == "invalid"
     assert "cleanup_failed" in cleanup.failure_codes
     assert cleanup.attempts[0].status == "invalid"
-    assert cleanup.proposals[0].status == "invalid"
+    assert cleanup.proposals == ()
 
 
 def test_zero_proposal_failed_runner_is_not_success(tmp_path: Path) -> None:
@@ -509,9 +754,13 @@ def test_attempt_order_does_not_change_verdict_or_digest(tmp_path: Path) -> None
     context = _add_second_successful_generator(tmp_path, context)
 
     forward = verifier.verify(context)
-    reverse = verifier.verify(
-        context.model_copy(update={"attempts": tuple(reversed(context.attempts))})
+    status = GenerationRunStatusView.model_validate_json((tmp_path / "status.json").read_bytes())
+    reversed_context = _rewrite_status(
+        tmp_path,
+        context,
+        status.model_copy(update={"attempts": tuple(reversed(status.attempts))}),
     )
+    reverse = verifier.verify(reversed_context)
 
     assert forward == reverse
     assert forward.input_digest == reverse.input_digest
@@ -583,22 +832,19 @@ def test_cross_batch_identities_are_rejected(
 ) -> None:
     context, verifier = _build(tmp_path, include_second_generator=True)
     context = _add_second_successful_generator(tmp_path, context)
-    second_attempt = json.loads((tmp_path / "attempt-agent-two.json").read_text("utf-8"))
+    status = GenerationRunStatusView.model_validate_json((tmp_path / "status.json").read_bytes())
     second_batch = json.loads((tmp_path / "batch-agent-two.json").read_text("utf-8"))
     if field == "batch_id":
-        second_batch["batch_id"] = "10000000-0000-0000-0000-000000000030"
+        second_batch["batch_id"] = str(status.attempts[0].batch_id)
     else:
         second_batch["proposals"][0]["proposal_id"] = "10000000-0000-0000-0000-000000000020"
     batch_ref = _write(tmp_path / "batch-agent-two.json", second_batch)
-    second_attempt["batch"] = batch_ref
-    attempt_ref = _write(tmp_path / "attempt-agent-two.json", second_attempt)
-    context = context.model_copy(
-        update={
-            "attempts": (
-                context.attempts[0],
-                AgentEvidenceRef.model_validate(attempt_ref),
-            )
-        }
+    context = _replace_status_attempt(
+        tmp_path,
+        context,
+        1,
+        batch_id=second_batch["batch_id"],
+        batch_hash=batch_ref["content_hash"],
     )
 
     with pytest.raises(AgentProposalEvidenceError) as raised:
@@ -609,17 +855,100 @@ def test_cross_batch_identities_are_rejected(
 
 def test_attempt_and_batch_usage_must_match(tmp_path: Path) -> None:
     context, verifier = _build(tmp_path)
-    attempt = json.loads((tmp_path / "attempt.json").read_text("utf-8"))
-    attempt["wall_seconds"] = 0.5
-    attempt_ref = _write(tmp_path / "attempt.json", attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    receipt_path = tmp_path / "receipt.json"
+    receipt = json.loads(receipt_path.read_text("utf-8"))
+    receipt["execution"]["wall_seconds_consumed"] = 0.5
+    receipt_ref = _write(receipt_path, receipt)
+    context = _replace_status_attempt(
+        tmp_path,
+        context,
+        0,
+        runner_receipt_hash=receipt_ref["content_hash"],
     )
 
     with pytest.raises(AgentProposalEvidenceError) as raised:
         verifier.verify(context)
 
     assert raised.value.code == "attempt_usage_mismatch"
+
+
+def test_generation_status_batch_metadata_must_match(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path / "status")
+    context = _replace_status_attempt(
+        tmp_path / "status",
+        context,
+        0,
+        batch_status="partial",
+    )
+    with pytest.raises(AgentProposalEvidenceError) as status_error:
+        verifier.verify(context)
+    assert status_error.value.code == "attempt_batch_status_mismatch"
+
+    context, verifier = _build(tmp_path / "provenance")
+    status = GenerationRunStatusView.model_validate_json(
+        (tmp_path / "provenance" / "status.json").read_bytes()
+    )
+    original = status.attempts[0].adapter_provenance
+    assert original is not None
+    context = _replace_status_attempt(
+        tmp_path / "provenance",
+        context,
+        0,
+        adapter_provenance=original.model_copy(update={"adapter_version": "9.9.9"}),
+    )
+    with pytest.raises(AgentProposalEvidenceError) as provenance_error:
+        verifier.verify(context)
+    assert provenance_error.value.code == "batch_provenance_mismatch"
+
+
+def test_candidate_proposal_refs_are_independently_bound(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path / "hash")
+    status = GenerationRunStatusView.model_validate_json(
+        (tmp_path / "hash" / "status.json").read_bytes()
+    )
+    bad_reference = status.proposals[0].model_copy(update={"proposal_hash": _fixed_hash("f")})
+    context = _rewrite_status(
+        tmp_path / "hash",
+        context,
+        status.model_copy(update={"proposals": (bad_reference,)}),
+    )
+    with pytest.raises(AgentProposalEvidenceError) as hash_error:
+        verifier.verify(context)
+    assert hash_error.value.code == "proposal_ref_binding_mismatch"
+
+    context, verifier = _build(tmp_path / "missing")
+    status = GenerationRunStatusView.model_validate_json(
+        (tmp_path / "missing" / "status.json").read_bytes()
+    )
+    context = _rewrite_status(
+        tmp_path / "missing",
+        context,
+        status.model_copy(update={"proposals": ()}),
+    )
+    with pytest.raises(AgentProposalEvidenceError) as set_error:
+        verifier.verify(context)
+    assert set_error.value.code == "proposal_ref_set_mismatch"
+
+
+def test_candidate_proposal_dispositions_are_recomputed(tmp_path: Path) -> None:
+    raw_patch = _patch()
+    context, verifier = _build(tmp_path, proposals=(raw_patch, raw_patch))
+    status = GenerationRunStatusView.model_validate_json((tmp_path / "status.json").read_bytes())
+    references = list(status.proposals)
+    references[1] = references[1].model_copy(
+        update={"disposition": "retained", "duplicate_of_proposal_id": None}
+    )
+    run = status.run.model_copy(update={"retained_proposal_count": 2})
+    context = _rewrite_status(
+        tmp_path,
+        context,
+        status.model_copy(update={"run": run, "proposals": tuple(references)}),
+    )
+
+    with pytest.raises(AgentProposalEvidenceError) as raised:
+        verifier.verify(context)
+
+    assert raised.value.code == "proposal_disposition_mismatch"
 
 
 def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) -> None:
@@ -631,28 +960,31 @@ def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) ->
     }
 
     context, verifier = _build(tmp_path / "bad-runner")
-    attempt_path = tmp_path / "bad-runner" / "attempt.json"
-    attempt = json.loads(attempt_path.read_text("utf-8"))
-    attempt["adapter_provenance"] = _generator_provenance().model_dump(mode="json")
-    attempt_ref = _write(attempt_path, attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    receipt_path = tmp_path / "bad-runner" / "receipt.json"
+    receipt = json.loads(receipt_path.read_text("utf-8"))
+    receipt["execution"]["runner_provenance"]["profile"] = "tampered-runner-profile"
+    receipt["execution"]["runner_provenance"]["identity_hash"] = _fixed_hash("f")
+    receipt_ref = _write(receipt_path, receipt)
+    context = _replace_status_attempt(
+        tmp_path / "bad-runner",
+        context,
+        0,
+        runner_receipt_hash=receipt_ref["content_hash"],
     )
     with pytest.raises(AgentProposalEvidenceError) as runner_error:
         verifier.verify(context)
-    assert runner_error.value.code == "attempt_provenance_invalid"
+    assert runner_error.value.code == "runner_provenance_mismatch"
 
     context, verifier = _build(tmp_path / "bad-generator")
     batch_path = tmp_path / "bad-generator" / "batch.json"
-    attempt_path = tmp_path / "bad-generator" / "attempt.json"
     batch = json.loads(batch_path.read_text("utf-8"))
     batch["adapter_provenance"] = _runner_provenance().model_dump(mode="json")
     batch_ref = _write(batch_path, batch)
-    attempt = json.loads(attempt_path.read_text("utf-8"))
-    attempt["batch"] = batch_ref
-    attempt_ref = _write(attempt_path, attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    context = _replace_status_attempt(
+        tmp_path / "bad-generator",
+        context,
+        0,
+        batch_hash=batch_ref["content_hash"],
     )
     with pytest.raises(AgentProposalEvidenceError) as generator_error:
         verifier.verify(context)
@@ -662,42 +994,50 @@ def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) ->
 def test_attempt_batch_status_and_raw_output_binding(tmp_path: Path) -> None:
     context, verifier = _build(tmp_path / "partial")
     batch_path = tmp_path / "partial" / "batch.json"
-    attempt_path = tmp_path / "partial" / "attempt.json"
     batch = json.loads(batch_path.read_text("utf-8"))
     batch["status"] = "partial"
+    batch["error_code"] = "bounded_partial_output"
+    batch["error_message"] = "generator stopped after its bounded output limit"
     batch_ref = _write(batch_path, batch)
-    attempt = json.loads(attempt_path.read_text("utf-8"))
-    attempt["batch"] = batch_ref
-    attempt_ref = _write(attempt_path, attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    context = _replace_status_attempt(
+        tmp_path / "partial",
+        context,
+        0,
+        batch_hash=batch_ref["content_hash"],
+        batch_status="partial",
     )
     assert verifier.verify(context).status == "ready_for_review"
 
     context, verifier = _build(tmp_path / "failed")
     batch_path = tmp_path / "failed" / "batch.json"
-    attempt_path = tmp_path / "failed" / "attempt.json"
     batch = json.loads(batch_path.read_text("utf-8"))
     batch["status"] = "failed"
     batch["proposals"] = []
+    batch["error_code"] = "generator_failed"
+    batch["error_message"] = "generator failed before producing valid proposals"
     batch_ref = _write(batch_path, batch)
-    attempt = json.loads(attempt_path.read_text("utf-8"))
-    attempt["batch"] = batch_ref
-    attempt_ref = _write(attempt_path, attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    context = _replace_status_attempt(
+        tmp_path / "failed",
+        context,
+        0,
+        batch_hash=batch_ref["content_hash"],
+        batch_status="failed",
     )
     with pytest.raises(AgentProposalEvidenceError) as status_error:
         verifier.verify(context)
     assert status_error.value.code == "attempt_batch_status_mismatch"
 
     context, verifier = _build(tmp_path / "raw")
-    attempt_path = tmp_path / "raw" / "attempt.json"
-    attempt = json.loads(attempt_path.read_text("utf-8"))
-    attempt["raw_output_hash"] = _fixed_hash("f")
-    attempt_ref = _write(attempt_path, attempt)
-    context = context.model_copy(
-        update={"attempts": (AgentEvidenceRef.model_validate(attempt_ref),)}
+    batch_path = tmp_path / "raw" / "batch.json"
+    batch = json.loads(batch_path.read_text("utf-8"))
+    batch["raw_output_hash"] = _fixed_hash("f")
+    batch_ref = _write(batch_path, batch)
+    context = _replace_status_attempt(
+        tmp_path / "raw",
+        context,
+        0,
+        batch_hash=batch_ref["content_hash"],
+        raw_output_hash=_fixed_hash("f"),
     )
     with pytest.raises(AgentProposalEvidenceError) as raw_error:
         verifier.verify(context)

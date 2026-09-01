@@ -123,10 +123,13 @@
   未增加，仍是同样的 16 项符号链接权限和 2 项只读临时制品删除。M2b Agent Contract
   #117 联审修复在 2026-08-31 的全量结果为 `516 passed, 92 skipped, 19 failed`；19 项仍全部
   属于相同的符号链接或只读临时制品删除限制，新增 Contract 定向回归为 `33 passed, 1 skipped`。
+  M2b A/B/C/D Receipt 集成在 2026-09-01 的普通权限 Windows 全量结果为
+  `594 passed, 22 skipped, 18 failed`；18 项仍是同一组 16 个 symlink 权限失败和 2 个只读临时
+  制品删除失败，Agent/M2 聚焦回归为 `133 passed`。
 - Applies to: 普通权限 Windows Python 3.10+ 的仓库全量单测。
 - Do not repeat: 不要把这些既有 F1-C 权限失败归因于当前 PR；也不要为跑绿而删除
   symlink/只读语义测试。
-- Last updated: 2026-08-31
+- Last updated: 2026-09-01
 
 ## Windows 可编辑安装可能指向同项目的旧 checkout
 

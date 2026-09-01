@@ -124,6 +124,7 @@ class GenerationBudgetUsage(ContractModel):
 class GeneratorPlanEntry(ContractModel):
     generator_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
     adapter_profile: str = Field(min_length=1, max_length=200)
+    generator_artifact_hash: str = Field(pattern=SHA256_PATTERN)
     max_attempts: int = Field(ge=1, le=8)
     max_proposals: int = Field(ge=1, le=8)
     timeout_seconds: int = Field(ge=1, le=7_200)
@@ -577,11 +578,17 @@ class GeneratorAttempt(ContractModel):
     claim_token: UUID | None = None
     lease_expires_at: datetime | None = None
     batch_id: UUID | None = None
+    batch_uri: str | None = Field(default=None, min_length=1, max_length=4000)
     batch_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     batch_status: Literal["succeeded", "partial", "failed"] | None = None
     raw_output_uri: str | None = Field(default=None, min_length=1, max_length=4000)
     raw_output_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     adapter_provenance: AdapterProvenance | None = None
+    runner_receipt_id: UUID | None = None
+    runner_receipt_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    runner_receipt_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    runner_receipt_schema_version: Literal["m2b-runner-execution-receipt-v1"] | None = None
+    runner_provenance: AdapterProvenance | None = None
     error_code: str | None = Field(
         default=None, pattern=r"^[a-z0-9][a-z0-9_]{2,99}$"
     )
@@ -659,6 +666,26 @@ class GeneratorAttempt(ContractModel):
             self.adapter_provenance.profile != self.adapter_profile
         ):
             raise ValueError("Generator Attempt Adapter Provenance differs from its Plan")
+        receipt_fields = (
+            self.runner_receipt_id,
+            self.runner_receipt_uri,
+            self.runner_receipt_hash,
+            self.runner_receipt_schema_version,
+            self.runner_provenance,
+        )
+        if any(value is not None for value in receipt_fields) != all(
+            value is not None for value in receipt_fields
+        ):
+            raise ValueError("Generator Attempt Runner Receipt fields must be atomic")
+        if self.batch_uri is not None and self.batch_id is None:
+            raise ValueError("Generator Attempt Batch URI requires a Proposal Batch")
+        if self.state == "succeeded" and self.runner_receipt_id is not None:
+            if self.batch_uri is None:
+                raise ValueError("Receipt-backed Generator Attempt requires its Batch URI")
+        if self.runner_provenance is not None and (
+            self.runner_provenance.capability != "agent_runner"
+        ):
+            raise ValueError("Generator Attempt Runner Provenance is not an Agent Runner")
         if (self.error_code is None) != (self.error_message is None):
             raise ValueError("Generator Attempt error fields must be atomic")
         if (self.state == "failed") != (self.error_code is not None):
@@ -821,13 +848,14 @@ class GenerationRunStatusView(ContractModel):
     run: GenerationRun
     attempts: tuple[GeneratorAttempt, ...]
     proposals: tuple[CandidateProposalRef, ...]
+    budget_ledger: tuple[GenerationBudgetLedgerEntry, ...] = ()
     automatic_release_allowed: Literal[False] = False
 
     @model_validator(mode="after")
     def require_status_binding(self) -> GenerationRunStatusView:
         if any(
             item.generation_run_id != self.run.generation_run_id
-            for item in (*self.attempts, *self.proposals)
+            for item in (*self.attempts, *self.proposals, *self.budget_ledger)
         ):
             raise ValueError("Generation Run Status contains a cross-run member")
         return self

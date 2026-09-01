@@ -23,6 +23,9 @@ from hcuopt.adapters.agent_runner import (
     DeterministicAgentRunner,
     LocalCommandAgentRunner,
 )
+from hcuopt.adapters.agent_runner_receipt import RunnerExecutionReceiptStore
+from hcuopt.domain.errors import SourceArtifactError
+from hcuopt.source_hash import file_uri_to_path
 
 ROOT = Path(__file__).parents[2]
 STUB = ROOT / "tests" / "fixtures" / "agent_runner_stub.py"
@@ -64,7 +67,10 @@ def _request(
     return AgentRunRequest(
         attempt_id=UUID("00000000-0000-0000-0000-000000000114"),
         generation_run_id=UUID("00000000-0000-0000-0000-000000000112"),
+        request_id=UUID("00000000-0000-0000-0000-000000000111"),
         request_hash=REQUEST_HASH,
+        plan_id=UUID("00000000-0000-0000-0000-000000000113"),
+        generator_id="agent-runner-test",
         executable=executable or Path(sys.executable),
         generator_artifact=artifact,
         generator_artifact_hash=generator_artifact_hash or _file_hash(artifact),
@@ -132,6 +138,9 @@ def test_deterministic_runner_uses_the_runtime_protocol_and_budget_evidence(
     assert result.evidence.attempt_id == request.attempt_id
     assert result.evidence.generation_run_id == request.generation_run_id
     assert result.evidence.request_hash == request.request_hash
+    assert result.evidence.request_id == request.request_id
+    assert result.evidence.plan_id == request.plan_id
+    assert result.evidence.generator_id == request.generator_id
     assert result.evidence.attempt_number == request.limits.attempt_number
     assert result.evidence.generator_artifact_hash == request.generator_artifact_hash
     assert result.evidence.runner_provenance.profile == runner.provenance.profile
@@ -139,6 +148,39 @@ def test_deterministic_runner_uses_the_runtime_protocol_and_budget_evidence(
     assert result.evidence.performance_conclusion == "not_measured"
     assert result.evidence.hcu_access_allowed is False
     assert result.evidence.measurement_access_allowed is False
+
+
+def test_runner_receipt_store_publishes_and_rereads_exact_output(tmp_path: Path) -> None:
+    runner = DeterministicAgentRunner(
+        proposal_bytes=b'{"proposal":"fixture"}',
+        reported_tokens=9,
+    )
+    result = runner.run(_request(), tmp_path / "runner")
+    store = RunnerExecutionReceiptStore(tmp_path / "receipts")
+
+    first = store.publish(result)
+    second = store.publish(result)
+    receipt = store.load(first)
+
+    assert first == second
+    assert receipt.execution == result.evidence
+    assert receipt.raw_output_hash == result.evidence.stdout_hash
+    assert receipt.raw_output_bytes == len(result.proposal_bytes or b"")
+    assert receipt.raw_output_uri is not None
+    assert receipt.automatic_release_allowed is False
+
+
+def test_runner_receipt_store_rejects_tampered_output(tmp_path: Path) -> None:
+    runner = DeterministicAgentRunner(proposal_bytes=b"proposal", reported_tokens=1)
+    result = runner.run(_request(), tmp_path / "runner")
+    store = RunnerExecutionReceiptStore(tmp_path / "receipts")
+    reference = store.publish(result)
+    receipt = store.load(reference)
+    assert receipt.raw_output_uri is not None
+    file_uri_to_path(receipt.raw_output_uri).write_bytes(b"tampered")
+
+    with pytest.raises(SourceArtifactError, match="raw output changed"):
+        store.load(reference)
 
 
 def test_local_runner_preserves_literal_argv_without_a_shell(tmp_path: Path) -> None:
