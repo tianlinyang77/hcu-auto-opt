@@ -18,6 +18,16 @@ class OperatorProfileModeMismatch(Conflict):
     retryable = False
 
 
+class OperatorFormalAuthorizationInvalid(Conflict):
+    code = "operator_formal_authorization_invalid"
+    retryable = False
+
+
+class OperatorFormalAuthorizationNotActive(Conflict):
+    code = "operator_formal_authorization_not_active"
+    retryable = True
+
+
 class OperatorPlanHashMismatch(Conflict):
     code = "operator_plan_hash_mismatch"
     retryable = False

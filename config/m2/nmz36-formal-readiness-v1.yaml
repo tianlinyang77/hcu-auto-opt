@@ -113,14 +113,26 @@ gates:
         evidence_type: current_real_adapter_registry
   - code: formal_operator_profiles
     owner: A
-    status: block
-    summary: The runtime catalog contains only synthetic Scripted Profiles and rejects Real Profiles by default.
-    required_action: Complete A/B/C/D review, publish exact immutable Real Profile versions, and enable them only through an explicit deployment-owned allowlist.
+    status: hold
+    summary: A content-addressed Formal window Contract and fail-closed Real Profile registration path now exist without publishing a real Profile or authorization instance.
+    required_action: Complete A2-A4, A/B/C/D interface review, and production authentication/Verifier configuration before publishing exact immutable Real Profile versions.
     evidence:
       - path: src/hcuopt/operator/profiles.py
-        sha256: sha256:5341c066eaaa1d1d2e00a13366e9a98179fce2d4d6735cfa127c6d6daf44b0c1
+        sha256: sha256:094bf0b024866e5a2263026ecb107afdebe1cce6c1f4a57b836ca5b82ef3fb5b
         digest_mode: text_lf
-        evidence_type: scripted_operator_profile_catalog
+        evidence_type: fail_closed_operator_profile_catalog
+      - path: src/hcuopt/operator/formal_profiles.py
+        sha256: sha256:f37f2a467fd6e49d45e007041ad9b355f7d7fd1ea848f5141daeaf005303218e
+        digest_mode: text_lf
+        evidence_type: protected_formal_profile_registration
+      - path: src/hcuopt/contracts/formal_profile_authorization_v1.py
+        sha256: sha256:b1d0bbc6215a22e882f84f4d5be99c6b5dca24831e5accccc6632eb9c33bb676
+        digest_mode: text_lf
+        evidence_type: formal_window_authorization_contract
+      - path: tests/unit/test_formal_operator_profile_authorization.py
+        sha256: sha256:2796e27210ce6d5df881e2ebdc763b5fc0a04f929b755fd629cdc3db43771590
+        digest_mode: text_lf
+        evidence_type: formal_profile_authorization_negative_tests
   - code: formal_plan_compiler
     owner: A
     status: block
@@ -163,8 +175,8 @@ gates:
         evidence_type: historical_stage0_formal_acceptance
   - code: owner_window_authorization
     owner: project_owner
-    status: block
-    summary: No exact host, device, time window, Candidate Family, or budget has been authorized for an M2a Formal run.
+    status: hold
+    summary: The separate project-owner decision remains pending; no exact host, device, time window, Candidate Family, or budget has been authorized for an M2a Formal run.
     required_action: After every A/B/C/D blocker is resolved, request one separate project-owner decision naming the exact host, HCU, time window, Family Hash, and maximum budget.
     evidence:
       - path: docs/adr/0009-m2a-round-barrier.md

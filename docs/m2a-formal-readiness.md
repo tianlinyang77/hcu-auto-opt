@@ -20,8 +20,15 @@ hcu_accessed = false
 automatic_release_allowed = false
 ```
 
-`ready_for_window_authorization` 也只表示可以向项目所有者申请一次独立窗口评审，不表示已经
-获得 HCU 权限，更不创建 Round 或发布 Candidate。
+`ready_for_window_authorization` 也只表示除项目所有者窗口决定外的实现门禁和 A/B/C/D 评审均
+已通过，可以申请一次独立窗口评审；`owner_window_authorization` 此时仍必须保持 `hold`。它不
+表示已经获得 HCU 权限，更不创建 Round 或发布 Candidate。
+
+项目所有者决定使用独立的
+`m2a-formal-profile-window-authorization-v1` 内容寻址对象。该对象绑定 readiness Manifest/Report
+Hash、三个精确 Profile Hash、business source Family Hash、预算、主机、资源和有效时间窗，并
+由部署侧 Verifier 校验签名。缺失、拒绝、签名失败、过期或任一绑定漂移时，Real Profile 不能
+进入可运行 Catalog；普通 `OperatorProfileCatalog` 不再提供布尔开关绕过此门禁。
 
 ## 冻结输入
 
