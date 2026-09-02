@@ -22,8 +22,11 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
 
 ## 已实现合同
 
-- `BusinessCandidateFamilyManifest` 固定 Store、Target Snapshot、Formal Stage0Run、Baseline
-  Epoch/Source、测试任务、Hotspot、replacement point、Profiler Evidence 和唯一 Overlay 文件。
+- `BusinessCandidateFamilyManifest` v1 保持既有字段和 Hash 语义，固定 Store、Target Snapshot、
+  Formal Stage0Run、Baseline Epoch/Source、Hotspot、replacement point、Profiler Evidence 和
+  唯一 Overlay 文件。
+- 本次新增的 Store 描述固定共同测试任务；独立验证记录再次携带该测试任务，供后续 Formal
+  Plan 与已授权 Profile 交叉核对，不向已发布的 Family v1 增加必填字段。
 - 成员数固定为 2～4；每个成员绑定 Candidate UUID、`CandidateSourcePackageRef` 和单一优化
   假设。
 - Family 固定 `track=triton`、`release_mode=overlay`、`candidate_kind=business`、
@@ -67,7 +70,7 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
 准备两份真实、内容不同的 SGLang allocator 候选源码：第一份是 M1 已验收的
 `unique_consecutive` 修改，第二份是按完整页块直接抽取每页首索引的待测实现。两个候选已经
 使用既有 Package/Family 格式写入同一个内容寻址 Store，固定的 `source_family_hash` 为
-`sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1`。
+`sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17`。
 
 `m2a_business_candidate_family` 独立验证入口从 Store 重新读取全部文件，并从锁定 Baseline
 重放两个 Overlay 后重新计算完整 Candidate Source Hash。机器验证记录和便于人工阅读的说明见

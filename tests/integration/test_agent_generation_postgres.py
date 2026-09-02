@@ -728,7 +728,6 @@ class AgentGenerationPostgresTests(unittest.TestCase):
             stage0_run_id=start_request.request.stage0_run_id,
             baseline_epoch_id=start_request.request.baseline_epoch_id,
             baseline_source_hash=start_request.request.baseline_source_hash,
-            workload_id=start_request.request.workload_id,
             hotspot_id=start_request.request.hotspot_id,
             replacement_point=start_request.request.replacement_point,
             profiler_evidence_uri=start_request.request.profiler_evidence_uri,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -125,6 +126,7 @@ def _fixture(
         baseline_repository="https://example.invalid/sglang.git",
         baseline_commit="a" * 40,
         baseline_source_hash=canonical_source_hash(baseline),
+        workload_id="test-business-workload",
         allowed_overlay_roots=("python/sglang",),
         approved_mount_targets={REPLACEMENT_POINT: MOUNT_TARGET},
         packages=refs,
@@ -151,7 +153,6 @@ def _fixture(
         stage0_run_id=UUID("44444444-4444-5444-8444-444444444444"),
         baseline_epoch_id=UUID("55555555-5555-5555-8555-555555555555"),
         baseline_source_hash=descriptor.baseline_source_hash,
-        workload_id="test-business-workload",
         hotspot_id=HOTSPOT_ID,
         replacement_point=REPLACEMENT_POINT,
         profiler_evidence_uri="evidence://profiler/frozen",
@@ -200,6 +201,7 @@ def test_store_reread_and_baseline_replay_publish_acceptance(tmp_path: Path) -> 
     assert result.record.baseline_source_replay_verified is True
     assert result.record.hcu_accessed is False
     assert result.record.performance_conclusion == "not_measured"
+    assert result.record.workload_id == "test-business-workload"
     assert len(result.record.members) == 2
     assert result.evidence.sha256 == _hash(file_uri_to_path(result.evidence.uri).read_bytes())
 
@@ -233,6 +235,8 @@ def test_repository_nmz36_family_is_canonical_and_store_verified() -> None:
     family = BusinessCandidateFamilyManifest.model_validate_json(family_path.read_bytes())
     assert canonical_json_bytes(descriptor) == descriptor_path.read_bytes()
     assert canonical_json_bytes(family) == family_path.read_bytes()
+    assert descriptor.workload_id == "m1-qwen2.5-0.5b-prefill-4090-1-c1"
+    assert "workload_id" not in family.model_fields_set
 
     store = CandidateSourcePackageStore(
         root / "config/m2/nmz36-business-candidate-store-v1",
@@ -248,7 +252,7 @@ def test_repository_nmz36_family_is_canonical_and_store_verified() -> None:
 
     assert verified.source_family_hash == business_candidate_source_family_hash(family)
     assert verified.source_family_hash == (
-        "sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1"
+        "sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17"
     )
     assert {item.manifest.candidate_source_hash for item in verified.packages} == {
         "sha256:f27c1546bc5bd46741ae98ad0b96d51974a0108af316f9d557daa2f82556fbc2",
@@ -268,6 +272,66 @@ def test_repository_nmz36_family_is_canonical_and_store_verified() -> None:
     ]
     for candidate_id, source in sources.items():
         compile(source, f"candidate-{candidate_id}/allocator.py", "exec")
+
+
+def test_content_addressed_json_remains_lf_with_autocrlf_checkout(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    paths = (
+        Path("config/m2/nmz36-business-candidate-store-v1.json"),
+        Path("config/m2/nmz36-business-candidate-family-v1.json"),
+        *sorted(
+            path.relative_to(root)
+            for path in (
+                root / "config/m2/nmz36-business-candidate-store-v1"
+            ).rglob("*.json")
+        ),
+        *sorted(
+            path.relative_to(root)
+            for path in (
+                root / "docs/evidence/m2a-business-candidate-family"
+            ).glob("*.json")
+        ),
+    )
+    source = tmp_path / "source"
+    checkout = tmp_path / "checkout"
+    source.mkdir()
+    shutil.copyfile(root / ".gitattributes", source / ".gitattributes")
+    for relative_path in paths:
+        destination = source / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / relative_path, destination)
+
+    def git(*arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("git", *arguments),
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "--quiet", cwd=source)
+    git("config", "user.name", "test", cwd=source)
+    git("config", "user.email", "test@example.invalid", cwd=source)
+    git("add", ".", cwd=source)
+    git("commit", "--quiet", "-m", "canonical JSON fixture", cwd=source)
+    git(
+        "clone",
+        "--quiet",
+        "--no-local",
+        "-c",
+        "core.autocrlf=true",
+        str(source),
+        str(checkout),
+        cwd=tmp_path,
+    )
+
+    for relative_path in paths:
+        assert (checkout / relative_path).read_bytes() == (root / relative_path).read_bytes()
+        attribute = git("check-attr", "eol", "--", relative_path.as_posix(), cwd=checkout)
+        assert attribute.stdout.strip().endswith("eol: lf")
 
 
 def test_page_head_candidate_preserves_full_page_release_membership() -> None:

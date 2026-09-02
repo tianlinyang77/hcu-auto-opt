@@ -116,7 +116,6 @@ def _family(
         stage0_run_id=UUID("dd50c381-75dd-5a64-9211-640c602dc817"),
         baseline_epoch_id=UUID("1ab0480c-6f16-544c-a835-655599eaea6c"),
         baseline_source_hash=baseline_source_hash,
-        workload_id="m1-qwen2.5-0.5b-prefill-4090-1-c1",
         hotspot_id=HOTSPOT_ID,
         replacement_point=REPLACEMENT_POINT,
         profiler_evidence_uri=PROFILER_URI,
@@ -158,6 +157,19 @@ def test_business_family_verifies_two_real_packages_and_hashes_order_independent
     ) == tuple(sorted(str(item.candidate_id) for item in manifest.members))
     assert all(
         item.manifest.candidate_kind.value == "business" for item in verified.packages
+    )
+
+
+def test_business_family_v1_remains_compatible_without_workload_field(
+    tmp_path: Path,
+) -> None:
+    manifest, _first, _second = _family(tmp_path)
+    encoded = canonical_json_bytes(manifest)
+
+    assert b'"workload_id"' not in encoded
+    assert BusinessCandidateFamilyManifest.model_validate_json(encoded) == manifest
+    assert business_candidate_source_family_hash(manifest) == (
+        "sha256:7fc4c048d5a6b6e0bc084c606b004adde5c68bef0d20b1c17586f8cfb9eadbbb"
     )
 
 

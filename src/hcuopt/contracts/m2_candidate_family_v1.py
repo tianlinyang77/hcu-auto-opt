@@ -50,6 +50,7 @@ class BusinessCandidatePackageStoreDescriptor(ContractModel):
     baseline_repository: str = Field(min_length=1, max_length=2000)
     baseline_commit: str = Field(pattern=GIT_COMMIT_PATTERN)
     baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
+    workload_id: str = Field(min_length=1, max_length=200)
     allowed_overlay_roots: tuple[str, ...] = Field(min_length=1, max_length=8)
     approved_mount_targets: dict[str, str] = Field(min_length=1, max_length=8)
     packages: tuple[CandidateSourcePackageRef, ...] = Field(min_length=2, max_length=4)
@@ -59,6 +60,13 @@ class BusinessCandidatePackageStoreDescriptor(ContractModel):
     def require_normalized_repository(cls, value: str) -> str:
         if value.strip() != value:
             raise ValueError("Baseline repository must be normalized")
+        return value
+
+    @field_validator("workload_id")
+    @classmethod
+    def require_normalized_workload(cls, value: str) -> str:
+        if value.strip() != value:
+            raise ValueError("Workload ID must be normalized")
         return value
 
     @field_validator("allowed_overlay_roots")
@@ -119,7 +127,6 @@ class BusinessCandidateFamilyManifest(ContractModel):
     stage0_run_id: UUID
     baseline_epoch_id: UUID
     baseline_source_hash: str = Field(pattern=SHA256_PATTERN)
-    workload_id: str = Field(min_length=1, max_length=200)
     hotspot_id: UUID
     replacement_point: str = Field(min_length=1, max_length=1000)
     profiler_evidence_uri: str = Field(min_length=1, max_length=4000)
@@ -138,12 +145,7 @@ class BusinessCandidateFamilyManifest(ContractModel):
     synthetic: Literal[False] = False
     automatic_release_allowed: Literal[False] = False
 
-    @field_validator(
-        "source_package_store_id",
-        "workload_id",
-        "replacement_point",
-        "reviewed_by",
-    )
+    @field_validator("source_package_store_id", "replacement_point", "reviewed_by")
     @classmethod
     def require_normalized_text(cls, value: str) -> str:
         if value.strip() != value:
@@ -264,6 +266,8 @@ class BusinessCandidateFamilyVerificationRecord(ContractModel):
             raise ValueError("Candidate Family verification time must be timezone-aware")
         if self.verified_by.strip() != self.verified_by:
             raise ValueError("Candidate Family verifier must be normalized")
+        if self.workload_id.strip() != self.workload_id:
+            raise ValueError("verified Workload ID must be normalized")
         if self.verifier_provenance.implementation_kind != "real":
             raise ValueError("Candidate Family acceptance requires a real Store verifier")
         candidate_ids = tuple(str(item.candidate_id) for item in self.members)

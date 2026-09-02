@@ -223,7 +223,7 @@ def verify_business_candidate_family(
         stage0_run_id=family.stage0_run_id,
         baseline_epoch_id=family.baseline_epoch_id,
         hotspot_id=family.hotspot_id,
-        workload_id=family.workload_id,
+        workload_id=descriptor.workload_id,
         replacement_point=family.replacement_point,
         members=tuple(members),
         verifier_provenance=verifier.provenance,

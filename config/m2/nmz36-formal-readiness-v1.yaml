@@ -47,7 +47,7 @@ profile_draft:
       source_package_hash: sha256:2745cb4cc8d7359a7b62457ad612cdb126cfbca9cbe462227488310b704cfc9a
       manifest_hash: sha256:6aa4004edc500bdbfa06847aa8e926decc2b7269ecc623259e1b1644468a0dcb
       manifest_schema_version: m1-candidate-source-v1
-  candidate_family_hash: sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1
+  candidate_family_hash: sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17
   automatic_release_allowed: false
 
 gates:
@@ -58,19 +58,19 @@ gates:
     required_action: Preserve the Store, Family and verification record unchanged; A and D must reread them before any separately authorized Formal window.
     evidence:
       - path: config/m2/nmz36-business-candidate-store-v1.json
-        sha256: sha256:2d55a8825dfac73bb2248c73547fc5dbc2b16fd1baaf8b635ef2760e40db04b1
+        sha256: sha256:0f67b371fc2398ed6cb2e1a0a52310273bcc2f3593467df104ed2850f1b90560
         digest_mode: text_lf
         evidence_type: frozen_business_candidate_store_descriptor
       - path: config/m2/nmz36-business-candidate-family-v1.json
-        sha256: sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1
+        sha256: sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17
         digest_mode: text_lf
         evidence_type: canonical_two_member_business_candidate_family
-      - path: docs/evidence/m2a-business-candidate-family/sha256-bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c.json
-        sha256: sha256:bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c
+      - path: docs/evidence/m2a-business-candidate-family/sha256-1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42.json
+        sha256: sha256:1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42
         digest_mode: text_lf
         evidence_type: independent_store_reread_and_baseline_replay_record
       - path: docs/evidence/m2a-business-candidate-family-20260902.md
-        sha256: sha256:8b25b7b621004a75d76ffbd5b4df1a1ac2f281a64b0141ee9c208c87750627e9
+        sha256: sha256:0d5844b613283fe9db70ed8e295250313a384e966a045df3970b28f27bb4b6e6
         digest_mode: text_lf
         evidence_type: human_readable_candidate_family_acceptance
   - code: formal_authority_persistence
@@ -180,7 +180,7 @@ gates:
     required_action: After every A/B/C/D blocker is resolved, request one separate project-owner decision naming the exact host, HCU, time window, Family Hash, and maximum budget.
     evidence:
       - path: docs/adr/0009-m2a-round-barrier.md
-        sha256: sha256:3590158f606fb5525187e4173c124360ede526354777cda87f2549998b8f6dd8
+        sha256: sha256:71218d2057698dce4910559097a43818e6754f063c445ebdc1013a3356d265f5
         digest_mode: text_lf
         evidence_type: formal_authorization_policy
   - code: round_signoff_outbox
@@ -239,8 +239,8 @@ reviews:
     decision: accepted_for_formal_window
     reason: Two real and source-distinct SGLang allocator Candidates were reread from one frozen Store and their complete Candidate Source Hashes were independently replayed from the locked Baseline without HCU access.
     evidence:
-      path: docs/evidence/m2a-business-candidate-family/sha256-bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c.json
-      sha256: sha256:bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c
+      path: docs/evidence/m2a-business-candidate-family/sha256-1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42.json
+      sha256: sha256:1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42
       digest_mode: text_lf
       evidence_type: c_accepted_for_formal_window
   - owner: D

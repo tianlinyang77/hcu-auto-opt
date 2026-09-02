@@ -65,10 +65,10 @@ ID。它依赖该分配器“释放输入由完整、连续的页块组成”的
 - Candidate Package Store 描述：
   `config/m2/nmz36-business-candidate-store-v1.json`；
 - Store Hash：
-  `sha256:2d55a8825dfac73bb2248c73547fc5dbc2b16fd1baaf8b635ef2760e40db04b1`；
+  `sha256:0f67b371fc2398ed6cb2e1a0a52310273bcc2f3593467df104ed2850f1b90560`；
 - 双候选集合：`config/m2/nmz36-business-candidate-family-v1.json`；
 - `source_family_hash`：
-  `sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1`。
+  `sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17`。
 
 两个源码包都放在同一个内容寻址目录中。每个包继续使用既有
 `m1-candidate-source-v1` 格式；双候选集合继续使用既有
@@ -87,7 +87,7 @@ ID。它依赖该分配器“释放输入由完整、连续的页块组成”的
    `performance_conclusion=not_measured` 和 `automatic_release_allowed=false`。
 
 机器可读记录：
-`docs/evidence/m2a-business-candidate-family/sha256-bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c.json`。
+`docs/evidence/m2a-business-candidate-family/sha256-1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42.json`。
 
 记录 Hash：
-`sha256:bc70a9afd2fc8e90ca7be7fc293675ebe71bf94e15d07b99d6f94567a0e5952c`。
+`sha256:1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42`。
