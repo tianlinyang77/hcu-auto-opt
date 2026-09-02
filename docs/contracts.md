@@ -16,6 +16,7 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | BuildArtifact | C | D/A | 内容不可变，包含 build recipe、Hash、SBOM |
 | MeasurementSeries | B | D/A | 原始样本 URI/Hash、协议、环境指纹和 Adapter 来源完整 |
 | M1PerformanceEvidence | B | D | ADR-0006 唯一 Schema；独立进程/缓存/Event、Stage 0 预算和 Lease-bound 清理可重算 |
+| M2FormalPhaseExecutionRequest / Receipt | A/B runtime | A/D | Formal-only；分别绑定 Search/Holdout、A1 Authorization/Resolved Plan、Authority Context、三 Profile、Target Lock refresh、Host/HCU/CPU/NUMA、窗口、独占 Lease/续租/Fencing、Round Budget、原始 M1 Evidence 和清理结果；只记录执行事实，不写性能结论 |
 | M1CorrectnessResult | D | A/D | 同时绑定原始数值证据与 Verification Artifact URI/Hash |
 | EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
@@ -72,6 +73,13 @@ release_mode: hot_patch | overlay | manual_only
 每个 Job 必须带全局唯一 `idempotency_key`，每次领取生成新的 `claim_token`。GPU Job 还必须带资源当前的 `fencing_token`；Claim 或 Fencing 任一过期，Heartbeat、Complete 和 Fail 均返回冲突，不接受迟到写回。
 
 `lease_scope` 明确区分资源纪律：Agent/Build 为 `none`，正确性验证为 `shared`，Profiler、Performance 和 E2E 计时为 `exclusive`。共享正确性 Job 不得借机记录或发布性能结论。
+
+M2a Formal Phase Adapter 在预算 reserve 前必须同时验证 A1 Authorization/Resolved Plan、Authority
+Context、版本化 Adapter Profile、Target Lock refresh、Target/Host/HCU/CPU/NUMA、批准窗口、独占
+Lease 的权威回执/续租截止时间和当前 Fencing Token。过期 Lease 先通过注入的 fenced recovery
+恢复资源再拒绝执行；Harness 未启动时取消使用 release；一旦启动，成功、timeout、证据失败和
+cleanup 失败都使用 settle，并发布内容寻址、Receipt ID 不可改绑的终态回执。回执固定
+`performance_conclusion=not_measured`，统计裁决仍只属于 D。
 
 错误使用稳定结构：
 
