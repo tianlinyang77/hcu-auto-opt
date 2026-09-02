@@ -15,6 +15,8 @@ MIGRATIONS = {
     12: "0012_m2_formal_authority.sql",
     13: "0013_m2_formal_finalizer.sql",
     14: "0014_m2_formal_signoff_outbox.sql",
+    15: "0015_m2b_agent_generation_authority.sql",
+    16: "0016_m2b_runner_execution_receipt.sql",
 }
 
 

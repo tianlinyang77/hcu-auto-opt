@@ -1,6 +1,6 @@
 # v1 领域契约
 
-API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台契约位于 `src/hcuopt/contracts/platform_v1.py`，状态机位于 `src/hcuopt/domain/`，数据库迁移位于 `src/hcuopt/storage/sql/`。这些边界必须共同演进，禁止分别维护同名字段。Target、执行、源码、制品和证据接口详见 [公共接口层](public-interfaces.md)。
+API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台契约位于 `src/hcuopt/contracts/platform_v1.py`，M2b Proposal 合同位于 `src/hcuopt/contracts/agent_v1.py`，状态机位于 `src/hcuopt/domain/`，数据库迁移位于 `src/hcuopt/storage/sql/`。这些边界必须共同演进，禁止分别维护同名字段。Target、执行、源码、制品和证据接口详见 [公共接口层](public-interfaces.md)。
 
 ## 核心对象
 
@@ -21,6 +21,15 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
 | ResourceLease | A/B | Worker | 携带 fencing_token；过期后不能写回 |
 | ExperimentEvidence | A/D | Registry/KB | 区分事实、复验知识和 Agent 推测 |
+| KnowledgeSnapshot | C | Agent/A/D | 知识来源、版本、许可证和 Hash 不可变；只提供建议 |
+| CandidateGenerationRequest | A | Agent/C/D | 绑定 Target、Stage 0、Baseline、Hotspot、Workload 与知识快照；禁止 HCU/Holdout/测量访问 |
+| CandidateProposal | Agent | A/C/D | 同时冻结完整 Request Hash 与待审 Patch 身份；不是 Candidate 或性能结论 |
+| CandidateProposalReviewRecord | C/人工审核人 | A/C/D | 决策绑定 Proposal、Request、Patch、Baseline、Hotspot、审核人、原因、时间、幂等键和审核证据 |
+| CandidateProposalPromotionReceipt | C | A/D | 只引用既有 `CandidateSourcePackageRef` 与 M2a source-family verifier 证据；不得新造 Candidate/Artifact/Family |
+| ApexGenerationPlan | A | Agent/B/C/D | 只控制生成器、Generator Artifact Hash、重试、去重和生成预算；不控制 Round/HCU |
+| AgentRunRequest / RunnerExecutionRecord | A/B runtime | B Receipt Store | 受限 Runner 边界；绑定 Attempt/Run/Request/Plan/generator、Runner provenance、Generator/Executable 内容 Hash；进程域、输入、环境和生成预算受限，失败时不返回 Proposal bytes |
+| RunnerExecutionReceipt / Ref | B deployment | A/C/D | 内容寻址且不可变；绑定执行状态、实际 usage、raw output、cleanup 与 Runner provenance；失败 Receipt 不暴露 raw Proposal |
+| GenerationRunStatusView / Budget Ledger | A | C/D/UI | 持久化 Attempt、Receipt Ref、Batch/Proposal Ref 和生成预算；D 必须重读底层 Receipt/Batch/Patch，不信任汇总自报 |
 
 ## M1 签核后的兼容边界
 

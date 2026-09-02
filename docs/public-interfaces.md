@@ -146,3 +146,90 @@ OX-1 CLI 和 Operator Read Model 使用同一 API：
 `round draft` 从可信 Profile、Hotspot Authority 和已验证 Candidate Package 生成 Plan Spec；后续
 命令从 Preview/Start 文件自动提取 ID 与 Hash，不要求人工复制。`round run` 另存非性能性质的
 真实操作成本指标；部署配置和 fail-closed 边界见 [OX-1 Scripted Operator CLI](operator-cli.md)。
+
+## M2b Agent/Apex Proposal 接口
+
+M2b 的第一层公共接口位于 `src/hcuopt/contracts/agent_v1.py` 和
+`CandidateGeneratorAdapter.generate_proposals()`。输入固定 Target、Stage 0、Baseline、Hotspot、
+Workload、Profiler Evidence 与 `KnowledgeSnapshot`；输出只能是带 Patch/意图/风险/provenance
+的 `CandidateProposalBatch`。每个 Proposal 和 Batch 都必须保存完整 `request_hash`，消费方从权威
+Store 重读 `CandidateGenerationRequest` 后调用 `candidate_generation_request_hash()` 复算；只有
+`request_id` 相同而 Hash 不同必须 fail closed。
+
+`src/hcuopt/agent/patch_identity.py` 是 `normalized_patch_v1` 的唯一实现：输入必须是 strict UTF-8
+且不得含 NUL；CRLF/CR 统一为 LF，删除 Git `index` 行，删除 `---`/`+++` 行 Tab 后时间戳，去除
+每行末尾空格与 Tab，最终只保留一个尾部 LF。C 和 D 必须重读 `patch_uri` 原始字节并分别复算
+原始 SHA256 与规范化 SHA256，不能接受生成器自报结果，也不能复制一套私有规范化函数。
+
+Proposal 固定需要人工复核、禁止 Formal Intake、没有性能结论且不能自动发布。Apex Plan 只
+拥有 generator、并发、有限重试、去重和 generation budget；HCU、Measurement、Holdout、
+Barrier、FWER、Signoff 和 Release 均不在该 Protocol 中。完整决定见
+[ADR-0011](adr/0011-m2b-agent-apex-proposal-boundary.md)。
+
+人工决策必须写入 `CandidateProposalReviewRecord`，冻结 Proposal/Request Hash、原始/规范化
+Patch Hash、Baseline、Hotspot、replacement point、审核人、决定、原因、时间、幂等键和审核
+证据。只有 approved 记录可生成 `CandidateProposalPromotionReceipt`。晋级回执仍固定
+`formal_intake_allowed=false`，只引用现有 `CandidateSourcePackageRef`、M2a
+`source_family_hash` 及 `BusinessCandidateFamilyVerifier` 的持久化证据/Provenance；后续 Formal
+Intake 必须继续消费既有 M2a Family Authority，不能把回执本身当成 Candidate 或 Family。
+Review 与 Promotion ID 均绑定完整记录内容；Store 还会冻结幂等键到内容 Hash 的映射，并在
+每次重读时复算内容 ID 与其引用 Evidence，防止发布后改写决定或回执。
+
+C 的实现边界位于：
+
+- `src/hcuopt/adapters/agent_knowledge.py`：按内容 Hash 保存 Knowledge source，并从部署方 Store
+  独立重读 Snapshot/Source Hash；Skill 只能作为带版本和许可证的只读知识输入，不能被导入为
+  运行时代码；
+- `src/hcuopt/adapters/agent_generator.py`：Proposal Patch/Batch 的不可变内容寻址 Store，以及供
+  CI 使用的 deterministic synthetic Generator；
+- `src/hcuopt/adapters/agent_promotion.py`：消费 A 的 `awaiting_review` + retained Proposal，重读
+  Batch/Patch、记录不可变人工决策，通过现有 `SourceManagerAdapter` 创建并清理隔离 Candidate
+  Worktree，在完整 Baseline 源码树上应用单文件受限 Patch，并发布现有 M1/M2a
+  `CandidateSourcePackageManifest` / `CandidateSourcePackageRef`；其中 `candidate_source_hash`
+  是应用 Overlay 后的完整 Candidate Worktree Hash，不是 Overlay 文件目录 Hash；
+- `src/hcuopt/adapters/business_candidate_family.py`：继续作为 2–4 个 business Package 的唯一
+  source-family Verifier，并公开真实 Adapter Provenance 供 Promotion Receipt 冻结。
+
+受控晋级固定为两阶段：
+
+```text
+retained Proposal
+  → immutable human Review
+  → reviewed Candidate Source Package
+  → 2–4 member Business Family verification
+  → Promotion Receipt
+```
+
+Proposal、Review Record 和 Promotion Receipt 始终是不同对象。Package 发布和 Family 验证不会
+触发 Build、HCU、Measurement 或 Formal Intake；fake/synthetic、未保留、未批准、Baseline 漂移、
+越界路径及 Family Authority 漂移全部 fail closed。
+
+A 的 Generation Authority 另外公开 `GenerationRunStartRequest`、`GenerationRun`、
+`GeneratorAttempt`、`GenerationAttemptClaim`、`GenerationBudgetLedgerEntry`、
+`CandidateProposalRef` 与 `GenerationRunStatusView`。CLI 是：
+
+- `hcuopt agent-generation-start <start-request.json>`；
+- `hcuopt agent-generation-status <generation-run-id>`；
+- `hcuopt agent-generation-reconcile <generation-run-id>`。
+
+它们只管理无 HCU 的 Proposal 生成状态。数据库迁移仍由 `hcuopt db-migrate` 显式执行；FastAPI
+不暴露对应写路由。Proposal 在所有 generator 收敛前保持 `pending`，避免把并发完成顺序误当成
+去重权威；barrier 后的 retained/duplicate 仍需 D 独立复算。
+
+B 的 `AgentRunnerAdapter` 位于 `src/hcuopt/adapters/agent_runner.py`，是上述 Generator 下面的
+受限执行边界。它接收 Attempt/Run/Request/Plan/generator 身份、绝对 executable、不可变 Generator
+Artifact/Hash、结构化 argv、白名单环境、只读输入和单次生成预算，返回 Proposal bytes 与公共
+`RunnerExecutionRecord`；不直接创建 `CandidateProposalBatch`。Record 冻结 Runner provenance、
+Generator Artifact Hash、实际 executable Hash、usage、退出状态和 cleanup。Local-command 实现
+同时校验 executable/argv prefix allowlist、禁止覆盖内部环境变量、禁止 shell，并在根进程正常
+退出、timeout、输出/token 超限、畸形 usage、非零退出或 cleanup 未证实时验证/清理整个进程域并
+failure closed。Deterministic 实现仅用于 synthetic CI。该接口不扩展 `agent_v1`，也不拥有
+Candidate、Package、HCU、Measurement、Holdout 或发布权限。
+
+部署侧 `src/hcuopt/adapters/agent_runner_receipt.py` 把 Record 和成功 raw output 发布为内容寻址、
+不可变 `RunnerExecutionReceipt`，返回 `RunnerExecutionReceiptRef`。失败 Receipt 不暴露 Proposal
+bytes。A 的 `settle_generation_attempt()` 必须通过 Store 重读 Receipt，再校验冻结 Plan 中的
+`generator_artifact_hash`、Request/Attempt 身份、预算、cleanup 及 C Batch 的同一 raw output，
+然后才可原子写 Attempt、Proposal Ref 和独立 Generation Budget Ledger。D 从
+`GenerationRunStatusView` 重读 Receipt/Batch/Patch，复算 Hash、usage、barrier 和去重；调用方不能
+再提交第二套临时 Attempt Evidence。

@@ -60,6 +60,19 @@ export async function loadDemoEvaluationEvidence(roundId) {
   return workspace;
 }
 
+export async function loadDemoAgentProposals() {
+  const response = await fetch("/fixtures/demo-agent-proposals.json", {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `demo_fixture_${response.status}: Synthetic Agent Proposal fixture unavailable`,
+    );
+  }
+  return response.json();
+}
+
 export const demoDashboard = {
   mode: "demo",
   identity: {

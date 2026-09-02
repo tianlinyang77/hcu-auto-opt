@@ -56,6 +56,17 @@ export async function loadOperatorEvaluationEvidence(roundId) {
   );
 }
 
+export async function loadOperatorAgentProposals(generationRunId) {
+  if (!generationRunId) {
+    throw new Error(
+      "missing_generation_run_id: 当前 Operator Read Model 尚未选择 Agent Generation Run",
+    );
+  }
+  return request(
+    `/v1/operator/agent-generations/${encodeURIComponent(generationRunId)}/evidence`,
+  );
+}
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),

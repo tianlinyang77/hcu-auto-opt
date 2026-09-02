@@ -11,7 +11,9 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[12] == "0012_m2_formal_authority.sql"
     assert MIGRATIONS[13] == "0013_m2_formal_finalizer.sql"
     assert MIGRATIONS[14] == "0014_m2_formal_signoff_outbox.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 15))
+    assert MIGRATIONS[15] == "0015_m2b_agent_generation_authority.sql"
+    assert MIGRATIONS[16] == "0016_m2b_runner_execution_receipt.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 17))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -138,3 +140,26 @@ def test_m2_formal_signoff_migration_is_two_phase_and_never_releases() -> None:
     assert "formal_round_signoff_never_auto_releases" in sql
     assert "formal_round_signoff_append_only" in sql
     assert "VALUES (14, 'm2_formal_signoff_outbox')" in sql
+
+
+def test_m2b_agent_generation_migration_is_isolated_recoverable_and_never_releases() -> None:
+    sql = migration_sql(15)
+
+    for table in (
+        "agent_generation_runs",
+        "agent_generator_attempts",
+        "agent_generation_budget_ledger",
+        "agent_candidate_proposal_refs",
+    ):
+        assert f"CREATE TABLE {table}" in sql
+
+    assert "agent_generator_attempt_pending_idx" in sql
+    assert "agent_generator_attempt_lease_idx" in sql
+    assert "agent_generation_budget_ledger_append_only" in sql
+    assert "agent_generation_run_never_auto_releases" in sql
+    assert "agent_generator_attempt_no_hcu" in sql
+    assert "agent_generator_attempt_no_measurement" in sql
+    assert "agent_candidate_proposal_not_measured" in sql
+    assert "round_budget" not in sql
+    assert "round_candidates" not in sql
+    assert "VALUES (15, 'm2b_agent_generation_authority')" in sql

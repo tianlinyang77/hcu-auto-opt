@@ -89,7 +89,8 @@ FWER、预算和失败证据成立；随后 Agent/Apex 只能作为 Candidate In
 | M1 完成 | GO | 正式证据已由人工接受 |
 | M2a 无 HCU Scripted 实现与测试 | GO | 不产生新的性能结论，不注册 Real Profile |
 | M2a 真实多 Candidate Formal | HOLD | 等待 Scripted、PostgreSQL、Target Lock 退出条件和独立 HCU 授权 |
-| M2b Agent Candidate Generator | STOP | 只有 M2a Target Lock 闭环通过后才重新评审 |
+| M2b Agent/Apex dev-only MVP | GO | 项目所有者已授权无 HCU Proposal/调度/Scripted 建设；不得晋级真实 Formal |
+| M2b 真实 Agent Proposal Formal 激活 | HOLD | 仍需 #102/#110、A/B/C/D 接受和独立资源窗口授权 |
 | 自动安装/生产发布 | STOP | 当前及 M2 均不授权 |
 
 下一步执行计划见 [M2 搜索轮次建设计划](m2-round-plan.md)，架构决定草案见
