@@ -8,6 +8,7 @@ from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
     CandidateGenerationRequest,
     CandidateProposal,
+    CandidateProposalBatch,
     CandidateProposalPromotionReceipt,
     CandidateProposalReviewRecord,
     KnowledgeSnapshot,
@@ -159,3 +160,12 @@ def verify_candidate_proposal_promotion_receipt(
     )
     if actual != expected:
         raise ValueError("Candidate Proposal promotion does not match approved authority")
+
+
+def candidate_proposal_batch_hash(batch: CandidateProposalBatch) -> str:
+    value = batch.model_dump(mode="json")
+    value["proposals"] = sorted(
+        value["proposals"],
+        key=lambda item: (item["ordinal"], item["proposal_id"]),
+    )
+    return _canonical_hash(value)

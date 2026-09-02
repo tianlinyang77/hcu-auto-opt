@@ -11,6 +11,7 @@ from hcuopt.adapters.interfaces import CandidateGeneratorAdapter
 from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
+    candidate_proposal_batch_hash,
     candidate_proposal_hash,
     candidate_proposal_promotion_receipt_hash,
     candidate_proposal_review_record_hash,
@@ -89,7 +90,7 @@ def _request() -> CandidateGenerationRequest:
         profiler_evidence_hash=_hash("7"),
         knowledge_snapshot_id=knowledge.snapshot_id,
         knowledge_snapshot_hash=knowledge_snapshot_hash(knowledge),
-        max_proposals=2,
+        max_proposals=4,
     )
 
 
@@ -238,16 +239,22 @@ def _plan() -> ApexGenerationPlan:
             {
                 "generator_id": "agent-a",
                 "adapter_profile": "m2b-agent-a-v1",
+                "generator_artifact_hash": _hash("a"),
                 "max_attempts": 2,
                 "max_proposals": 2,
                 "timeout_seconds": 600,
+                "max_output_bytes_per_attempt": 200_000,
+                "max_tokens_per_attempt": 20_000,
             },
             {
                 "generator_id": "agent-b",
                 "adapter_profile": "m2b-agent-b-v1",
+                "generator_artifact_hash": _hash("b"),
                 "max_attempts": 1,
                 "max_proposals": 2,
                 "timeout_seconds": 600,
+                "max_output_bytes_per_attempt": 200_000,
+                "max_tokens_per_attempt": 20_000,
             },
         ),
         max_concurrency=2,
@@ -345,6 +352,15 @@ def test_batch_rejects_fake_non_synthetic_and_cross_generator_output() -> None:
     batch["proposals"][0]["generator_id"] = "another-agent"
     with pytest.raises(ValidationError, match="cross-generator"):
         CandidateProposalBatch.model_validate(batch)
+
+    partial = _batch().model_dump(mode="json")
+    partial.update(
+        status="partial",
+        error_code="bounded_partial_output",
+        error_message="generator stopped after its bounded output limit",
+    )
+    assert CandidateProposalBatch.model_validate(partial).status == "partial"
+    assert candidate_proposal_batch_hash(_batch()).startswith("sha256:")
 
 
 def test_proposal_and_batch_freeze_full_request_hash() -> None:
