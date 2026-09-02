@@ -1,3 +1,16 @@
+from hcuopt.evaluation.agent_proposal_reporting import (
+    AGENT_GENERATION_WARNING,
+    build_agent_generation_evidence,
+    write_agent_generation_report,
+)
+from hcuopt.evaluation.agent_proposal_verifier import (
+    AgentProposalEvidenceError,
+    AgentProposalVerifier,
+    build_agent_generation_read_model,
+    candidate_identity_hash,
+    normalize_patch_v1,
+    normalized_intent_hash,
+)
 from hcuopt.evaluation.evidence_reader import EvidenceReadError, HashedEvidenceReader
 from hcuopt.evaluation.m1_protocol import (
     M1_CORRECTNESS_PROTOCOL_VERSION,
@@ -68,6 +81,9 @@ from hcuopt.evaluation.stage0_verifier import (
 )
 
 __all__ = [
+    "AgentProposalEvidenceError",
+    "AgentProposalVerifier",
+    "AGENT_GENERATION_WARNING",
     "EquivalenceResult",
     "EvidenceReadError",
     "FingerprintEvidenceV2",
@@ -110,6 +126,8 @@ __all__ = [
     "SmokeVariantSpec",
     "VARIANT_EVIDENCE_FILES",
     "build_evidence",
+    "build_agent_generation_read_model",
+    "build_agent_generation_evidence",
     "build_execution_request",
     "build_failed_comparison",
     "build_m1_adjudication_result",
@@ -118,9 +136,13 @@ __all__ = [
     "load_registered_m1_protocol",
     "load_workload_spec",
     "normalize_response",
+    "normalize_patch_v1",
+    "normalized_intent_hash",
+    "candidate_identity_hash",
     "validate_variant_pair",
     "verify_evidence_manifest",
     "write_evidence_artifacts",
+    "write_agent_generation_report",
     "write_m1_signoff_report",
     "write_workload_spec",
 ]

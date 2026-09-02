@@ -198,8 +198,12 @@ A 主持评审，B 对测量可信度拥有停止权，D 对统计/证据无效�
 - HCU 资源窗口获得明确授权；
 - 项目所有者签署 M2a Formal Go。
 
-## M2b 暂停条件
+## M2b dev-only 建设与真实激活边界
 
-在 M2a 完整 Target Lock 运行和人工签核前，不创建 Agent/Apex 实现 Issue。即使进入 M2b，
-Generator 也只提交候选源码包和 provenance；Candidate Intake、Build、HCU 测量、Barrier、
-FWER、EvidenceBundle 和 Signoff 继续由现有权威组件控制。
+项目所有者已在 #112 授权提前建设无 HCU Agent/Apex MVP，具体边界由 ADR-0011 约束。Agent
+先输出待审 Proposal，经 C 人工复核后才允许形成候选源码包；Candidate Intake、Build、HCU
+测量、Barrier、FWER、EvidenceBundle 和 Signoff 继续由现有权威组件控制。
+
+在 M2a 完整 Target Lock 运行和人工签核前，真实 Agent Proposal 不得进入 Formal Round；当前
+只允许 Contract、deterministic/受限 local-command Adapter、Scripted 调度、CLI、测试和只读
+UI，不得通过环境变量或页面参数升级为真实执行。

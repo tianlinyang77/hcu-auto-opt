@@ -6,6 +6,11 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hcuopt.adapters.agent_runner import (
+        AgentRunnerAdapter,
+        DeterministicAgentRunner,
+        LocalCommandAgentRunner,
+    )
     from hcuopt.adapters.execution import ContainerExecutionAdapter, SSHExecutionAdapter
     from hcuopt.adapters.real_profile import (
         build_m1_adjudication_registry,
@@ -22,10 +27,13 @@ if TYPE_CHECKING:
     from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
 
 __all__ = [
+    "AgentRunnerAdapter",
     "AdapterRegistry",
     "ContainerExecutionAdapter",
     "ContainerResourceCleaner",
     "SSHExecutionAdapter",
+    "DeterministicAgentRunner",
+    "LocalCommandAgentRunner",
     "build_m1_adjudication_registry",
     "build_m1_correctness_registry",
     "build_m1_source_artifact_registry",
@@ -38,10 +46,13 @@ __all__ = [
 ]
 
 _EXPORT_MODULES = {
+    "AgentRunnerAdapter": "hcuopt.adapters.agent_runner",
     "AdapterRegistry": "hcuopt.adapters.registry",
     "ContainerExecutionAdapter": "hcuopt.adapters.execution",
     "ContainerResourceCleaner": "hcuopt.adapters.resource_cleaner",
     "SSHExecutionAdapter": "hcuopt.adapters.execution",
+    "DeterministicAgentRunner": "hcuopt.adapters.agent_runner",
+    "LocalCommandAgentRunner": "hcuopt.adapters.agent_runner",
     "build_m1_adjudication_registry": "hcuopt.adapters.real_profile",
     "build_m1_correctness_registry": "hcuopt.adapters.real_profile",
     "build_m1_source_artifact_registry": "hcuopt.adapters.real_profile",

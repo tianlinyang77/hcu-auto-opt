@@ -88,12 +88,17 @@ PYTHONPATH=src python -m hcuopt.cli formal-readiness \
 | --- | --- | --- |
 | A | Formal Authority、Finalizer 和 Signoff/Outbox 地基已实现；Real Profile、Formal Plan、StartIntent、生产身份认证与 Signer 尚不存在 | 先由 PostgreSQL 17 验证签核恢复链，再单独建设受保护的 Formal 启动和生产签核入口 |
 | B | Formal phase-aware Adapter、预算确认和当期 Target Lock 尚未完成 | 不访问 HCU 的 Adapter/计划验证；窗口批准后才刷新 HCU 现场 |
-| C | 只有一个历史业务 Candidate，没有 2 成员不可变 Family | 同一 Baseline/Hotspot/replacement point 的两个业务 Overlay 包及 Family Hash |
+| C | 业务 Family 合同、source family Hash 和 fail-closed Verifier 已实现；仍只有一个历史业务 Candidate | 同一 Baseline/Hotspot/replacement point 的第二个真实业务 Overlay 包、双成员 Manifest 和独立复核证据 |
 | D | Formal Barrier/Reveal/FWER/Evidence 表和 Finalizer 已实现；生产受保护 Evidence Root 与 D 的正式接受尚未完成 | 验证 PostgreSQL 17 结果，并对生产 Store、Verifier 身份和递归 Evidence 规则签署接受证据 |
 | 项目所有者 | 尚未授权精确资源窗口 | 前四方接受后，另行批准主机、HCU、时间、Family Hash 和预算 |
 
 因此当前不得注册 `nmz36-m2a-formal-v1`，不得把 Scripted 表的 `synthetic=true` 约束改成兼容
 真实数据的宽松布尔值，也不得访问 nmz36/HCU 7 来“先跑一次看看”。
+
+C 线的 [业务 Candidate Family 冻结合同](m2a-business-candidate-family.md) 已明确区分 Round
+创建前的 `source_family_hash` 和 Intake Close 后的 `candidate_family_hash`。前者让项目所有者
+先审阅真实业务包，后者仍按 ADR-0009 绑定 Round 内身份；当前两者都不能因为 scripted fixture
+存在而被标记为就绪。
 
 ## 更新规则
 
