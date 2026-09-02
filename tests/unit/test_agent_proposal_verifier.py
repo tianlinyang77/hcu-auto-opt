@@ -17,6 +17,8 @@ from hcuopt.agent.identity import (
     candidate_generation_request_hash,
     candidate_proposal_batch_hash,
     candidate_proposal_hash,
+    candidate_proposal_promotion_receipt_hash,
+    candidate_proposal_review_record_hash,
     knowledge_snapshot_hash,
 )
 from hcuopt.contracts.agent_runner_v1 import (
@@ -30,7 +32,9 @@ from hcuopt.contracts.agent_v1 import (
     CandidateGenerationRequest,
     CandidateProposal,
     CandidateProposalBatch,
+    CandidateProposalPromotionReceipt,
     CandidateProposalRef,
+    CandidateProposalReviewRecord,
     GenerationBudgetLedgerEntry,
     GenerationBudgetUsage,
     GenerationRun,
@@ -597,6 +601,106 @@ def _add_second_successful_generator(
     )
 
 
+def _add_review_and_promotion(
+    root: Path,
+    context: AgentProposalVerificationContext,
+) -> AgentProposalVerificationContext:
+    request = CandidateGenerationRequest.model_validate_json((root / "request.json").read_bytes())
+    batch = CandidateProposalBatch.model_validate_json((root / "batch.json").read_bytes())
+    proposal = batch.proposals[0]
+    review_evidence = _write(
+        root / "human-review-evidence.json",
+        {"decision": "approved", "scope": "source_only"},
+    )
+    review = CandidateProposalReviewRecord(
+        review_id=UUID("10000000-0000-0000-0000-000000000070"),
+        idempotency_key="review-agent-proposal-70",
+        proposal_id=proposal.proposal_id,
+        proposal_hash=candidate_proposal_hash(proposal),
+        request_id=request.request_id,
+        request_hash=candidate_generation_request_hash(request),
+        generation_run_id=request.generation_run_id,
+        patch_uri=proposal.patch_uri,
+        patch_hash=proposal.patch_hash,
+        normalized_patch_hash=proposal.normalized_patch_hash,
+        baseline_epoch_id=request.baseline_epoch_id,
+        baseline_source_hash=request.baseline_source_hash,
+        hotspot_id=request.hotspot_id,
+        replacement_point=request.replacement_point,
+        decision="approved",
+        reviewer="independent-human-reviewer",
+        reason="The bounded source-only change is approved for packaging.",
+        review_evidence_uri=review_evidence["uri"],
+        review_evidence_hash=review_evidence["content_hash"],
+        reviewed_at=NOW,
+    )
+    review_ref = _write(root / "review.json", review.model_dump(mode="json"))
+    source_package_ref = {
+        "candidate_source_hash": _fixed_hash("7"),
+        "source_package_hash": _fixed_hash("8"),
+        "manifest_hash": _fixed_hash("9"),
+        "manifest_schema_version": "m1-candidate-source-v1",
+    }
+    source_family_hash = _fixed_hash("a")
+    candidate_id = UUID("10000000-0000-0000-0000-000000000071")
+    family_evidence = _write(
+        root / "source-family-verification.json",
+        {
+            "schema_version": "m2b-source-family-verification-evidence-v1",
+            "proposal_id": str(proposal.proposal_id),
+            "candidate_id": str(candidate_id),
+            "source_package_ref": source_package_ref,
+            "source_family_hash": source_family_hash,
+            "family_manifest": {"candidate_kind": "business"},
+            "verifier_provenance": {"capability": "business_candidate_family_verification"},
+        },
+    )
+    promotion = CandidateProposalPromotionReceipt(
+        promotion_id=UUID("10000000-0000-0000-0000-000000000072"),
+        idempotency_key="promote-agent-proposal-72",
+        proposal_id=proposal.proposal_id,
+        proposal_hash=candidate_proposal_hash(proposal),
+        request_id=request.request_id,
+        request_hash=candidate_generation_request_hash(request),
+        generation_run_id=request.generation_run_id,
+        patch_uri=proposal.patch_uri,
+        patch_hash=proposal.patch_hash,
+        normalized_patch_hash=proposal.normalized_patch_hash,
+        baseline_epoch_id=request.baseline_epoch_id,
+        baseline_source_hash=request.baseline_source_hash,
+        hotspot_id=request.hotspot_id,
+        replacement_point=request.replacement_point,
+        review=review,
+        review_record_hash=candidate_proposal_review_record_hash(review),
+        candidate_id=candidate_id,
+        source_package_ref=source_package_ref,
+        source_family_hash=source_family_hash,
+        source_family_verification_evidence_uri=family_evidence["uri"],
+        source_family_verification_evidence_hash=family_evidence["content_hash"],
+        source_family_verifier_provenance=AdapterProvenance(
+            profile="m2a-family-verifier-v1",
+            capability="business_candidate_family_verification",
+            adapter_name="BusinessCandidateFamilyVerifier",
+            adapter_version="1.0.0",
+            implementation_kind="fake",
+        ),
+        promoted_by="candidate-authority",
+        promoted_at=NOW,
+        synthetic=True,
+    )
+    promotion_ref = _write(root / "promotion.json", promotion.model_dump(mode="json"))
+    assert review_ref["content_hash"] == candidate_proposal_review_record_hash(review)
+    assert promotion_ref["content_hash"] == candidate_proposal_promotion_receipt_hash(
+        promotion
+    )
+    return context.model_copy(
+        update={
+            "review_records": (AgentEvidenceRef.model_validate(review_ref),),
+            "promotion_receipts": (AgentEvidenceRef.model_validate(promotion_ref),),
+        }
+    )
+
+
 def _rewrite_status(
     root: Path,
     context: AgentProposalVerificationContext,
@@ -644,6 +748,47 @@ def test_recomputes_all_hashes_and_exposes_read_only_model(tmp_path: Path) -> No
     assert read_model.performance_conclusion == "not_measured"
     assert read_model.human_review_status == "pending"
     assert read_model.package_promotion_status == "pending"
+    assert read_model.generation_run_id == context.generation_run_id
+    assert read_model.request_id == REQUEST_ID
+    assert read_model.plan_id == PLAN_ID
+    assert read_model.budget_limit.max_generator_attempts == 2
+    assert read_model.attempts[0].runner_receipt_id is not None
+    assert read_model.attempts[0].runner_provenance is not None
+    assert read_model.attempts[0].cleanup_status == "verified"
+    assert read_model.proposals[0].normalized_patch_hash.startswith("sha256:")
+    assert read_model.proposals[0].patch_preview.startswith("diff --git")
+    assert read_model.proposals[0].lifecycle.review_status == "pending"
+
+
+def test_lifecycle_rereads_review_promotion_and_family_evidence(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path)
+    context = _add_review_and_promotion(tmp_path, context)
+
+    result = verifier.verify(context)
+    read_model = build_agent_generation_read_model(result)
+
+    assert result.human_review_status == "approved"
+    assert result.package_promotion_status == "promoted"
+    assert result.formal_readiness == "hold"
+    assert read_model.proposals[0].lifecycle.review_status == "approved"
+    assert read_model.proposals[0].lifecycle.promotion_status == "promoted"
+    assert read_model.proposals[0].lifecycle.promotion is not None
+    assert read_model.proposals[0].lifecycle.promotion.source_package_ref is not None
+    assert read_model.proposals[0].lifecycle.readiness == "hold"
+    assert read_model.formal_intake_allowed is False
+    assert read_model.automatic_release_allowed is False
+
+
+def test_lifecycle_rejects_family_evidence_drift(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path)
+    context = _add_review_and_promotion(tmp_path, context)
+    family_path = tmp_path / "source-family-verification.json"
+    family_path.write_bytes(canonical_json_bytes({"candidate_id": "tampered"}))
+
+    with pytest.raises(AgentProposalEvidenceError) as raised:
+        verifier.verify(context)
+
+    assert raised.value.code == "evidence_hash_mismatch"
 
 
 def test_exact_and_normalized_patch_duplicates_are_eliminated(tmp_path: Path) -> None:

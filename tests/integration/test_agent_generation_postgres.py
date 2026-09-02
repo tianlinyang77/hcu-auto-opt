@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -14,8 +15,17 @@ from uuid import UUID, uuid5
 import pytest
 
 from hcuopt.adapters.agent_generator import CandidateProposalBatchStore, ProposalPatchStore
+from hcuopt.adapters.agent_promotion import (
+    BaselineOverlaySource,
+    CandidateSourcePackagePublisher,
+    ProposalDecisionStore,
+    ProposalPromotionService,
+    ProposalReviewAuthority,
+)
 from hcuopt.adapters.agent_runner import AgentRunResult
 from hcuopt.adapters.agent_runner_receipt import RunnerExecutionReceiptStore
+from hcuopt.adapters.business_candidate_family import BusinessCandidateFamilyVerifier
+from hcuopt.adapters.git_source import GitSourceManager
 from hcuopt.agent.authority import (
     ApexGenerationCoordinator,
     generation_plan_id_for,
@@ -24,6 +34,8 @@ from hcuopt.agent.authority import (
 from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
+    candidate_proposal_promotion_receipt_hash,
+    candidate_proposal_review_record_hash,
     knowledge_snapshot_hash,
 )
 from hcuopt.contracts.agent_runner_v1 import (
@@ -40,12 +52,20 @@ from hcuopt.contracts.agent_v1 import (
     GeneratorAttempt,
     KnowledgeSnapshot,
 )
-from hcuopt.contracts.agent_verification_v1 import AgentProposalVerificationContext
-from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.contracts.agent_verification_v1 import (
+    AgentEvidenceRef,
+    AgentProposalVerificationContext,
+)
+from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
+from hcuopt.contracts.platform_v1 import AdapterProvenance, SourceSnapshot
 from hcuopt.domain.errors import Conflict
-from hcuopt.evaluation.agent_proposal_verifier import AgentProposalVerifier
+from hcuopt.evaluation.agent_proposal_verifier import (
+    AgentProposalVerifier,
+    build_agent_generation_read_model,
+)
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.source_hash import canonical_source_hash
 from hcuopt.storage.repository import PostgresRepository
 
 try:
@@ -56,6 +76,9 @@ except ImportError:  # pragma: no cover - package dependency in normal installs
 
 DATABASE_URL = os.getenv("HCUOPT_DATABASE_URL")
 NOW = datetime(2026, 8, 31, 10, 0, tzinfo=timezone.utc)
+BASELINE_PATH = "sglang/runtime/operator.py"
+BASELINE_SOURCE = b"def forward(value):\n    return value\n"
+MOUNT_TARGET = "/opt/hcuopt/overlay/sglang/runtime/operator.py"
 
 
 def _hash(character: str) -> str:
@@ -66,11 +89,24 @@ def _payload_hash(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _source_patch(delta: int) -> bytes:
+    return (
+        f"diff --git a/{BASELINE_PATH} b/{BASELINE_PATH}\n"
+        f"--- a/{BASELINE_PATH}\n"
+        f"+++ b/{BASELINE_PATH}\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def forward(value):\n"
+        "-    return value\n"
+        f"+    return value + {delta}\n"
+    ).encode()
+
+
 def _start_request(
     key: str,
     *,
     max_concurrency: int = 2,
     knowledge_snapshot: KnowledgeSnapshot | None = None,
+    baseline_source_hash: str | None = None,
 ) -> GenerationRunStartRequest:
     run_id = generation_run_id_for(key)
     request = CandidateGenerationRequest(
@@ -79,7 +115,7 @@ def _start_request(
         target_snapshot_id=UUID("51000000-0000-0000-0000-000000000001"),
         stage0_run_id=UUID("51000000-0000-0000-0000-000000000002"),
         baseline_epoch_id=UUID("51000000-0000-0000-0000-000000000003"),
-        baseline_source_hash=_hash("1"),
+        baseline_source_hash=baseline_source_hash or _hash("1"),
         hotspot_id=UUID("51000000-0000-0000-0000-000000000004"),
         replacement_point="sglang.runtime.operator.forward",
         workload_id="agent-postgres-fixture",
@@ -157,8 +193,16 @@ def _batch(
     raw_output_hash: str | None = None,
     patch_uri: str | None = None,
     patch_hash: str | None = None,
+    proposal_materials: tuple[tuple[str, str, str], ...] | None = None,
+    real_generator: bool = False,
 ) -> CandidateProposalBatch:
-    proposal_id = uuid5(attempt.attempt_id, "proposal-0")
+    materials = proposal_materials or (
+        (
+            patch_uri or f"proposal:///{uuid5(attempt.attempt_id, 'proposal-0')}.diff",
+            patch_hash or _hash("7"),
+            normalized_patch_hash,
+        ),
+    )
     return CandidateProposalBatch(
         batch_id=uuid5(attempt.attempt_id, "batch"),
         request_id=attempt.request_id,
@@ -170,28 +214,29 @@ def _batch(
             capability="candidate_proposal_generation",
             adapter_name="DeterministicAgent",
             adapter_version="1.0.0",
-            implementation_kind="fake",
+            implementation_kind="real" if real_generator else "fake",
         ),
         status="failed" if failed else "succeeded",
         proposals=()
         if failed
-        else (
+        else tuple(
             {
-                "proposal_id": proposal_id,
+                "proposal_id": uuid5(attempt.attempt_id, f"proposal-{ordinal}"),
                 "request_id": attempt.request_id,
                 "request_hash": request_hash,
                 "generation_run_id": attempt.generation_run_id,
                 "generator_id": attempt.generator_id,
-                "ordinal": 0,
-                "optimization_intent": "remove one redundant materialization",
+                "ordinal": ordinal,
+                "optimization_intent": f"remove redundant materialization {ordinal}",
                 "rationale": "The immutable trace binds the generated proposal.",
                 "risk_summary": "Independent correctness review remains mandatory.",
-                "patch_uri": patch_uri or f"proposal:///{proposal_id}.diff",
-                "patch_hash": patch_hash or _hash("7"),
-                "normalized_patch_hash": normalized_patch_hash,
+                "patch_uri": material[0],
+                "patch_hash": material[1],
+                "normalized_patch_hash": material[2],
                 "touched_paths": ("sglang/runtime/operator.py",),
                 "replacement_point": "sglang.runtime.operator.forward",
-            },
+            }
+            for ordinal, material in enumerate(materials)
         ),
         raw_output_uri=raw_output_uri or f"proposal:///{attempt.attempt_id}.json",
         raw_output_hash=raw_output_hash or _hash("8"),
@@ -201,7 +246,7 @@ def _batch(
         wall_seconds=0.25,
         started_at=NOW,
         finished_at=NOW + timedelta(milliseconds=250),
-        synthetic=True,
+        synthetic=not real_generator,
         error_code="generator_process_failed" if failed else None,
         error_message="scripted generator failed safely" if failed else None,
     )
@@ -245,12 +290,16 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         request_hash: str | None = None,
         output_bytes: int = 1024,
         raw_patch: bytes | None = None,
-    ) -> tuple[CandidateProposalBatch, tuple[RunnerExecutionReceiptRef, str]]:
+        raw_patches: tuple[bytes, ...] | None = None,
+        runner_status: str = "succeeded",
+        real_generator: bool = False,
+    ) -> tuple[CandidateProposalBatch | None, tuple[RunnerExecutionReceiptRef, str | None]]:
         attempt = claim.attempt
         run = claim.run
         generator = claim.generator
         bound_request_hash = request_hash or run.request_hash
-        raw_output = b"x" * output_bytes
+        succeeded = runner_status == "succeeded"
+        raw_output = b"x" * output_bytes if succeeded else b""
         record = RunnerExecutionRecord(
             attempt_id=attempt.attempt_id,
             generation_run_id=attempt.generation_run_id,
@@ -263,36 +312,42 @@ class AgentGenerationPostgresTests(unittest.TestCase):
                 profile="m2b-postgres-runner-v1",
                 adapter_name="ScriptedRunner",
                 adapter_version="1.0.0",
-                implementation_kind="fake",
+                implementation_kind="real" if real_generator else "fake",
                 identity_hash=_hash("d"),
             ),
             generator_artifact_hash=generator.generator_artifact_hash,
-            status="succeeded",
-            synthetic=True,
+            status=runner_status,
+            synthetic=not real_generator,
             wall_seconds_consumed=0.25,
             stdout_bytes_consumed=len(raw_output),
             stderr_bytes_consumed=0,
             total_output_bytes_consumed=len(raw_output),
-            tokens_consumed=128,
-            exit_code=0,
+            tokens_consumed=128 if succeeded else 0,
+            exit_code=0 if succeeded else None,
             executable_name="scripted-agent",
             argv_hash=_hash("e"),
             input_manifest_hash=_hash("f"),
             stdout_hash=_payload_hash(raw_output),
             stderr_hash=_payload_hash(b""),
-            stdout_summary="scripted proposal output",
+            stdout_summary="scripted proposal output" if succeeded else "",
             stderr_summary="",
+            termination_reason=None if succeeded else runner_status,
             process_tree_cleanup="not_needed",
             cleanup_status="verified",
             cleanup_summary="scripted process domain clean",
         )
         receipt_ref = self.receipt_store.publish(
-            AgentRunResult(proposal_bytes=raw_output, evidence=record)
+            AgentRunResult(proposal_bytes=raw_output if succeeded else None, evidence=record)
         )
         receipt = self.receipt_store.load(receipt_ref)
+        if not succeeded:
+            assert receipt.raw_output_uri is None
+            return None, (receipt_ref, None)
         assert receipt.raw_output_uri is not None
         assert receipt.raw_output_hash is not None
-        stored_patch = self.patch_store.publish(raw_patch) if raw_patch is not None else None
+        patch_inputs = raw_patches or ((raw_patch,) if raw_patch is not None else ())
+        stored_patches = tuple(self.patch_store.publish(item) for item in patch_inputs)
+        stored_patch = stored_patches[0] if len(stored_patches) == 1 else None
         batch = _batch(
             attempt,
             request_hash=bound_request_hash,
@@ -306,6 +361,14 @@ class AgentGenerationPostgresTests(unittest.TestCase):
             raw_output_hash=receipt.raw_output_hash,
             patch_uri=stored_patch.uri if stored_patch is not None else None,
             patch_hash=stored_patch.patch_hash if stored_patch is not None else None,
+            proposal_materials=(
+                tuple(
+                    (item.uri, item.patch_hash, item.normalized_patch_hash)
+                    for item in stored_patches
+                )
+                or None
+            ),
+            real_generator=real_generator,
         )
         stored_batch = self.batch_store.publish(batch)
         return stored_batch.batch, (receipt_ref, stored_batch.uri)
@@ -451,6 +514,345 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         )
         self.assertEqual(completed.state, "completed")
         self.assertFalse(completed.automatic_release_allowed)
+
+    def test_final_business_generation_e2e_keeps_scripted_measurement_separate(self) -> None:
+        baseline_root = self.evidence_root / "baseline-source"
+        baseline_file = baseline_root / BASELINE_PATH
+        baseline_file.parent.mkdir(parents=True, exist_ok=True)
+        baseline_file.write_bytes(BASELINE_SOURCE)
+
+        def git(*arguments: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(baseline_root), *arguments],
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+            return result.stdout.strip()
+
+        subprocess.run(
+            ["git", "init", str(baseline_root)],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        git("config", "user.name", "hcu-auto-opt-test")
+        git("config", "user.email", "hcu-auto-opt@localhost")
+        git("add", "--", BASELINE_PATH)
+        git("commit", "--no-gpg-sign", "-m", "scripted baseline")
+        baseline_hash = canonical_source_hash(baseline_root)
+        baseline = SourceSnapshot(
+            snapshot_id=UUID("51000000-0000-0000-0000-000000000090"),
+            kind="baseline",
+            repository=baseline_root.resolve(strict=True).as_uri(),
+            commit=git("rev-parse", "HEAD"),
+            tree_hash=git("rev-parse", "HEAD^{tree}"),
+            source_hash=baseline_hash,
+            worktree_uri=baseline_root.resolve(strict=True).as_uri(),
+            clean=True,
+            created_at=NOW,
+        )
+        knowledge = KnowledgeSnapshot(
+            snapshot_id=UUID("51000000-0000-0000-0000-000000000005"),
+            sources=(
+                {
+                    "knowledge_id": "skill/scripted-postgres-agent",
+                    "source_kind": "skill",
+                    "version": "1.0.0",
+                    "source_uri": "skill:///scripted-postgres-agent/SKILL.md",
+                    "content_hash": _payload_hash(b"scripted agent guidance\n"),
+                    "license_id": "MulanPSL-2.0",
+                },
+            ),
+            created_by="agent-postgres-test",
+            created_at=NOW,
+        )
+        start_request = _start_request(
+            "agent-postgres-final-business-e2e-v1",
+            knowledge_snapshot=knowledge,
+            baseline_source_hash=baseline_hash,
+        )
+        started = self.coordinator.start(start_request, self.repository)
+        claim_a1 = self.repository.claim_generation_attempt(
+            "worker-a1", lease_seconds=10, now=NOW
+        )
+        claim_b1 = self.repository.claim_generation_attempt(
+            "worker-b1", lease_seconds=10, now=NOW
+        )
+        assert claim_a1 is not None and claim_b1 is not None
+        self.assertEqual(claim_a1.attempt.generator_id, "agent-a")
+        self.assertEqual(claim_b1.attempt.generator_id, "agent-b")
+
+        failed_batch, (failed_receipt, failed_batch_uri) = self._settlement(
+            claim_a1,
+            normalized_patch_hash=_hash("c"),
+            runner_status="timed_out",
+            real_generator=True,
+        )
+        self.assertIsNone(failed_batch)
+        self.assertIsNone(failed_batch_uri)
+        failed = self.repository.settle_generation_attempt(
+            claim_a1.attempt.attempt_id,
+            claim_a1.attempt.claim_token,
+            None,
+            failed_receipt,
+            runner_receipt_reader=self.receipt_store,
+            now=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.error_code, "runner_timeout")
+
+        claim_a2 = self.repository.claim_generation_attempt(
+            "worker-a2",
+            lease_seconds=10,
+            generation_run_id=started.generation_run_id,
+            now=NOW + timedelta(seconds=1),
+        )
+        assert claim_a2 is not None
+        self.assertEqual(claim_a2.attempt.generator_id, "agent-a")
+        self.assertEqual(claim_a2.attempt.attempt_number, 2)
+        first_patch = _source_patch(1)
+        second_patch = _source_patch(2)
+        batch_a, (receipt_a, batch_a_uri) = self._settlement(
+            claim_a2,
+            normalized_patch_hash=_payload_hash(first_patch),
+            raw_patches=(first_patch, second_patch),
+            real_generator=True,
+        )
+        assert batch_a is not None and batch_a_uri is not None
+        self.repository.settle_generation_attempt(
+            claim_a2.attempt.attempt_id,
+            claim_a2.attempt.claim_token,
+            batch_a,
+            receipt_a,
+            runner_receipt_reader=self.receipt_store,
+            batch_uri=batch_a_uri,
+            now=NOW + timedelta(seconds=2),
+        )
+
+        batch_b, (receipt_b, batch_b_uri) = self._settlement(
+            claim_b1,
+            normalized_patch_hash=_payload_hash(first_patch),
+            raw_patches=(first_patch,),
+            real_generator=True,
+        )
+        assert batch_b is not None and batch_b_uri is not None
+        self.repository.settle_generation_attempt(
+            claim_b1.attempt.attempt_id,
+            claim_b1.attempt.claim_token,
+            batch_b,
+            receipt_b,
+            runner_receipt_reader=self.receipt_store,
+            batch_uri=batch_b_uri,
+            now=NOW + timedelta(seconds=3),
+        )
+        reviewable = self.repository.generation_run_status(started.generation_run_id)
+        self.assertEqual(reviewable.run.state, "awaiting_review")
+        self.assertEqual(reviewable.run.attempt_count, 3)
+        self.assertEqual(reviewable.run.proposal_count, 3)
+        self.assertEqual(reviewable.run.retained_proposal_count, 2)
+        self.assertEqual(
+            [item.disposition for item in reviewable.proposals],
+            ["retained", "retained", "duplicate"],
+        )
+
+        decision_store = ProposalDecisionStore(self.evidence_root / "decisions")
+        review_authority = ProposalReviewAuthority(
+            patch_store=self.patch_store,
+            batch_store=self.batch_store,
+            decision_store=decision_store,
+        )
+        publisher = CandidateSourcePackagePublisher(
+            self.evidence_root / "business-packages",
+            profile="m2b-final-e2e-source-store-v1",
+            source_manager=GitSourceManager("m2b-final-e2e-git-source-v1"),
+            allowed_overlay_roots=("sglang",),
+            approved_mount_targets={
+                start_request.request.replacement_point: MOUNT_TARGET,
+            },
+        )
+        promotion_service = ProposalPromotionService(
+            review_authority=review_authority,
+            package_publisher=publisher,
+            decision_store=decision_store,
+        )
+        retained = [item for item in reviewable.proposals if item.disposition == "retained"]
+        reviews = []
+        prepared = []
+        for ordinal, reference in enumerate(retained):
+            review = review_authority.review(
+                reviewable,
+                reference.proposal_id,
+                decision="approved",
+                reviewer="m2b-independent-reviewer",
+                reason="The bounded source-only Proposal is approved for business packaging.",
+                review_evidence=canonical_json_bytes(
+                    {"proposal_id": str(reference.proposal_id), "decision": "approved"}
+                ),
+                idempotency_key=f"review-{reference.proposal_id}",
+                reviewed_at=NOW + timedelta(seconds=4),
+            )
+            reviews.append(review)
+            prepared.append(
+                promotion_service.prepare(
+                    reviewable,
+                    reference.proposal_id,
+                    review.review_id,
+                    baseline=BaselineOverlaySource(
+                        snapshot=baseline,
+                        path=BASELINE_PATH,
+                    ),
+                    candidate_id=UUID(
+                        f"51000000-0000-0000-0000-{100 + ordinal:012d}"
+                    ),
+                    candidate_output_dir=self.evidence_root / "candidate-work",
+                )
+            )
+
+        source_store_id = "m2b-final-e2e-source-store"
+        source_store_hash = _payload_hash(b"m2b-final-e2e-source-store-v1")
+        family = BusinessCandidateFamilyManifest(
+            family_id="m2b-final-business-family-v1",
+            source_package_store_id=source_store_id,
+            source_package_store_hash=source_store_hash,
+            target_snapshot_id=start_request.request.target_snapshot_id,
+            stage0_run_id=start_request.request.stage0_run_id,
+            baseline_epoch_id=start_request.request.baseline_epoch_id,
+            baseline_source_hash=start_request.request.baseline_source_hash,
+            hotspot_id=start_request.request.hotspot_id,
+            replacement_point=start_request.request.replacement_point,
+            profiler_evidence_uri=start_request.request.profiler_evidence_uri,
+            profiler_evidence_hash=start_request.request.profiler_evidence_hash,
+            overlay_mount_target=MOUNT_TARGET,
+            overlay_file_path=BASELINE_PATH,
+            members=tuple(
+                {
+                    "candidate_id": item.candidate_id,
+                    "source_package_ref": item.source_package_ref,
+                    "optimization_intent": item.resolved.proposal.optimization_intent,
+                }
+                for item in prepared
+            ),
+            reviewed_by="m2b-family-reviewer",
+            reviewed_at=NOW + timedelta(seconds=5),
+        )
+        family_verifier = BusinessCandidateFamilyVerifier(
+            publisher.source_packages,
+            store_id=source_store_id,
+            store_hash=source_store_hash,
+        )
+        verified_family = family_verifier.verify(family)
+        promotions = tuple(
+            promotion_service.finalize(
+                item,
+                family,
+                family_verifier,
+                promoted_by="m2b-promotion-authority",
+                promoted_at=NOW + timedelta(seconds=6),
+                idempotency_key=f"promote-{item.candidate_id}",
+            )
+            for item in prepared
+        )
+        self.assertTrue(
+            all(
+                item.source_family_hash == verified_family.source_family_hash
+                for item in promotions
+            )
+        )
+        self.assertTrue(all(item.formal_intake_allowed is False for item in promotions))
+
+        overall_review = decision_store.publish_evidence(
+            "generation-review",
+            canonical_json_bytes(
+                {
+                    "generation_run_id": str(started.generation_run_id),
+                    "review_ids": [str(item.review_id) for item in reviews],
+                    "promotion_ids": [str(item.promotion_id) for item in promotions],
+                    "formal_readiness": "hold",
+                }
+            ),
+        )
+        completed = self.repository.complete_generation_review(
+            started.generation_run_id,
+            review_evidence_uri=overall_review.uri,
+            review_evidence_hash=overall_review.content_hash,
+            now=NOW + timedelta(seconds=7),
+        )
+        self.assertEqual(completed.state, "completed")
+        status = self.repository.generation_run_status(started.generation_run_id)
+
+        def publish_evidence(name: str, value: object) -> dict[str, str]:
+            payload = canonical_json_bytes(value)
+            path = self.evidence_root / "final-e2e-input" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            return {
+                "uri": path.resolve(strict=True).as_uri(),
+                "content_hash": _payload_hash(payload),
+            }
+
+        knowledge_ref = publish_evidence("knowledge.json", knowledge)
+        request_ref = publish_evidence("request.json", start_request.request)
+        plan_ref = publish_evidence("plan.json", start_request.plan)
+        status_ref = publish_evidence("status.json", status)
+        review_refs = tuple(
+            AgentEvidenceRef(
+                uri=(decision_store.root / "reviews" / f"{item.review_id}.json")
+                .resolve(strict=True)
+                .as_uri(),
+                content_hash=candidate_proposal_review_record_hash(item),
+            )
+            for item in reviews
+        )
+        promotion_refs = tuple(
+            AgentEvidenceRef(
+                uri=(decision_store.root / "promotions" / f"{item.promotion_id}.json")
+                .resolve(strict=True)
+                .as_uri(),
+                content_hash=candidate_proposal_promotion_receipt_hash(item),
+            )
+            for item in promotions
+        )
+        context = AgentProposalVerificationContext(
+            task_id=UUID("51000000-0000-0000-0000-000000000099"),
+            target_id="postgres-scripted-agent",
+            baseline_epoch_id=start_request.request.baseline_epoch_id,
+            generation_run_id=started.generation_run_id,
+            knowledge={**knowledge_ref, "identity_hash": knowledge_snapshot_hash(knowledge)},
+            request={
+                **request_ref,
+                "identity_hash": candidate_generation_request_hash(start_request.request),
+            },
+            plan={**plan_ref, "identity_hash": apex_generation_plan_hash(start_request.plan)},
+            generation_status=status_ref,
+            review_records=review_refs,
+            promotion_receipts=promotion_refs,
+        )
+        result = AgentProposalVerifier(HashedEvidenceReader(self.evidence_root)).verify(context)
+        read_model = build_agent_generation_read_model(result)
+
+        self.assertEqual(result.status, "ready_for_review")
+        self.assertEqual(
+            [item.status for item in result.attempts],
+            ["timed_out", "succeeded", "succeeded"],
+        )
+        self.assertEqual(
+            [item.status for item in result.proposals],
+            ["kept", "kept", "eliminated"],
+        )
+        self.assertEqual(read_model.human_review_status, "approved")
+        self.assertEqual(read_model.package_promotion_status, "promoted")
+        self.assertEqual(read_model.formal_readiness, "hold")
+        self.assertFalse(read_model.formal_intake_allowed)
+        self.assertFalse(read_model.automatic_release_allowed)
+        self.assertTrue(
+            all(
+                item.manifest.candidate_kind.value == "business"
+                for item in verified_family.packages
+            )
+        )
+        # M2a Scripted regression remains the separate fixture-only CI path; these
+        # promoted business Packages are intentionally not relabelled or consumed here.
 
     def test_failure_retries_and_expired_claim_consumes_conservative_budget(self) -> None:
         start = self.coordinator.start(

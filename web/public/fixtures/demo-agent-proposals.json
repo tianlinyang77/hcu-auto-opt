@@ -1,0 +1,247 @@
+{
+  "schema_version": "m2b-agent-generation-read-model-v1",
+  "generated_at": "2026-09-01T10:24:00Z",
+  "status": "ready_for_review",
+  "generation_run_id": "71000000-0000-0000-0000-000000000001",
+  "request_id": "71000000-0000-0000-0000-000000000002",
+  "plan_id": "71000000-0000-0000-0000-000000000003",
+  "target_id": "nmz36-agent-scripted",
+  "baseline_epoch_id": "71000000-0000-0000-0000-000000000004",
+  "replacement_point": "sglang.runtime.operator.forward",
+  "input_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "knowledge_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "request_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "plan_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "budget_limit": {
+    "max_generator_attempts": 3,
+    "max_wall_seconds": 30,
+    "max_total_output_bytes": 60000,
+    "max_total_tokens": 6000,
+    "max_proposals": 4
+  },
+  "budget": {
+    "attempt_count": 3,
+    "output_bytes": 2360,
+    "output_tokens": 420,
+    "wall_seconds": 2.4,
+    "proposal_count": 2
+  },
+  "attempts": [
+    {
+      "attempt_id": "71000000-0000-0000-0000-000000000010",
+      "generator_id": "agent-a",
+      "attempt_number": 1,
+      "status": "timed_out",
+      "reason_code": "runner_timeout",
+      "cleanup_healthy": true,
+      "cleanup_status": "verified",
+      "cleanup_summary": "process tree terminated; temporary directory removed",
+      "runner_receipt_id": "71000000-0000-0000-0000-000000000011",
+      "runner_receipt_uri": "evidence:///agent/receipts/agent-a-attempt-1.json",
+      "runner_receipt_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "runner_provenance": {
+        "profile": "m2b-sandbox-runner-v1",
+        "capability": "agent_runner",
+        "adapter_name": "SandboxedAgentRunner",
+        "adapter_version": "1.0.0",
+        "implementation_kind": "real",
+        "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
+        "identity_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      "generator_adapter_profile": "m2b-agent-a-v1",
+      "generator_artifact_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "generator_provenance": null,
+      "batch_id": null,
+      "batch_uri": null,
+      "batch_hash": null,
+      "wall_seconds": 1.2,
+      "output_bytes": 0,
+      "output_tokens": 0
+    },
+    {
+      "attempt_id": "71000000-0000-0000-0000-000000000012",
+      "generator_id": "agent-a",
+      "attempt_number": 2,
+      "status": "succeeded",
+      "reason_code": null,
+      "cleanup_healthy": true,
+      "cleanup_status": "verified",
+      "cleanup_summary": "process exited; temporary directory removed",
+      "runner_receipt_id": "71000000-0000-0000-0000-000000000013",
+      "runner_receipt_uri": "evidence:///agent/receipts/agent-a-attempt-2.json",
+      "runner_receipt_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "runner_provenance": {
+        "profile": "m2b-sandbox-runner-v1",
+        "capability": "agent_runner",
+        "adapter_name": "SandboxedAgentRunner",
+        "adapter_version": "1.0.0",
+        "implementation_kind": "real",
+        "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
+        "identity_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "generator_adapter_profile": "m2b-agent-a-v1",
+      "generator_artifact_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "generator_provenance": {
+        "profile": "m2b-agent-a-v1",
+        "capability": "candidate_proposal_generation",
+        "adapter_name": "DeterministicAgentA",
+        "adapter_version": "1.0.0",
+        "implementation_kind": "real",
+        "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae"
+      },
+      "batch_id": "71000000-0000-0000-0000-000000000014",
+      "batch_uri": "evidence:///agent/batches/agent-a-attempt-2.json",
+      "batch_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "wall_seconds": 0.7,
+      "output_bytes": 1280,
+      "output_tokens": 240
+    },
+    {
+      "attempt_id": "71000000-0000-0000-0000-000000000015",
+      "generator_id": "agent-b",
+      "attempt_number": 1,
+      "status": "succeeded",
+      "reason_code": null,
+      "cleanup_healthy": true,
+      "cleanup_status": "verified",
+      "cleanup_summary": "process exited; temporary directory removed",
+      "runner_receipt_id": "71000000-0000-0000-0000-000000000016",
+      "runner_receipt_uri": "evidence:///agent/receipts/agent-b-attempt-1.json",
+      "runner_receipt_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "runner_provenance": {
+        "profile": "m2b-sandbox-runner-v1",
+        "capability": "agent_runner",
+        "adapter_name": "SandboxedAgentRunner",
+        "adapter_version": "1.0.0",
+        "implementation_kind": "real",
+        "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
+        "identity_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "generator_adapter_profile": "m2b-agent-b-v1",
+      "generator_artifact_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "generator_provenance": {
+        "profile": "m2b-agent-b-v1",
+        "capability": "candidate_proposal_generation",
+        "adapter_name": "DeterministicAgentB",
+        "adapter_version": "1.0.0",
+        "implementation_kind": "real",
+        "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae"
+      },
+      "batch_id": "71000000-0000-0000-0000-000000000017",
+      "batch_uri": "evidence:///agent/batches/agent-b-attempt-1.json",
+      "batch_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "wall_seconds": 0.5,
+      "output_bytes": 1080,
+      "output_tokens": 180
+    }
+  ],
+  "proposals": [
+    {
+      "proposal_id": "71000000-0000-0000-0000-000000000020",
+      "generator_id": "agent-a",
+      "status": "kept",
+      "reason_code": null,
+      "optimization_intent": "remove redundant materialization before the overlay operator",
+      "risk_summary": "Shape and dtype gates must remain unchanged; independent correctness is mandatory.",
+      "touched_paths": ["sglang/runtime/operator.py"],
+      "patch_uri": "evidence:///agent/patches/proposal-20.diff",
+      "patch_preview": "diff --git a/sglang/runtime/operator.py b/sglang/runtime/operator.py\n--- a/sglang/runtime/operator.py\n+++ b/sglang/runtime/operator.py\n@@ -1,2 +1,2 @@\n def forward(value):\n-    return value\n+    return value + 1\n",
+      "proposal_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "exact_patch_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "normalized_patch_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "candidate_identity_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "intent_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "lifecycle": {
+        "proposal_id": "71000000-0000-0000-0000-000000000020",
+        "review_status": "approved",
+        "review": {
+          "review_id": "71000000-0000-0000-0000-000000000021",
+          "decision": "approved",
+          "reviewer": "independent-human-reviewer",
+          "reason": "Bounded source-only change approved for business packaging.",
+          "review_record_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+          "review_evidence_uri": "evidence:///agent/reviews/proposal-20.json",
+          "review_evidence_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "reviewed_at": "2026-09-01T10:22:00Z"
+        },
+        "promotion_status": "promoted",
+        "promotion": {
+          "promotion_id": "71000000-0000-0000-0000-000000000022",
+          "promotion_receipt_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+          "candidate_id": "71000000-0000-0000-0000-000000000023",
+          "source_package_ref": {
+            "candidate_source_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+            "source_package_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "manifest_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "manifest_schema_version": "m1-candidate-source-v1"
+          },
+          "source_family_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "source_family_verification_evidence_uri": "evidence:///m2a/business-family/verified.json",
+          "source_family_verification_evidence_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "source_family_verifier_provenance": {
+            "profile": "m2a-family-verifier-v1",
+            "capability": "business_candidate_family_verification",
+            "adapter_name": "BusinessCandidateFamilyVerifier",
+            "adapter_version": "1.0.0",
+            "implementation_kind": "real",
+            "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae"
+          },
+          "promoted_by": "candidate-authority",
+          "promoted_at": "2026-09-01T10:23:00Z"
+        },
+        "readiness": "hold"
+      }
+    },
+    {
+      "proposal_id": "71000000-0000-0000-0000-000000000024",
+      "generator_id": "agent-b",
+      "status": "eliminated",
+      "reason_code": "duplicate_normalized_patch",
+      "optimization_intent": "remove redundant materialization before the overlay operator",
+      "risk_summary": "Duplicate of the retained normalized Patch; no review is allowed.",
+      "touched_paths": ["sglang/runtime/operator.py"],
+      "patch_uri": "evidence:///agent/patches/proposal-24.diff",
+      "patch_preview": "diff --git a/sglang/runtime/operator.py b/sglang/runtime/operator.py\n--- a/sglang/runtime/operator.py\n+++ b/sglang/runtime/operator.py\n@@ -1,2 +1,2 @@\n def forward(value):\n-    return value\n+    return value + 1\n",
+      "proposal_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "exact_patch_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized_patch_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "candidate_identity_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "intent_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "lifecycle": {
+        "proposal_id": "71000000-0000-0000-0000-000000000024",
+        "review_status": "not_applicable",
+        "review": null,
+        "promotion_status": "not_applicable",
+        "promotion": null,
+        "readiness": "hold"
+      }
+    }
+  ],
+  "failure_codes": ["runner_timeout"],
+  "human_review_status": "approved",
+  "package_promotion_status": "promoted",
+  "formal_readiness": "hold",
+  "adapter_provenance": [
+    {
+      "profile": "m2b-proposal-verifier-v1",
+      "capability": "candidate_proposal_verification",
+      "adapter_name": "AgentProposalVerifier",
+      "adapter_version": "m2b-proposal-verifier-v1",
+      "implementation_kind": "real",
+      "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae"
+    },
+    {
+      "profile": "m2b-sandbox-runner-v1",
+      "capability": "agent_runner",
+      "adapter_name": "SandboxedAgentRunner",
+      "adapter_version": "1.0.0",
+      "implementation_kind": "real",
+      "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae"
+    }
+  ],
+  "synthetic": true,
+  "environment": "scripted_dev_only",
+  "performance_conclusion": "not_measured",
+  "formal_intake_allowed": false,
+  "automatic_release_allowed": false
+}

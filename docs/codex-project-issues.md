@@ -1,5 +1,23 @@
 # Codex 项目本地已知问题
 
+## React lint 禁止在 Effect 中同步调用含 setState 的加载函数
+
+- Scope: project-local
+- Symptom: `npm run lint` 报 `react-hooks/set-state-in-effect`，指出组件的 `useEffect`
+  同步调用了会立即 `setLoading(true)` 的 `load()` 函数。
+- Evidence: Agent/Apex 证据工作台在 Windows 本地执行 ESLint 时，报错定位到
+  `web/src/AgentProposalWorkspace.jsx` 的初始加载 Effect；后端 Ruff 与 26 个聚焦测试已通过，
+  因此前端 lint 是唯一阻塞项。
+- Cause: React hooks lint 将 Effect 内的同步状态更新视为潜在级联渲染；把读取逻辑封装为
+  普通函数不会绕过规则。
+- Proven workaround: 在 Effect 中定义异步读取协程，等待数据 Promise 后再更新状态，并用
+  `cancelled` 防止卸载后的写入；手动重试从事件处理器设置 loading 并递增独立 reload nonce。
+- Validation: 修改后重新运行 Web lint、unit、build 与 sites 测试。
+- Applies to: 本仓库需要在组件挂载时读取 API 或 fixture 的 React 工作台。
+- Do not repeat: 不要在 Effect 里直接调用会同步 setState 的 `load()`；不要为了通过 lint
+  关闭规则或删除加载/错误状态。
+- Last updated: 2026-09-02
+
 ## Windows PowerShell 转发 nmz36 复杂内联命令会丢失引号
 
 - Scope: mixed
@@ -76,7 +94,9 @@
   `PYTHONPATH=src`；PostgreSQL 集成测试仍交给带 PostgreSQL 17 Service 的 Linux CI。
 - Validation: 权限恢复后，同一解释器完成 Ruff 全量检查及 M1 聚焦回归，结果为
   `46 passed, 6 skipped`。M2a Formal Authority 定向验证为 `12 passed, 11 skipped`，其中
-  11 项只因本机未配置 PostgreSQL 而跳过，不能算作数据库通过。
+  11 项只因本机未配置 PostgreSQL 而跳过，不能算作数据库通过。M2b 最终 business
+  generation E2E 在 2026-09-01 本地同样只能完成收集与跳过态检查；正式数据库结论必须来自
+  PR 的 PostgreSQL 17 CI job。
 - Applies to: 本项目的 Windows 本地验证。
 - Do not repeat: 不要把 `python` 命令不可见当成测试失败，也不要因此改仓库配置。
 - Last updated: 2026-08-29

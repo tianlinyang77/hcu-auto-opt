@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import unicodedata
@@ -16,7 +17,11 @@ from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
     candidate_proposal_hash,
+    candidate_proposal_promotion_receipt_hash,
+    candidate_proposal_review_record_hash,
     knowledge_snapshot_hash,
+    verify_candidate_proposal_promotion_receipt,
+    verify_candidate_proposal_review_record,
 )
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
@@ -28,7 +33,9 @@ from hcuopt.contracts.agent_v1 import (
     CandidateGenerationRequest,
     CandidateProposal,
     CandidateProposalBatch,
+    CandidateProposalPromotionReceipt,
     CandidateProposalRef,
+    CandidateProposalReviewRecord,
     GenerationBudgetUsage,
     GenerationRunStatusView,
     GeneratorAttempt,
@@ -40,7 +47,10 @@ from hcuopt.contracts.agent_verification_v1 import (
     AgentEvidenceRef,
     AgentGenerationReadModel,
     AgentProposalDecision,
+    AgentProposalLifecycleDecision,
+    AgentProposalPromotionReadModel,
     AgentProposalReadModel,
+    AgentProposalReviewReadModel,
     AgentProposalVerificationContext,
     AgentProposalVerificationResult,
 )
@@ -161,8 +171,19 @@ def build_agent_generation_read_model(
     """Copy D verdicts for UI display; never recompute or upgrade authority."""
 
     return AgentGenerationReadModel(
+        generated_at=result.evidence_created_at,
         status=result.status,
+        generation_run_id=result.generation_run_id,
+        request_id=result.request_id,
+        plan_id=result.plan_id,
+        target_id=result.target_id,
+        baseline_epoch_id=result.baseline_epoch_id,
+        replacement_point=result.replacement_point,
         input_digest=result.input_digest,
+        knowledge_hash=result.knowledge_hash,
+        request_hash=result.request_hash,
+        plan_hash=result.plan_hash,
+        budget_limit=result.budget_limit,
         budget=result.budget,
         attempts=[item.model_dump() for item in result.attempts],
         proposals=[
@@ -175,12 +196,23 @@ def build_agent_generation_read_model(
                 risk_summary=item.risk_summary,
                 touched_paths=item.touched_paths,
                 patch_uri=item.patch_uri,
+                patch_preview=item.patch_preview,
+                proposal_hash=item.proposal_hash,
+                exact_patch_hash=item.exact_patch_hash,
+                normalized_patch_hash=item.normalized_patch_hash,
+                candidate_identity_hash=item.candidate_identity_hash,
+                intent_hash=item.intent_hash,
+                lifecycle=next(
+                    member for member in result.lifecycle if member.proposal_id == item.proposal_id
+                ),
             )
             for item in result.proposals
         ],
         failure_codes=result.failure_codes,
         human_review_status=result.human_review_status,
         package_promotion_status=result.package_promotion_status,
+        formal_readiness=result.formal_readiness,
+        adapter_provenance=result.adapter_provenance,
         synthetic=result.synthetic,
         environment=result.environment,
         performance_conclusion=result.performance_conclusion,
@@ -603,6 +635,7 @@ class AgentProposalVerifier:
                 AgentAttemptDecision(
                     attempt_id=attempt.attempt_id,
                     generator_id=attempt.generator_id,
+                    attempt_number=authority_attempt.attempt_number,
                     status=(
                         decision_status
                         if decision_status in {"succeeded", "failed", "timed_out", "invalid"}
@@ -612,6 +645,29 @@ class AgentProposalVerifier:
                         "cleanup_failed" if not attempt.cleanup_healthy else attempt.failure_code
                     ),
                     cleanup_healthy=attempt.cleanup_healthy,
+                    cleanup_status=(
+                        receipt.execution.cleanup_status
+                        if receipt is not None
+                        else "not_available"
+                    ),
+                    cleanup_summary=(
+                        receipt.execution.cleanup_summary if receipt is not None else None
+                    ),
+                    runner_receipt_id=authority_attempt.runner_receipt_id,
+                    runner_receipt_uri=authority_attempt.runner_receipt_uri,
+                    runner_receipt_hash=authority_attempt.runner_receipt_hash,
+                    runner_provenance=(
+                        receipt.execution.runner_provenance if receipt is not None else None
+                    ),
+                    generator_adapter_profile=entry.adapter_profile,
+                    generator_artifact_hash=entry.generator_artifact_hash,
+                    generator_provenance=authority_attempt.adapter_provenance,
+                    batch_id=authority_attempt.batch_id,
+                    batch_uri=authority_attempt.batch_uri,
+                    batch_hash=authority_attempt.batch_hash,
+                    wall_seconds=attempt.wall_seconds,
+                    output_bytes=attempt.output_bytes,
+                    output_tokens=attempt.output_tokens,
                 )
             )
             if authority_attempt.batch_id is not None:
@@ -717,6 +773,18 @@ class AgentProposalVerifier:
             generator_ordinals=generator_ordinals,
         )
         self._validate_dedupe_crosscheck(status_view.proposals, decisions)
+        proposals_by_id = {
+            proposal.proposal_id: proposal
+            for _attempt, batch in batches
+            for proposal in batch.proposals
+        }
+        lifecycle, human_review_status, package_promotion_status = self._verify_lifecycle(
+            context,
+            request,
+            decisions,
+            proposals_by_id,
+            evidence_uris,
+        )
         if sum(item.status == "kept" for item in decisions) == 0:
             failures.add("zero_valid_proposals")
         invalid = any(not item.cleanup_healthy for item in attempts) or any(
@@ -773,14 +841,22 @@ class AgentProposalVerifier:
                     for item in attempts
                 ],
                 "decisions": [item.model_dump(mode="json") for item in decisions],
+                "lifecycle": [item.model_dump(mode="json") for item in lifecycle],
             }
         )
         return AgentProposalVerificationResult(
             status=status,
+            generation_run_id=context.generation_run_id,
+            request_id=request.request_id,
+            plan_id=plan.plan_id,
+            target_id=context.target_id,
+            baseline_epoch_id=context.baseline_epoch_id,
+            replacement_point=request.replacement_point,
             input_digest=input_digest,
             knowledge_hash=knowledge_hash,
             request_hash=request_hash,
             plan_hash=plan_hash,
+            budget_limit=plan.budget,
             budget={
                 "attempt_count": len(attempts),
                 "output_bytes": sum(item.output_bytes for item in attempts),
@@ -790,13 +866,235 @@ class AgentProposalVerifier:
             },
             attempts=attempt_decisions,
             proposals=decisions,
+            lifecycle=lifecycle,
             failure_codes=sorted(failures),
             evidence_uris=sorted(set(evidence_uris)),
             adapter_provenance=_unique_provenance(provenance),
-            human_review_status="pending",
-            package_promotion_status="pending",
+            human_review_status=human_review_status,
+            package_promotion_status=package_promotion_status,
             evidence_created_at=plan.created_at,
         )
+
+    def _verify_lifecycle(
+        self,
+        context: AgentProposalVerificationContext,
+        request: CandidateGenerationRequest,
+        decisions: list[AgentProposalDecision],
+        proposals_by_id: dict[object, CandidateProposal],
+        evidence_uris: list[str],
+    ) -> tuple[list[AgentProposalLifecycleDecision], str, str]:
+        decisions_by_id = {item.proposal_id: item for item in decisions}
+        reviews: dict[object, tuple[CandidateProposalReviewRecord, str]] = {}
+        for reference in context.review_records:
+            review = self._load(reference, CandidateProposalReviewRecord)
+            decision = decisions_by_id.get(review.proposal_id)
+            proposal = proposals_by_id.get(review.proposal_id)
+            if review.proposal_id in reviews:
+                raise AgentProposalEvidenceError(
+                    "duplicate_review", "Proposal lifecycle contains duplicate Reviews"
+                )
+            if decision is None or decision.status != "kept" or proposal is None:
+                raise AgentProposalEvidenceError(
+                    "review_binding_mismatch",
+                    "Review does not bind one retained Candidate Proposal",
+                )
+            raw_patch = self.reader.read_raw_bytes(proposal.patch_uri, proposal.patch_hash)
+            try:
+                verify_candidate_proposal_review_record(request, proposal, raw_patch, review)
+            except ValueError as error:
+                raise AgentProposalEvidenceError(
+                    "review_binding_mismatch", str(error)
+                ) from error
+            review_hash = candidate_proposal_review_record_hash(review)
+            if review_hash != reference.content_hash:
+                raise AgentProposalEvidenceError(
+                    "review_hash_mismatch", "Review Record Hash was not reproduced"
+                )
+            self.reader.read_raw_bytes(
+                review.review_evidence_uri,
+                review.review_evidence_hash,
+            )
+            evidence_uris.extend((reference.uri, review.review_evidence_uri))
+            reviews[review.proposal_id] = (review, review_hash)
+
+        promotions: dict[object, tuple[CandidateProposalPromotionReceipt, str]] = {}
+        for reference in context.promotion_receipts:
+            receipt = self._load(reference, CandidateProposalPromotionReceipt)
+            review_pair = reviews.get(receipt.proposal_id)
+            proposal = proposals_by_id.get(receipt.proposal_id)
+            if receipt.proposal_id in promotions:
+                raise AgentProposalEvidenceError(
+                    "duplicate_promotion",
+                    "Proposal lifecycle contains duplicate Promotion Receipts",
+                )
+            if review_pair is None or proposal is None or receipt.review != review_pair[0]:
+                raise AgentProposalEvidenceError(
+                    "promotion_binding_mismatch",
+                    "Promotion does not bind the independently verified Review",
+                )
+            raw_patch = self.reader.read_raw_bytes(proposal.patch_uri, proposal.patch_hash)
+            try:
+                verify_candidate_proposal_promotion_receipt(
+                    request, proposal, raw_patch, receipt
+                )
+            except ValueError as error:
+                raise AgentProposalEvidenceError(
+                    "promotion_binding_mismatch", str(error)
+                ) from error
+            receipt_hash = candidate_proposal_promotion_receipt_hash(receipt)
+            if receipt_hash != reference.content_hash:
+                raise AgentProposalEvidenceError(
+                    "promotion_hash_mismatch", "Promotion Receipt Hash was not reproduced"
+                )
+            family_payload = self.reader.read_raw_bytes(
+                receipt.source_family_verification_evidence_uri,
+                receipt.source_family_verification_evidence_hash,
+            )
+            try:
+                family_evidence = json.loads(family_payload)
+            except (TypeError, ValueError) as error:
+                raise AgentProposalEvidenceError(
+                    "source_family_evidence_invalid",
+                    "Source Family verification evidence is not JSON",
+                ) from error
+            expected_family = (
+                str(receipt.proposal_id),
+                str(receipt.candidate_id),
+                receipt.source_package_ref.model_dump(mode="json"),
+                receipt.source_family_hash,
+            )
+            actual_family = (
+                family_evidence.get("proposal_id"),
+                family_evidence.get("candidate_id"),
+                family_evidence.get("source_package_ref"),
+                family_evidence.get("source_family_hash"),
+            )
+            if actual_family != expected_family:
+                raise AgentProposalEvidenceError(
+                    "source_family_evidence_mismatch",
+                    "Source Family verification evidence changed after Promotion",
+                )
+            evidence_uris.extend(
+                (reference.uri, receipt.source_family_verification_evidence_uri)
+            )
+            promotions[receipt.proposal_id] = (receipt, receipt_hash)
+
+        lifecycle: list[AgentProposalLifecycleDecision] = []
+        for decision in decisions:
+            review_pair = reviews.get(decision.proposal_id)
+            promotion_pair = promotions.get(decision.proposal_id)
+            if decision.status != "kept":
+                lifecycle.append(
+                    AgentProposalLifecycleDecision(
+                        proposal_id=decision.proposal_id,
+                        review_status="not_applicable",
+                        promotion_status="not_applicable",
+                    )
+                )
+                continue
+            if review_pair is None:
+                lifecycle.append(
+                    AgentProposalLifecycleDecision(
+                        proposal_id=decision.proposal_id,
+                        review_status="pending",
+                        promotion_status="pending",
+                    )
+                )
+                continue
+            review, review_hash = review_pair
+            if review.decision == "rejected":
+                lifecycle.append(
+                    AgentProposalLifecycleDecision(
+                        proposal_id=decision.proposal_id,
+                        review_status="rejected",
+                        review=AgentProposalReviewReadModel(
+                            review_id=review.review_id,
+                            decision=review.decision,
+                            reviewer=review.reviewer,
+                            reason=review.reason,
+                            review_record_hash=review_hash,
+                            review_evidence_uri=review.review_evidence_uri,
+                            review_evidence_hash=review.review_evidence_hash,
+                            reviewed_at=review.reviewed_at,
+                        ),
+                        promotion_status="not_applicable",
+                    )
+                )
+                continue
+            if promotion_pair is None:
+                lifecycle.append(
+                    AgentProposalLifecycleDecision(
+                        proposal_id=decision.proposal_id,
+                        review_status="approved",
+                        review=AgentProposalReviewReadModel(
+                            review_id=review.review_id,
+                            decision=review.decision,
+                            reviewer=review.reviewer,
+                            reason=review.reason,
+                            review_record_hash=review_hash,
+                            review_evidence_uri=review.review_evidence_uri,
+                            review_evidence_hash=review.review_evidence_hash,
+                            reviewed_at=review.reviewed_at,
+                        ),
+                        promotion_status="pending",
+                    )
+                )
+                continue
+            promotion, promotion_hash = promotion_pair
+            lifecycle.append(
+                AgentProposalLifecycleDecision(
+                    proposal_id=decision.proposal_id,
+                    review_status="approved",
+                    review=AgentProposalReviewReadModel(
+                        review_id=review.review_id,
+                        decision=review.decision,
+                        reviewer=review.reviewer,
+                        reason=review.reason,
+                        review_record_hash=review_hash,
+                        review_evidence_uri=review.review_evidence_uri,
+                        review_evidence_hash=review.review_evidence_hash,
+                        reviewed_at=review.reviewed_at,
+                    ),
+                    promotion_status="promoted",
+                    promotion=AgentProposalPromotionReadModel(
+                        promotion_id=promotion.promotion_id,
+                        promotion_receipt_hash=promotion_hash,
+                        candidate_id=promotion.candidate_id,
+                        source_package_ref=promotion.source_package_ref,
+                        source_family_hash=promotion.source_family_hash,
+                        source_family_verification_evidence_uri=(
+                            promotion.source_family_verification_evidence_uri
+                        ),
+                        source_family_verification_evidence_hash=(
+                            promotion.source_family_verification_evidence_hash
+                        ),
+                        source_family_verifier_provenance=(
+                            promotion.source_family_verifier_provenance
+                        ),
+                        promoted_by=promotion.promoted_by,
+                        promoted_at=promotion.promoted_at,
+                    ),
+                )
+            )
+
+        kept = [item for item in lifecycle if item.review_status != "not_applicable"]
+        review_states = {item.review_status for item in kept}
+        promotion_states = {item.promotion_status for item in kept}
+        human_review_status = (
+            "pending"
+            if not review_states
+            else next(iter(review_states))
+            if len(review_states) == 1
+            else "mixed"
+        )
+        package_promotion_status = (
+            "pending"
+            if not promotion_states
+            else next(iter(promotion_states))
+            if len(promotion_states) == 1
+            else "mixed"
+        )
+        return lifecycle, human_review_status, package_promotion_status
 
     @staticmethod
     def _validate_generator_barrier(
@@ -949,6 +1247,7 @@ class AgentProposalVerifier:
                         status=status,
                         reason_code=reason,
                         patch_uri=proposal.patch_uri,
+                        patch_preview=normalized.decode("utf-8"),
                         touched_paths=proposal.touched_paths,
                         optimization_intent=proposal.optimization_intent,
                         risk_summary=proposal.risk_summary,
@@ -993,6 +1292,11 @@ def _canonical_context(context: AgentProposalVerificationContext) -> dict[str, o
     # digest below binds the normalized semantic members.  Excluding the byte
     # hash keeps equivalent database row orderings from changing D's verdict.
     value["generation_status"] = {"uri": value["generation_status"]["uri"]}
+    for field in ("review_records", "promotion_receipts"):
+        value[field] = sorted(
+            value[field],
+            key=lambda item: (item["uri"], item["content_hash"]),
+        )
     for field in (
         "previous_exact_patch_hashes",
         "previous_normalized_patch_hashes",

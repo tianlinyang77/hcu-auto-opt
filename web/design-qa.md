@@ -96,3 +96,62 @@ No actionable implementation P0, P1, or P2 finding remains in the automated QA s
 No new screenshot, DOM inspection, viewport comparison, or interactive browser test was performed for UI-4 because it was not requested in this iteration. The approved UI-3 browser evidence above remains the visual-system baseline; this section therefore records implementation and automated QA only and does not claim a new pixel-level visual verdict.
 
 final result: automated implementation QA passed; browser visual QA not requested
+
+---
+
+# UI-5 Agent / Apex Evidence Workspace Product Design QA
+
+## Comparison target
+
+- Source visual truth: `qa/agent-apex-source-current.png`, the approved Mission Control dashboard visual system.
+- Implementation: `qa/agent-apex-workspace-desktop.png` and `qa/agent-apex-workspace-mobile-top.png`.
+- Combined full-view comparison: `qa/agent-apex-design-comparison.png`.
+- Desktop: source image 1264 × 1064 px; its approved dashboard region was normalized to 1280 × 720 beside the implementation. The implementation capture is 1280 × 720 CSS px / 1280 × 720 captured px; Browser reports device scale factor 1.5 but normalizes the screenshot to CSS dimensions.
+- Mobile: 390 × 844 CSS px / 390 × 844 captured px at device scale factor 1. The workspace is in its standard open state, with its internal evidence scroll region at the top.
+- State: explicit Synthetic Proposal-only evidence. `agent-a` times out once and retries successfully, `agent-b` succeeds, D retains one Proposal and eliminates one normalized duplicate; the retained Proposal has human review, a business Package, independent Family verification, and Formal Readiness `HOLD`.
+
+The source and implementation are adjacent workflow slices, so this checks visual-system continuity rather than pixel-identical content. Both use the approved dark Mission Control shell, workspace modal anatomy, Noto Sans SC / JetBrains Mono hierarchy, Phosphor icon family, semantic colors, compact evidence density, and explicit authority boundaries.
+
+## Findings
+
+No actionable P0, P1, or P2 findings remain.
+
+- Fonts and typography: the new workspace keeps Noto Sans SC for interface copy and JetBrains Mono for run IDs, hashes, budget values, receipts, and machine states. The main hierarchy, 8–12 px evidence text, truncation, and bilingual labels remain readable at desktop and 390 px widths.
+- Spacing and layout rhythm: desktop reuses the existing fullscreen dialog with a four-cell summary strip, compact cards, 1 px borders, and 7–9 px radii. Mobile collapses the summary to a 2 × 2 grid and all content to one internal scroll region; no horizontal overflow was observed.
+- Colors and visual tokens: existing deep blue surfaces, cyan Authority labels, mint success, red timeout/failure, amber HOLD/release boundary, and purple Proposal-only badge are reused. The visual treatment distinguishes timeout, successful retry, duplicate, review, promotion, and HOLD without adding a new palette.
+- Image and asset quality: no new raster asset was introduced. The existing product mark remains behind the workspace and visible workflow symbols continue to use the installed Phosphor icon family; no inline SVG, emoji, CSS illustration, or placeholder asset was added.
+- Copy and content: the page makes the causal chain visible: Apex plan and budget → runner receipt and cleanup → Patch preview / D verdict / stable dedupe → human review / business Package / Family verifier. It explicitly states that business generation is separate from M2a fixture regression, and that HCU, measurement, Holdout, FWER, signoff, and release remain unavailable.
+- Accessibility and behavior: the workspace is a named ARIA modal. The proposal list exposes selectable options, the close and export controls are labelled, the budget meters expose usage labels, and the existing reduced-motion and focus styling remain active.
+
+## Full-view and focused evidence
+
+- Full-view: `qa/agent-apex-design-comparison.png` compares the existing dashboard language and the new workspace side by side at the same logical desktop crop.
+- Desktop evidence: `qa/agent-apex-workspace-desktop.png` confirms the Plan, budget, runner receipt, retry and fixed footer fit inside the desktop workspace without overlap or cropped controls.
+- Mobile evidence: `qa/agent-apex-workspace-mobile-top.png` confirms the 2 × 2 summary, close control, Plan identity facts, and budget grid at 390 × 844. Browser measurement returned `scrollWidth=390` and `innerWidth=390`, so there is no horizontal overflow.
+- Focused interaction: selecting the normalized duplicate set its list option to `aria-selected=true` and made the explicit "去重后的提案不进入人工审核，也不会打包成 Candidate。" boundary visible.
+
+## Comparison history
+
+### Pass 1 — passed
+
+- No P0/P1/P2 mismatch was found in the normalized source/implementation comparison.
+- Navigation `Agent / Apex` and the dashboard footer `打开证据工作台` both opened the same workspace.
+- The duplicate Proposal path, workspace close/reopen flow, desktop and 390 × 844 layouts all worked.
+- Browser console errors after the normal flow: none.
+- Browser full-page screenshot capture was unavailable, so the review uses the supported viewport captures above; the content is intentionally inside one internal scroll region and was also checked through its semantic DOM snapshot.
+
+## Primary interactions tested
+
+- Open UI-5 from `Agent / Apex` navigation.
+- Close it and reopen it from `打开证据工作台` in the dashboard footer.
+- Verify the timeout → retry → succeeded runner receipt chain and cleanup states.
+- Select the normalized duplicate Proposal and verify its review / packaging path remains locked.
+- Verify Formal Readiness is `HOLD`, automatic release remains prohibited, and the M2a fixture regression separation remains visible.
+- Repeat at 390 × 844, verify the workspace has one internal vertical scroll region and no horizontal overflow.
+- Check browser console errors after normal interaction.
+
+## Follow-up polish
+
+- P3: once real non-Synthetic Generation Runs are listable through a dedicated read endpoint, add a read-only run picker. The current UI intentionally fails closed when a production `generation_run_id` is not supplied instead of inventing a default Run.
+
+final result: passed

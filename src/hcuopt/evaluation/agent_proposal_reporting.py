@@ -44,6 +44,7 @@ def build_agent_generation_evidence(
         failure_codes=result.failure_codes,
         human_review_status=result.human_review_status,
         package_promotion_status=result.package_promotion_status,
+        formal_readiness=result.formal_readiness,
     )
     evidence_id = uuid5(
         NAMESPACE_URL,
@@ -116,6 +117,9 @@ def _render_report(result: AgentProposalVerificationResult) -> str:
             f"- Input Digest：`{result.input_digest}`",
             f"- Attempt 数：`{result.budget.attempt_count}`",
             f"- Proposal 数：`{result.budget.proposal_count}`",
+            f"- 人工审核：`{result.human_review_status}`",
+            f"- Package 晋级：`{result.package_promotion_status}`",
+            f"- Formal Readiness：`{result.formal_readiness}`",
             "- 性能结论：`not_measured`",
             "- 自动发布：`false`",
             "",

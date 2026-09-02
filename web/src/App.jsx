@@ -42,6 +42,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { loadOperatorDashboard } from "./api.js";
+import { AgentProposalWorkspace } from "./AgentProposalWorkspace.jsx";
 import { CandidateEvidenceWorkspace } from "./CandidateEvidenceWorkspace.jsx";
 import { demoDashboard } from "./demo-data.js";
 import { EvaluationEvidenceWorkspace } from "./EvaluationEvidenceWorkspace.jsx";
@@ -53,6 +54,7 @@ const navigation = [
   ["plan", "计划预览", ClipboardText],
   ["start", "启动审计", ClockCounterClockwise],
   ["candidates", "候选管理", Stack],
+  ["agent", "Agent / Apex", Robot],
   ["build", "构建中心", Hammer],
   ["correctness", "正确性评估", CheckSquareOffset],
   ["search", "Search 分析", MagnifyingGlass],
@@ -478,18 +480,18 @@ function EvidencePanel({ round, report, selectedCandidate, onExport }) {
   );
 }
 
-function CapabilityFooter({ onAgentInfo, onApexInfo }) {
+function CapabilityFooter({ onOpenWorkspace }) {
   return (
     <footer className="capability-footer">
       <div className="capability-block">
         <div className="capability-title">
           <Robot size={22} />
           <strong>Agent Generation 状态</strong>
-          <span className="capability-state locked"><LockSimple size={17} />未启用</span>
+          <span className="capability-state enabled"><CheckCircle size={17} weight="fill" />Synthetic 已接线</span>
         </div>
-        <p>M2a Formal acceptance 与人工签核闭环前，Agent 不能接入候选生成。</p>
-        <button className="outline-button" type="button" onClick={onAgentInfo}>
-          查看解锁条件
+        <p>Scripted Proposal-only：展示生成、去重和人工审核证据，不启动测量或正式接入。</p>
+        <button className="outline-button" type="button" onClick={onOpenWorkspace}>
+          打开证据工作台
         </button>
       </div>
       <div className="capability-divider" />
@@ -497,10 +499,10 @@ function CapabilityFooter({ onAgentInfo, onApexInfo }) {
         <div className="capability-title">
           <Sparkle size={22} />
           <strong>Apex Adapter 状态</strong>
-          <span className="capability-state planned"><WarningCircle size={17} />规划中</span>
+          <span className="capability-state enabled"><CheckCircle size={17} weight="fill" />Synthetic 已接线</span>
         </div>
-        <p>Apex-like 调度只负责候选生成、去重和预算建议，不控制测量、裁决或发布。</p>
-        <button className="outline-button" type="button" onClick={onApexInfo}>
+        <p>Apex-like 层只编排生成器、预算与稳定去重；测量、裁决和发布仍由控制面独立负责。</p>
+        <button className="outline-button" type="button" onClick={onOpenWorkspace}>
           查看责任边界
         </button>
       </div>
@@ -578,6 +580,7 @@ export function App() {
   const [candidateEvidenceStage, setCandidateEvidenceStage] = useState("candidate");
   const [evaluationEvidenceOpen, setEvaluationEvidenceOpen] = useState(false);
   const [evaluationEvidenceStage, setEvaluationEvidenceStage] = useState("search");
+  const [agentProposalOpen, setAgentProposalOpen] = useState(false);
 
   const load = async (useDemo = demoMode) => {
     setLoading(true);
@@ -644,6 +647,11 @@ export function App() {
     setSidebarOpen(false);
     if (key === "round") {
       setActiveNavigation(key);
+      setPlannerOpen(false);
+      setStartAuditOpen(false);
+      setCandidateEvidenceOpen(false);
+      setEvaluationEvidenceOpen(false);
+      setAgentProposalOpen(false);
       return;
     }
     if (key === "plan") {
@@ -651,6 +659,7 @@ export function App() {
       setStartAuditOpen(false);
       setCandidateEvidenceOpen(false);
       setEvaluationEvidenceOpen(false);
+      setAgentProposalOpen(false);
       setPlannerOpen(true);
       return;
     }
@@ -668,6 +677,7 @@ export function App() {
       setPlannerOpen(false);
       setCandidateEvidenceOpen(false);
       setEvaluationEvidenceOpen(false);
+      setAgentProposalOpen(false);
       setStartAuditOpen(true);
       return;
     }
@@ -676,6 +686,7 @@ export function App() {
       setPlannerOpen(false);
       setStartAuditOpen(false);
       setEvaluationEvidenceOpen(false);
+      setAgentProposalOpen(false);
       setCandidateEvidenceStage(key === "candidates" ? "candidate" : key);
       setCandidateEvidenceOpen(true);
       return;
@@ -686,7 +697,17 @@ export function App() {
       setStartAuditOpen(false);
       setCandidateEvidenceOpen(false);
       setEvaluationEvidenceStage(key);
+      setAgentProposalOpen(false);
       setEvaluationEvidenceOpen(true);
+      return;
+    }
+    if (key === "agent") {
+      setActiveNavigation(key);
+      setPlannerOpen(false);
+      setStartAuditOpen(false);
+      setCandidateEvidenceOpen(false);
+      setEvaluationEvidenceOpen(false);
+      setAgentProposalOpen(true);
       return;
     }
     setModal({
@@ -732,6 +753,7 @@ export function App() {
           setStartAuditOpen(false);
           setCandidateEvidenceOpen(false);
           setEvaluationEvidenceOpen(false);
+          setAgentProposalOpen(false);
           setPlannerOpen(true);
         }}
       />
@@ -765,6 +787,7 @@ export function App() {
                   setPlannerOpen(false);
                   setCandidateEvidenceOpen(false);
                   setEvaluationEvidenceOpen(false);
+                  setAgentProposalOpen(false);
                   setStartAuditOpen(true);
                 }}
               >
@@ -779,6 +802,7 @@ export function App() {
                 setStartAuditOpen(false);
                 setCandidateEvidenceOpen(false);
                 setEvaluationEvidenceOpen(false);
+                setAgentProposalOpen(false);
                 setPlannerOpen(true);
               }}
             >
@@ -857,6 +881,7 @@ export function App() {
                   setPlannerOpen(false);
                   setStartAuditOpen(false);
                   setEvaluationEvidenceOpen(false);
+                  setAgentProposalOpen(false);
                   setCandidateEvidenceStage("candidate");
                   setCandidateEvidenceOpen(true);
                 }}
@@ -872,22 +897,14 @@ export function App() {
             </div>
 
             <CapabilityFooter
-              onAgentInfo={() =>
-                setModal({
-                  eyebrow: "Agent 解锁条件",
-                  title: "候选生成不能越过测量与签核边界",
-                  body: "Agent 只允许读取热点和运行证据并提交 Candidate Intake，不能控制 Worker、Lease、Harness、Barrier、FWER、Signoff 或发布。",
-                  items: ["完成真实 M2a Formal Round", "EvidenceBundle 与人工签核闭环通过", "独立 Candidate Generator Adapter 获得授权"],
-                })
-              }
-              onApexInfo={() =>
-                setModal({
-                  eyebrow: "Apex-like Adapter",
-                  title: "调度候选，不调度可信裁决",
-                  body: "Apex-like 层负责多 Agent 编排、候选去重、预算建议和知识复用。它通过 Candidate Intake API 接入现有控制面。",
-                  items: ["不直写 SearchRound", "不获取 HCU Lease", "不修改 Holdout 或 FWER 结果"],
-                })
-              }
+              onOpenWorkspace={() => {
+                setActiveNavigation("agent");
+                setPlannerOpen(false);
+                setStartAuditOpen(false);
+                setCandidateEvidenceOpen(false);
+                setEvaluationEvidenceOpen(false);
+                setAgentProposalOpen(true);
+              }}
             />
           </>
         )}
@@ -941,6 +958,15 @@ export function App() {
           initialStage={evaluationEvidenceStage}
           onClose={() => {
             setEvaluationEvidenceOpen(false);
+            setActiveNavigation("round");
+          }}
+        />
+      )}
+      {agentProposalOpen && (
+        <AgentProposalWorkspace
+          demoMode={demoMode}
+          onClose={() => {
+            setAgentProposalOpen(false);
             setActiveNavigation("round");
           }}
         />
