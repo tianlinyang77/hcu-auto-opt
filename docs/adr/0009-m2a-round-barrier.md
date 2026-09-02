@@ -57,6 +57,13 @@ Package，计算不含 `round_id`、`round_candidate_id` 和 ordinal 的 `source
 中同时保留 source family 到 Candidate Family 的映射；不得临时新增、替换、复制或重新排序成
 另一个语义家族。Scripted fixture 不得进入这个 source family。
 
+C 在交付真实 source family 时，还必须保存内容寻址的 Store 描述和
+`m2a-business-candidate-family-verification-v1` 独立验证记录。Family 必须直接固定共同的
+`workload_id`；验证器从 Store 重读每个源码包，
+并在锁定 Baseline 源码树上重新应用 Overlay、复算完整 Candidate Source Hash；只比较调用方
+填写的 Candidate/Package/Manifest Hash 不足以解除 Formal blocker。这两份记录只是
+`accepted_for_formal_window` 的 C 线输入，不创建 Round，也不表示候选正确或更快。
+
 ### 3. M1 单次比较证据只读复用
 
 `m1-kernel-performance-evidence-v1` 不改字段、不改语义。M2 每次 Baseline/Candidate 比较仍由

@@ -23,7 +23,7 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
 ## 已实现合同
 
 - `BusinessCandidateFamilyManifest` 固定 Store、Target Snapshot、Formal Stage0Run、Baseline
-  Epoch/Source、Hotspot、replacement point、Profiler Evidence 和唯一 Overlay 文件。
+  Epoch/Source、测试任务、Hotspot、replacement point、Profiler Evidence 和唯一 Overlay 文件。
 - 成员数固定为 2～4；每个成员绑定 Candidate UUID、`CandidateSourcePackageRef` 和单一优化
   假设。
 - Family 固定 `track=triton`、`release_mode=overlay`、`candidate_kind=business`、
@@ -63,7 +63,19 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
 
 ## 当前状态
 
-截至 2026-08-31，仓库只有一个历史 M1 业务 Candidate 的正式证据。合同、确定性
-`source_family_hash` 和 fail-closed Verifier 已实现并由单元测试覆盖，但第二个业务包与正式
-Family Manifest 尚不存在。因此 `business_candidate_family` 继续为 `block`，Formal Profile、
-Formal Round、HCU 窗口和 Agent/Apex 均不得开启。
+截至 2026-09-02，C 线已在同一个锁定 Baseline、Hotspot、replacement point 和 Workload 下
+准备两份真实、内容不同的 SGLang allocator 候选源码：第一份是 M1 已验收的
+`unique_consecutive` 修改，第二份是按完整页块直接抽取每页首索引的待测实现。两个候选已经
+使用既有 Package/Family 格式写入同一个内容寻址 Store，固定的 `source_family_hash` 为
+`sha256:a9f03a6b0a87bf1c80aa29b9eb16e04da28e759ca881af0fa12de456f15a57c1`。
+
+`m2a_business_candidate_family` 独立验证入口从 Store 重新读取全部文件，并从锁定 Baseline
+重放两个 Overlay 后重新计算完整 Candidate Source Hash。机器验证记录和便于人工阅读的说明见
+[M2a 双候选源码集合准备与独立验证记录](evidence/m2a-business-candidate-family-20260902.md)。
+
+Store 描述只固定内容寻址布局和文件 Hash，不写死某台机器的目录；验证时必须通过
+`--store-root` 指定部署侧实际存储位置，因此 CI 中的受检副本和正式部署侧的只读存储可以使用
+不同路径，但只要任一文件内容不同就会校验失败。
+
+C 线只确认“两个候选真实、不同、可追踪并可申请正式测试窗口”，不确认候选正确或更快。
+本次没有访问 HCU、没有创建 Formal Round，自动发布继续关闭。

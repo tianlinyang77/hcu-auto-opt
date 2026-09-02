@@ -53,10 +53,9 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
 
     assert report.decision == "hold"
     assert report.generated_at == FIXED_TIME
-    assert report.verified_evidence_count == 22
+    assert report.verified_evidence_count == 23
     assert len(report.gate_results) == 13
     assert set(report.blocker_codes) == {
-        "business_candidate_family",
         "formal_authority_persistence",
         "formal_evidence_finalizer",
         "formal_measurement_adapter",
@@ -68,7 +67,6 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
         "target_lock_refresh",
         "review_a_pending",
         "review_b_pending",
-        "review_c_pending",
         "review_d_pending",
     }
     assert all(
@@ -195,6 +193,13 @@ def test_manifest_requires_every_gate_in_canonical_order(mutation: str) -> None:
 
 def test_missing_candidate_family_cannot_declare_readiness_pass() -> None:
     raw = load_formal_readiness_manifest(MANIFEST_PATH).model_dump(mode="json")
+    raw["profile_draft"].update(
+        {
+            "candidate_family_state": "missing",
+            "candidate_packages": [],
+            "candidate_family_hash": None,
+        }
+    )
     raw["gates"][0]["status"] = "pass"
 
     with pytest.raises(ValidationError, match="missing Candidate Family"):

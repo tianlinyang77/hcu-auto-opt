@@ -116,6 +116,7 @@ def _family(
         stage0_run_id=UUID("dd50c381-75dd-5a64-9211-640c602dc817"),
         baseline_epoch_id=UUID("1ab0480c-6f16-544c-a835-655599eaea6c"),
         baseline_source_hash=baseline_source_hash,
+        workload_id="m1-qwen2.5-0.5b-prefill-4090-1-c1",
         hotspot_id=HOTSPOT_ID,
         replacement_point=REPLACEMENT_POINT,
         profiler_evidence_uri=PROFILER_URI,
