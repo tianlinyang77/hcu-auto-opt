@@ -215,3 +215,21 @@ A 的 Generation Authority 另外公开 `GenerationRunStartRequest`、`Generatio
 它们只管理无 HCU 的 Proposal 生成状态。数据库迁移仍由 `hcuopt db-migrate` 显式执行；FastAPI
 不暴露对应写路由。Proposal 在所有 generator 收敛前保持 `pending`，避免把并发完成顺序误当成
 去重权威；barrier 后的 retained/duplicate 仍需 D 独立复算。
+
+B 的 `AgentRunnerAdapter` 位于 `src/hcuopt/adapters/agent_runner.py`，是上述 Generator 下面的
+受限执行边界。它接收 Attempt/Run/Request/Plan/generator 身份、绝对 executable、不可变 Generator
+Artifact/Hash、结构化 argv、白名单环境、只读输入和单次生成预算，返回 Proposal bytes 与公共
+`RunnerExecutionRecord`；不直接创建 `CandidateProposalBatch`。Record 冻结 Runner provenance、
+Generator Artifact Hash、实际 executable Hash、usage、退出状态和 cleanup。Local-command 实现
+同时校验 executable/argv prefix allowlist、禁止覆盖内部环境变量、禁止 shell，并在根进程正常
+退出、timeout、输出/token 超限、畸形 usage、非零退出或 cleanup 未证实时验证/清理整个进程域并
+failure closed。Deterministic 实现仅用于 synthetic CI。该接口不扩展 `agent_v1`，也不拥有
+Candidate、Package、HCU、Measurement、Holdout 或发布权限。
+
+部署侧 `src/hcuopt/adapters/agent_runner_receipt.py` 把 Record 和成功 raw output 发布为内容寻址、
+不可变 `RunnerExecutionReceipt`，返回 `RunnerExecutionReceiptRef`。失败 Receipt 不暴露 Proposal
+bytes。A 的 `settle_generation_attempt()` 必须通过 Store 重读 Receipt，再校验冻结 Plan 中的
+`generator_artifact_hash`、Request/Attempt 身份、预算、cleanup 及 C Batch 的同一 raw output，
+然后才可原子写 Attempt、Proposal Ref 和独立 Generation Budget Ledger。D 从
+`GenerationRunStatusView` 重读 Receipt/Batch/Patch，复算 Hash、usage、barrier 和去重；调用方不能
+再提交第二套临时 Attempt Evidence。

@@ -207,6 +207,9 @@ def _fixture(
             {
                 "generator_id": f"agent-{ordinal}",
                 "adapter_profile": profile,
+                "generator_artifact_hash": _sha256(
+                    f"generator-{ordinal}".encode("ascii")
+                ),
                 "max_attempts": 1,
                 "max_proposals": 1,
                 "timeout_seconds": 10,

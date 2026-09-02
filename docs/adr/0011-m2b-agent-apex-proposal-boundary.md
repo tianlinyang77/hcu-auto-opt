@@ -62,10 +62,54 @@ Measurement Plan、Holdout 或 Evidence Authority。
 `GenerationBudget` 只限制 generator attempt、墙钟、输出字节、token 和 Proposal 数。它不得
 复用或修改 Round Budget Ledger，也不产生 HCU Lease 秒数。B 的 Agent Runner 固定无 HCU、无
 Holdout 权限，并对超时、子进程、输出超限和临时目录执行 failure-closed cleanup。
+本地生成器无论超限、失败还是根进程正常退出，Runner 返回前都必须验证整个受管进程域已退出；
+Windows 使用启动前绑定的 kill-on-close Job Object，POSIX 使用独立进程组。
+
+#### B 线运行时接口
+
+`AgentRunnerAdapter` 是非持久化运行时接口，不是 `agent_v1` 的第二套 Proposal Contract。一次
+`AgentRunRequest` 只包含 attempt/run 身份、完整 Generation Request Hash、绝对 executable、
+不可变 Generator Artifact 路径与预期内容 Hash、结构化 argv、白名单环境变量、只读输入文件和
+attempt/time/input/stdout/stderr/total-output/token 上限。实现必须同时校验 executable、
+Generator Artifact 内容 Hash 和 argv prefix allowlist，使用 `shell=false`；工作目录由 Adapter
+创建，不能由调用方指向仓库、Holdout 或部署目录。调用方不能覆盖 Runner 自有的 input、usage、
+request hash 和 Windows 系统环境变量。所有浮点预算必须是有限值，整数预算拒绝 bool/float 等
+运行时类型漂移。
+
+`AgentRunResult` 只返回可选 Proposal bytes 和公共版本化 `RunnerExecutionRecord`。Record 冻结 `attempt_id`、
+`generation_run_id`、Generation Request Hash、attempt number、Runner provenance/profile identity、
+Generator Artifact Hash 与实际 executable Hash，同时记录墙钟、输出字节、reported token、退出码、
+argv/input Hash、脱敏摘要、进程树终止和临时目录清理状态，并固定
+`performance_conclusion=not_measured`。环境值、凭据、原始 Holdout 和 HCU/Round Budget 不得进入
+Record。timeout、输出/token 超限、非零退出、usage 畸形或 cleanup 未证实均不得返回可用
+Proposal bytes。
+
+#### A/B/C/D 共享 Runner Execution Receipt
+
+B 的部署侧 `RunnerExecutionReceiptStore` 把成功原始输出和 `RunnerExecutionRecord` 分别按内容
+寻址发布，再生成不可变 `RunnerExecutionReceipt` / `RunnerExecutionReceiptRef`。失败执行只发布
+Receipt，不发布 Proposal bytes。Receipt 同时绑定 Attempt/Run/Request/Plan/generator、Generator
+Artifact Hash、Runner provenance、退出状态、实际 usage、raw output URI/Hash/bytes 和 cleanup；
+任何一项漂移都会改变 Receipt Hash。
+
+A 的 settle 必须先通过 Ref 从部署侧 Store 重读 Receipt，再校验冻结 Plan 中的
+`generator_artifact_hash`、Request Hash、预算、cleanup 和 C Batch 所引用的同一 raw output。校验
+成功后，A 才能在一个事务中写入 Batch Ref、Proposal Ref、Receipt identity/URI/Hash、Runner
+provenance 和 Budget Ledger；失败或超预算时不写入可审 Proposal。C 的 Batch 保留自己的 Generator
+provenance，不能复制或替代 Runner provenance。
+
+D 不接受调用方另造 Attempt Evidence。D 从 A 的 `GenerationRunStatusView + budget_ledger` 开始，
+独立重读 B Receipt、C Batch/Patch，复算 Receipt/Batch/Proposal Hash、实际 usage、barrier、A 的
+retained/duplicate 关系及 D 自己的淘汰原因。三层任一字段不一致均 fail closed。
+
+Deterministic Runner 仅用于 CI，固定 synthetic。Local-command Runner 仅允许部署在看不到 HCU
+设备和受保护 Holdout 的专用 Worker，并只执行明确 allowlist 的 executable；它不是任意代码的
+通用安全沙箱。C 在该接口之后解析 Proposal，仍必须按本 ADR 的 Hash、审核和晋级规则验证，
+不能信任 Runner 自报的 Candidate 或性能结论。
 
 ### 5. 身份和重放全部内容化
 
-Knowledge Snapshot、Generation Request、Apex Plan 和 Proposal 都有 canonical JSON Hash。
+Knowledge Snapshot、Generation Request、Apex Plan、Runner Receipt 和 Proposal 都有 canonical JSON Hash。
 集合类字段在 Hash 前按稳定身份排序；改变 Target/Baseline/Hotspot、知识、Patch、意图、Adapter
 或预算都会改变身份。重试使用相同 Request/Plan，不允许悄悄扩大输入或预算。
 
@@ -103,6 +147,10 @@ Proposal 到达时先标记为 `pending`，不能用并发完成顺序决定保�
 
 生成预算账本与 Round Budget 使用不同表、不同 Contract 和不同 idempotency key。数据库约束
 永久禁止 HCU、Measurement、Formal Intake 和自动发布字段被打开。
+
+`GeneratorAttempt.actual` 不能由 A 或 C 自报：成功执行按 B Receipt 的墙钟、输出字节和 token
+结算；失败且没有可接受 Batch 时按 reservation 保守结算。`GenerationBudgetLedgerEntry` 与 Run
+汇总必须与 Attempt 一致，D 还会再次用 Receipt 复算成功执行的实际用量。
 
 ## A/B/C/D 分工
 

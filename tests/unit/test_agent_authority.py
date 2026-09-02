@@ -67,6 +67,7 @@ def _start_request() -> GenerationRunStartRequest:
             {
                 "generator_id": "agent-a",
                 "adapter_profile": "m2b-agent-a-v1",
+                "generator_artifact_hash": _hash("a"),
                 "max_attempts": 2,
                 "max_proposals": 2,
                 "timeout_seconds": 10,
@@ -76,6 +77,7 @@ def _start_request() -> GenerationRunStartRequest:
             {
                 "generator_id": "agent-b",
                 "adapter_profile": "m2b-agent-b-v1",
+                "generator_artifact_hash": _hash("b"),
                 "max_attempts": 1,
                 "max_proposals": 2,
                 "timeout_seconds": 10,

@@ -8,11 +8,14 @@ from datetime import datetime, timezone
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from pydantic import ValidationError
+
 from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
     candidate_proposal_hash,
 )
+from hcuopt.contracts.agent_runner_v1 import RunnerExecutionReceipt
 from hcuopt.contracts.agent_v1 import (
     CandidateProposalBatch,
     CandidateProposalRef,
@@ -79,6 +82,103 @@ def actual_usage_for(batch: CandidateProposalBatch) -> GenerationBudgetUsage:
         tokens=batch.token_count,
         proposals=len(batch.proposals),
     )
+
+
+def actual_usage_for_runner_receipt(
+    receipt: RunnerExecutionReceipt,
+    *,
+    proposal_count: int,
+) -> GenerationBudgetUsage:
+    execution = receipt.execution
+    if execution.tokens_consumed is None:
+        raise AgentAuthorityError(
+            "runner_usage_missing",
+            "Runner Receipt does not contain authoritative token usage",
+        )
+    return GenerationBudgetUsage(
+        attempts=execution.attempts_consumed,
+        wall_milliseconds=math.ceil(execution.wall_seconds_consumed * 1000),
+        output_bytes=execution.total_output_bytes_consumed,
+        tokens=execution.tokens_consumed,
+        proposals=proposal_count,
+    )
+
+
+def validate_runner_receipt(
+    run: GenerationRun,
+    attempt: GeneratorAttempt,
+    generator: GeneratorPlanEntry,
+    receipt: RunnerExecutionReceipt,
+    batch: CandidateProposalBatch | None,
+) -> None:
+    try:
+        receipt = RunnerExecutionReceipt.model_validate(receipt.model_dump(mode="json"))
+    except ValidationError as error:
+        raise AgentAuthorityError(
+            "runner_receipt_contract_invalid",
+            "Runner Receipt does not satisfy the shared execution Contract",
+        ) from error
+    execution = receipt.execution
+    authoritative_request_hash = candidate_generation_request_hash(run.request)
+    if run.request_hash != authoritative_request_hash:
+        raise AgentAuthorityError(
+            "generation_request_authority_mismatch",
+            "stored Generation Request does not match its authoritative Hash",
+        )
+    if (
+        execution.attempt_id != attempt.attempt_id
+        or execution.generation_run_id != run.generation_run_id
+        or execution.request_id != run.request.request_id
+        or execution.request_hash != authoritative_request_hash
+        or execution.plan_id != run.plan.plan_id
+        or execution.generator_id != generator.generator_id
+        or execution.attempt_number != attempt.attempt_number
+    ):
+        raise AgentAuthorityError(
+            "runner_receipt_authority_mismatch",
+            "Runner Receipt does not bind the claimed Generation Attempt",
+        )
+    if execution.generator_artifact_hash != generator.generator_artifact_hash:
+        raise AgentAuthorityError(
+            "runner_artifact_mismatch",
+            "Runner Receipt used a different immutable Generator Artifact",
+        )
+    if execution.runner_provenance.capability != "agent_runner":
+        raise AgentAuthorityError(
+            "runner_provenance_invalid",
+            "Runner Receipt does not contain Agent Runner provenance",
+        )
+    if batch is None:
+        if execution.status == "succeeded":
+            raise AgentAuthorityError(
+                "runner_batch_missing",
+                "successful Runner Receipt requires its Proposal Batch",
+            )
+        return
+    if execution.cleanup_status != "verified":
+        raise AgentAuthorityError(
+            "runner_cleanup_unverified",
+            "Proposal Batch cannot settle before Runner cleanup is verified",
+        )
+    if execution.status != "succeeded":
+        raise AgentAuthorityError(
+            "runner_batch_status_mismatch",
+            "unsuccessful Runner Receipt cannot bind a Proposal Batch",
+        )
+    if (
+        receipt.raw_output_uri != batch.raw_output_uri
+        or receipt.raw_output_hash != batch.raw_output_hash
+        or receipt.raw_output_bytes != batch.output_bytes
+    ):
+        raise AgentAuthorityError(
+            "runner_raw_output_mismatch",
+            "Proposal Batch does not bind the exact Runner raw output",
+        )
+    if execution.synthetic != batch.synthetic:
+        raise AgentAuthorityError(
+            "runner_synthetic_mismatch",
+            "Runner Receipt and Proposal Batch synthetic authorities differ",
+        )
 
 
 def usage_is_within_reservation(
