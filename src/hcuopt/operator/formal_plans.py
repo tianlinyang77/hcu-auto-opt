@@ -55,6 +55,16 @@ class FormalOperatorAuthorityRepository(Protocol):
     ) -> None: ...
 
 
+class FormalCandidateFamilyManifestStore(Protocol):
+    """Deployment-owned lookup; callers supply only an authorized content Hash."""
+
+    def read_manifest(
+        self,
+        *,
+        source_family_hash: str,
+    ) -> BusinessCandidateFamilyManifest: ...
+
+
 def _sha256(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
@@ -80,6 +90,7 @@ class FormalOperatorPlanCompiler:
         service_identity: OperatorServiceIdentity,
         *,
         authorization: FormalProfileWindowAuthorization,
+        candidate_family_manifest_store: FormalCandidateFamilyManifestStore,
         candidate_family_verifier: BusinessCandidateFamilyVerifier,
         ttl: timedelta = timedelta(minutes=30),
         clock: Callable[[], datetime] | None = None,
@@ -97,6 +108,7 @@ class FormalOperatorPlanCompiler:
         self.profiles = profiles
         self.service_identity = service_identity
         self.authorization = authorization
+        self.candidate_family_manifest_store = candidate_family_manifest_store
         self.candidate_family_verifier = candidate_family_verifier
         self.ttl = ttl
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -192,74 +204,93 @@ class FormalOperatorPlanCompiler:
                 )
             )
 
-        store_matches = (
-            target.candidate_package_store_id
-            == self.candidate_family_verifier.store_id
-            == request.candidate_family.source_package_store_id
-            and target.candidate_package_store_hash
-            == self.candidate_family_verifier.store_hash
-            == request.candidate_family.source_package_store_hash
-        )
-        if not store_matches:
+        candidate_family: BusinessCandidateFamilyManifest | None = None
+        try:
+            candidate_family = self.candidate_family_manifest_store.read_manifest(
+                source_family_hash=self.authorization.source_family_hash
+            )
+        except (OSError, Conflict, NotFound, ValueError):
             checks.append(
                 self._block(
-                    "formal_candidate_store_drift",
+                    "formal_candidate_family_unavailable",
                     "candidate_family",
-                    "Formal Profile, Family Manifest, and deployment Store do not match.",
-                    retryable=False,
-                    action_code="publish_new_formal_authorization",
+                    "The authorized business Candidate Family could not be read by Hash.",
+                    retryable=True,
+                    action_code="restore_candidate_family_manifest",
                 )
             )
 
         authority_snapshot: FormalOperatorAuthoritySnapshot | None = None
-        try:
-            authority_snapshot = authority_repository.resolve_formal_operator_authority(
-                target,
-                workload,
-                request.candidate_family,
-            )
-        except (Conflict, NotFound, ValueError):
-            checks.append(
-                self._block(
-                    "formal_operator_authority_unavailable",
-                    "authority",
-                    "The exact Formal Target, Stage 0, Baseline, Workload, and "
-                    "Hotspot are unavailable.",
-                    retryable=True,
-                    action_code="refresh_formal_authority",
+        if candidate_family is not None:
+            try:
+                authority_snapshot = authority_repository.resolve_formal_operator_authority(
+                    target,
+                    workload,
+                    candidate_family,
                 )
-            )
-        else:
-            if not self._authority_matches_inputs(
-                authority_snapshot,
-                request.candidate_family,
-                target,
-                workload,
-            ):
-                authority_snapshot = None
+            except (Conflict, NotFound, ValueError):
                 checks.append(
                     self._block(
-                        "formal_operator_authority_drift",
+                        "formal_operator_authority_unavailable",
                         "authority",
-                        "Repository Authority drifted from the frozen Candidate Family.",
-                        retryable=False,
-                        action_code="freeze_new_candidate_family",
+                        "The exact Formal Target, Stage 0, Baseline, Workload, and "
+                        "Hotspot are unavailable.",
+                        retryable=True,
+                        action_code="refresh_formal_authority",
                     )
                 )
             else:
-                checks.append(
-                    self._pass(
-                        "formal_operator_authority_resolved",
-                        "authority",
-                        "Formal Target, Stage 0, Baseline, Workload, and Hotspot were reread.",
+                if not self._authority_matches_inputs(
+                    authority_snapshot,
+                    candidate_family,
+                    target,
+                    workload,
+                ):
+                    authority_snapshot = None
+                    checks.append(
+                        self._block(
+                            "formal_operator_authority_drift",
+                            "authority",
+                            "Repository Authority drifted from the frozen Candidate Family.",
+                            retryable=False,
+                            action_code="freeze_new_candidate_family",
+                        )
                     )
-                )
+                else:
+                    checks.append(
+                        self._pass(
+                            "formal_operator_authority_resolved",
+                            "authority",
+                            "Formal Target, Stage 0, Baseline, Workload, and Hotspot "
+                            "were reread.",
+                        )
+                    )
 
         verified_family = None
-        if store_matches:
+        store_matches = False
+        if candidate_family is not None:
+            store_matches = (
+                target.candidate_package_store_id
+                == self.candidate_family_verifier.store_id
+                == candidate_family.source_package_store_id
+                and target.candidate_package_store_hash
+                == self.candidate_family_verifier.store_hash
+                == candidate_family.source_package_store_hash
+            )
+            if not store_matches:
+                checks.append(
+                    self._block(
+                        "formal_candidate_store_drift",
+                        "candidate_family",
+                        "Formal Profile, Family Manifest, and deployment Store do not match.",
+                        retryable=False,
+                        action_code="publish_new_formal_authorization",
+                    )
+                )
+        if candidate_family is not None and store_matches:
             try:
                 verified_family = self.candidate_family_verifier.verify(
-                    request.candidate_family
+                    candidate_family
                 )
             except (OSError, SourceArtifactError, ValueError):
                 checks.append(
@@ -368,8 +399,11 @@ class FormalOperatorPlanCompiler:
             authorized_resource_id=self.authorization.resource_id,
             authorization_window_starts_at=self.authorization.window_starts_at,
             authorization_window_expires_at=self.authorization.window_expires_at,
-            candidate_family=request.candidate_family,
-            source_family_id=request.candidate_family.family_id,
+            authorized_source_family_hash=self.authorization.source_family_hash,
+            candidate_family=candidate_family,
+            source_family_id=(
+                candidate_family.family_id if candidate_family is not None else None
+            ),
             source_family_hash=source_family_hash,
         )
         now = self.clock()
@@ -380,6 +414,15 @@ class FormalOperatorPlanCompiler:
             raise OperatorFormalAuthorizationInvalid(
                 "Formal window expired while the Preview was being compiled"
             )
+        checks.append(
+            self._block(
+                "formal_start_authority_not_bound",
+                "start",
+                "A2a has not bound B execution and D Holdout/Evidence authorities.",
+                retryable=True,
+                action_code="complete_formal_start_authority",
+            )
+        )
         blocked = any(item.status == "block" for item in checks)
         warning_codes = tuple(sorted(item.code for item in checks if item.status == "warn"))
         return FormalRoundPlanPreviewView(
@@ -413,7 +456,6 @@ class FormalOperatorPlanCompiler:
             target_profile=preview.resolved_plan.target_profile,
             workload_profile=preview.resolved_plan.workload_profile,
             measurement_profile=preview.resolved_plan.measurement_profile,
-            candidate_family=preview.resolved_plan.candidate_family,
             max_promoted=preview.resolved_plan.max_promoted,
             idempotency_key=f"revalidate-formal-{preview.preview_id}",
             expected_service_identity=self.service_identity.model_dump(mode="json"),

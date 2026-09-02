@@ -18,15 +18,18 @@ The compiler accepts:
 1. an A1 `OperatorProfileCatalog` created through
    `build_formal_operator_profile_catalog()`;
 2. the exact signed `FormalProfileWindowAuthorization` behind that Catalog;
-3. the deployment-owned `BusinessCandidateFamilyVerifier`;
-4. a `FormalRoundPlanPreviewRequest` carrying exact Profile refs and the frozen C-owned
-   `BusinessCandidateFamilyManifest`;
-5. a `FormalOperatorAuthorityRepository` that rereads the Target, finalized Formal Stage
+3. a deployment-owned `FormalCandidateFamilyManifestStore` that resolves only the signed
+   `source_family_hash` to the frozen C-owned `BusinessCandidateFamilyManifest`;
+4. the deployment-owned `BusinessCandidateFamilyVerifier`;
+5. a `FormalRoundPlanPreviewRequest` carrying exact Profile refs but no Family or Package
+   content;
+6. a `FormalOperatorAuthorityRepository` that rereads the Target, finalized Formal Stage
    0, immutable Baseline Epoch and source, Workload, and business Hotspot.
 
-The request does not contain a client-selected Candidate list. Family members are reread
-from the Candidate Store and sorted canonically by `candidate_id`; the compiler assigns
-contiguous Round ordinals and freezes the resulting mapping in the Plan Hash.
+The request does not contain a client-selected Candidate list or Family Manifest. The
+Manifest is fetched by the authorization Hash, its members are reread from the Candidate
+Store, then sorted canonically by `candidate_id`; the compiler assigns contiguous Round
+ordinals and freezes the resulting mapping in the Plan Hash.
 
 ## Fail-closed checks
 
@@ -55,7 +58,8 @@ This slice does not define B's production Formal Adapter identity, lease/fencing
 receipts, or D's sealed Holdout Plan Authority and production Evidence root. Those inputs
 must be consumed by the later A3 StartIntent only after the B and D contracts are frozen.
 
-`start_allowed=true` therefore means only that the A2a Preview inputs are internally
-consistent. It is not permission to access HCU, execute a Candidate, claim a performance
-result, sign off a Round, or release anything. No nmz36/HCU 7 authorization instance is
-published by this implementation.
+A2a always emits the `formal_start_authority_not_bound` blocking check, so
+`start_allowed=false` even when the resolved Plan itself is complete. A3 may remove that
+interlock only after consuming the separately frozen B and D authorities. No HCU access,
+Candidate execution, performance claim, signoff, release, or concrete resource-window
+authorization is provided by this implementation.

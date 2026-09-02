@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from hcuopt.adapters.business_candidate_family import (
     BusinessCandidateFamilyVerifier,
@@ -297,6 +298,18 @@ class _AuthorityRepository:
             raise Conflict("Candidate already bound")
 
 
+@dataclass
+class _FamilyManifestStore:
+    manifest: BusinessCandidateFamilyManifest | None
+    requested_hashes: list[str]
+
+    def read_manifest(self, *, source_family_hash: str) -> BusinessCandidateFamilyManifest:
+        self.requested_hashes.append(source_family_hash)
+        if self.manifest is None:
+            raise NotFound("missing Candidate Family Manifest")
+        return self.manifest
+
+
 @dataclass(frozen=True)
 class _Fixture:
     family: BusinessCandidateFamilyManifest
@@ -305,6 +318,7 @@ class _Fixture:
     compiler: FormalOperatorPlanCompiler
     request: FormalRoundPlanPreviewRequest
     repository: _AuthorityRepository
+    manifest_store: _FamilyManifestStore
 
 
 def _fixture(
@@ -353,10 +367,12 @@ def _fixture(
         store_id=STORE_ID,
         store_hash=_hash("candidate-store"),
     )
+    manifest_store = _FamilyManifestStore(family, [])
     compiler = FormalOperatorPlanCompiler(
         catalog,
         service_identity,
         authorization=authorization,
+        candidate_family_manifest_store=manifest_store,
         candidate_family_verifier=verifier,
         clock=lambda: NOW,
     )
@@ -403,7 +419,6 @@ def _fixture(
         target_profile=_profile_ref(profiles[0]),
         workload_profile=_profile_ref(profiles[1]),
         measurement_profile=_profile_ref(profiles[2]),
-        candidate_family=family,
         max_promoted=2,
         idempotency_key="formal-plan-preview-test-v1",
         expected_service_identity=service_identity.model_dump(mode="json"),
@@ -416,6 +431,7 @@ def _fixture(
         compiler=compiler,
         request=request,
         repository=repository,
+        manifest_store=manifest_store,
     )
 
 
@@ -430,12 +446,20 @@ def test_formal_compiler_freezes_verified_family_deterministically(tmp_path: Pat
     second = fixture.compiler.compile(fixture.request, fixture.repository)
     revalidated = fixture.compiler.revalidate(first, fixture.repository)
 
-    assert first.start_allowed is True
+    assert first.start_allowed is False
     assert first.synthetic is False
     assert first.automatic_release_allowed is False
     assert first.preview_id == second.preview_id
     assert first.resolved_plan_hash == second.resolved_plan_hash
     assert revalidated.resolved_plan_hash == first.resolved_plan_hash
+    assert "candidate_family" not in fixture.request.model_dump(mode="json")
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        FormalRoundPlanPreviewRequest.model_validate(
+            {
+                **fixture.request.model_dump(mode="json"),
+                "candidate_family": fixture.family.model_dump(mode="json"),
+            }
+        )
     assert first.expires_at == NOW + timedelta(minutes=30)
     assert first.resolved_plan.source_family_hash == business_candidate_source_family_hash(
         fixture.family
@@ -451,7 +475,14 @@ def test_formal_compiler_freezes_verified_family_deterministically(tmp_path: Pat
         SECOND_CANDIDATE_ID,
     ]
     assert fixture.repository.resolve_calls == 3
-    assert all(status == "pass" for status in _check_codes(first).values())
+    assert fixture.manifest_store.requested_hashes == [
+        fixture.authorization.source_family_hash,
+        fixture.authorization.source_family_hash,
+        fixture.authorization.source_family_hash,
+    ]
+    statuses = _check_codes(first)
+    assert statuses.pop("formal_start_authority_not_bound") == "block"
+    assert all(status == "pass" for status in statuses.values())
 
 
 def test_formal_compiler_blocks_family_authority_and_budget_drift(tmp_path: Path) -> None:
@@ -490,6 +521,19 @@ def test_formal_compiler_blocks_family_authority_and_budget_drift(tmp_path: Path
     assert missing_preview.resolved_plan.authority is None
     assert (
         _check_codes(missing_preview)["formal_operator_authority_unavailable"] == "block"
+    )
+
+    missing_family = _fixture(tmp_path / "family-store")
+    missing_family.manifest_store.manifest = None
+    missing_family_preview = missing_family.compiler.compile(
+        missing_family.request, missing_family.repository
+    )
+    assert missing_family_preview.start_allowed is False
+    assert missing_family_preview.resolved_plan.candidate_family is None
+    assert missing_family_preview.resolved_plan.authority is None
+    assert (
+        _check_codes(missing_family_preview)["formal_candidate_family_unavailable"]
+        == "block"
     )
 
 

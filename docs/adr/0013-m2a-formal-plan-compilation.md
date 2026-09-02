@@ -24,14 +24,16 @@ A1 已建立内容寻址的 Formal Profile 窗口授权，但 Profile 被授权�
 `FormalOperatorPlanCompiler`。现有 Scripted Contract、Compiler、StartIntent 和数据库写入口
 保持不变。
 
-Formal 请求不接受客户端自行挑选的 Candidate 列表。它只携带精确 Profile 引用、C 冻结的
-`BusinessCandidateFamilyManifest`、最多晋级数、幂等键、期望服务身份和期望窗口授权 Hash。
+Formal 请求不接受客户端自行挑选的 Candidate 列表，也不携带 Family Manifest 或 Package
+内容。它只携带精确 Profile 引用、最多晋级数、幂等键、期望服务身份和期望窗口授权 Hash。
 
 ### 2. 候选成员与业务 Authority 必须重读
 
-编译器通过部署侧 `BusinessCandidateFamilyVerifier` 重读每个内容寻址 Package，重新计算
-`source_family_hash`，并与签名窗口绑定值比较。成员按 `candidate_id` 规范排序，由系统分配连续
-ordinal；客户端不能改变成员映射。
+编译器先把签名窗口中的 `source_family_hash` 交给部署侧
+`FormalCandidateFamilyManifestStore`，取回 C 冻结的 Manifest；再通过部署侧
+`BusinessCandidateFamilyVerifier` 重读每个内容寻址 Package、重新计算 Family Hash，并与签名
+值比较。成员按 `candidate_id` 规范排序，由系统分配连续 ordinal；客户端不能提交或改变 Family
+内容与成员映射。
 
 `PostgresRepository.resolve_formal_operator_authority()` 按 Family 中的精确 ID 重读 Target、
 finalized Formal Stage 0、冻结的 M1 Baseline/source、Workload 和 business Hotspot，并拒绝
@@ -56,12 +58,13 @@ Preview 的有效期取本地 TTL 与授权窗口剩余时间的较小值。未�
 
 ### 4. Preflight 通过不授予执行权
 
-A2a 的 `start_allowed=true` 只表示当前 Formal Plan 输入内部一致。它不创建 Task/SearchRound，
-不分配 lease，不访问 HCU，不生成 Measurement/Holdout/FWER/Evidence，不签核，也不发布。
+A2a 固定加入 `formal_start_authority_not_bound` 阻塞项，因此即使 Formal Plan 已完整解析，Preview
+仍保持 `start_allowed=false`。它不创建 Task/SearchRound，不分配 lease，不访问 HCU，不生成
+Measurement/Holdout/FWER/Evidence，不签核，也不发布。
 
 B 的 Formal Adapter、lease/fencing/cleanup receipt 与 D 的 sealed Holdout Authority/受保护证据根
-尚未冻结，不能由 A2a 自行发明。它们必须在后续 A3 StartIntent 中作为独立受信输入接入；A4
-再补受控 API/CLI、PostgreSQL 并发和崩溃恢复验证。
+尚未冻结，不能由 A2a 自行发明。它们必须在后续 A3 StartIntent 中作为独立受信输入接入；只有
+全部验证后 A3 才可移除上述阻塞项。A4 再补受控 API/CLI、PostgreSQL 并发和崩溃恢复验证。
 
 ## 影响
 

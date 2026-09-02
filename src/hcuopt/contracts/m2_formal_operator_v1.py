@@ -36,7 +36,6 @@ class FormalRoundPlanPreviewRequest(ContractModel):
     target_profile: OperatorProfileRef
     workload_profile: OperatorProfileRef
     measurement_profile: OperatorProfileRef
-    candidate_family: BusinessCandidateFamilyManifest
     max_promoted: int = Field(ge=1, le=2)
     idempotency_key: str = Field(min_length=8, max_length=300)
     expected_service_identity: OperatorServiceIdentityAssertion
@@ -51,8 +50,6 @@ class FormalRoundPlanPreviewRequest(ContractModel):
         )
         if any(reference.profile_kind != kind for reference, kind in expected_kinds):
             raise ValueError("Formal Operator Profile refs must use their canonical kinds")
-        if self.max_promoted > len(self.candidate_family.members):
-            raise ValueError("max_promoted cannot exceed the Formal Candidate Family size")
         return self
 
 
@@ -84,8 +81,11 @@ class FormalResolvedRoundPlan(ResolvedRoundPlan):
     authorized_resource_id: str = Field(min_length=1, max_length=200)
     authorization_window_starts_at: datetime
     authorization_window_expires_at: datetime
-    candidate_family: BusinessCandidateFamilyManifest
-    source_family_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,199}$")
+    authorized_source_family_hash: str = Field(pattern=SHA256_PATTERN)
+    candidate_family: BusinessCandidateFamilyManifest | None = None
+    source_family_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9._-]{2,199}$"
+    )
     source_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     project_mode: Literal[ProjectMode.DEGRADED_MANUAL_INTAKE] = (
         ProjectMode.DEGRADED_MANUAL_INTAKE
@@ -104,7 +104,12 @@ class FormalResolvedRoundPlan(ResolvedRoundPlan):
             raise ValueError("Formal authorization window must be timezone-aware")
         if self.authorization_window_expires_at <= self.authorization_window_starts_at:
             raise ValueError("Formal authorization window is invalid")
-        if self.source_family_id != self.candidate_family.family_id:
+        if (self.candidate_family is None) != (self.source_family_id is None):
+            raise ValueError("Formal source Family Manifest and identity resolve atomically")
+        if (
+            self.candidate_family is not None
+            and self.source_family_id != self.candidate_family.family_id
+        ):
             raise ValueError("Formal source Family identity must match its Manifest")
         resolved = bool(self.candidates)
         if resolved != (self.source_family_hash is not None):
@@ -122,7 +127,7 @@ class FormalRoundPlanPreviewView(ReadModel):
     resolved_plan_hash: str = Field(pattern=SHA256_PATTERN)
     resolved_plan: FormalResolvedRoundPlan
     checks: tuple[PreflightCheckResult, ...] = Field(min_length=1)
-    start_allowed: bool
+    start_allowed: Literal[False] = False
     required_ack_codes: tuple[str, ...] = ()
     expires_at: datetime
     service_identity: OperatorServiceIdentity
@@ -140,6 +145,11 @@ class FormalRoundPlanPreviewView(ReadModel):
             raise ValueError("start_allowed must be false exactly when Formal Preflight is blocked")
         if len(check_codes) != len(set(check_codes)):
             raise ValueError("Formal Preflight check codes must be unique")
+        if not any(
+            item.code == "formal_start_authority_not_bound" and item.status == "block"
+            for item in self.checks
+        ):
+            raise ValueError("A2a Formal Preview must keep Start Authority blocked")
         if self.required_ack_codes != warning_codes:
             raise ValueError("required_ack_codes must equal canonical warning codes")
         if self.expires_at <= self.created_at:
@@ -149,6 +159,11 @@ class FormalRoundPlanPreviewView(ReadModel):
             != self.formal_authorization.authorization_hash
         ):
             raise ValueError("Formal Preview and authorization Hash must match")
+        if (
+            self.resolved_plan.authorized_source_family_hash
+            != self.formal_authorization.source_family_hash
+        ):
+            raise ValueError("Formal Plan must carry the authorized source Family Hash")
         plan_window = (
             self.resolved_plan.authorized_host_id,
             self.resolved_plan.authorized_resource_id,
@@ -176,6 +191,7 @@ class FormalRoundPlanPreviewView(ReadModel):
             or not self.resolved_plan.candidates
             or self.resolved_plan.candidate_input_set_hash is None
             or self.resolved_plan.source_family_hash is None
+            or self.resolved_plan.candidate_family is None
         ):
             raise ValueError("startable Formal Preview requires fully resolved immutable inputs")
         if self.start_allowed and (

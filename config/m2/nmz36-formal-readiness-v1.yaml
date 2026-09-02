@@ -144,15 +144,15 @@ gates:
         digest_mode: text_lf
         evidence_type: scripted_only_plan_compiler
       - path: src/hcuopt/contracts/m2_formal_operator_v1.py
-        sha256: sha256:cb15ce8da24503f30d4e83e4a771d822671c340211392ae8f3a0afc0f8309dbd
+        sha256: sha256:f86906a808f0a2537101d12b2a091ca9d4706058731192a41f779f4bcfc7affb
         digest_mode: text_lf
         evidence_type: isolated_formal_plan_contract
       - path: src/hcuopt/operator/formal_plans.py
-        sha256: sha256:085db54a674a29c79dbb81c88a21d33d76ad33556270cb5dcb1adb85d876d63c
+        sha256: sha256:9a5d3ca3ad81227f8f9f877e91cb46a2b2f901484676f3fbd163ac499bbd0738
         digest_mode: text_lf
         evidence_type: formal_plan_compiler_and_revalidation
       - path: tests/unit/test_formal_operator_plans.py
-        sha256: sha256:afb7861398ea7a433dfd713f64368aaf26e4c0326b7f8ae3d0bd43ca2e001ab7
+        sha256: sha256:c83425c2d5c01df38dcd9e144ee74fbd2e4fcb6f83cc7de9cbe603f9fd84bce7
         digest_mode: text_lf
         evidence_type: formal_plan_compiler_negative_tests
   - code: formal_start_intent
