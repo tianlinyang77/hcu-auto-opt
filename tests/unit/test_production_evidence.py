@@ -179,7 +179,12 @@ def test_reloads_content_addressed_evidence_and_is_order_independent(tmp_path: P
     )
 
     assert first == second
-    assert first.status == "verified"
+    assert first.status == "objects_verified"
+    assert first.accepted_for_formal_window is False
+    assert first.acceptance_blocker_codes == (
+        "recursive_semantic_verification_not_bound",
+        "allowlisted_signature_verification_not_bound",
+    )
     assert first.hcu_accessed is False
     assert first.automatic_release_allowed is False
 
@@ -223,10 +228,75 @@ def test_rejects_role_substitution_and_cross_stage_reuse(tmp_path: Path) -> None
         )
     assert wrong_role.value.code == "formal_evidence_role_mismatch"
 
-    reused = refs[0].model_copy(update={"evidence_class": "holdout_reveal"})
+    reused = refs[0].model_copy(
+        update={
+            "evidence_class": "holdout_reveal",
+            "producer_role": "holdout_plan_authority",
+            "producer_id": context.holdout_plan_authority_id,
+            "producer_hash": context.holdout_plan_authority_hash,
+        }
+    )
     with pytest.raises(ProductionEvidenceError) as cross_stage:
         verifier.verify(context=context, authorities=authorities, references=(refs[0], reused))
     assert cross_stage.value.code == "formal_evidence_cross_stage_reuse"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="production reader requires POSIX openat")
+def test_holdout_reveal_requires_context_bound_d_authority(tmp_path: Path) -> None:
+    root, verifier_identity, authorities, context, refs = _fixture(tmp_path / "evidence")
+    verifier = ProductionEvidenceVerifier(
+        tmp_path / "evidence", root=root, verifier=verifier_identity
+    )
+    uri, digest, byte_count = _publish(tmp_path / "evidence", {"reveal": "receipt"})
+    reveal = ProductionFormalEvidenceRef(
+        evidence_class="holdout_reveal",
+        uri=uri,
+        sha256=digest,
+        byte_count=byte_count,
+        producer_role="holdout_plan_authority",
+        producer_id=context.holdout_plan_authority_id,
+        producer_hash=context.holdout_plan_authority_hash,
+        created_at=NOW,
+    )
+
+    result = verifier.verify(
+        context=context,
+        authorities=authorities,
+        references=(*refs, reveal),
+    )
+    assert result.status == "objects_verified"
+
+    control_plane_reveal = reveal.model_copy(
+        update={
+            "producer_role": "control_plane",
+            "producer_id": authorities.control_plane.producer_id,
+            "producer_hash": authorities.control_plane.producer_hash,
+        }
+    )
+    with pytest.raises(ProductionEvidenceError) as rejected:
+        verifier.verify(
+            context=context,
+            authorities=authorities,
+            references=(*refs, control_plane_reveal),
+        )
+    assert rejected.value.code == "formal_evidence_role_mismatch"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="production reader requires POSIX openat")
+def test_holdout_authority_must_not_alias_control_plane(tmp_path: Path) -> None:
+    root, verifier_identity, authorities, context, refs = _fixture(tmp_path / "evidence")
+    aliased = context.model_copy(
+        update={
+            "holdout_plan_authority_id": authorities.control_plane.producer_id,
+            "holdout_plan_authority_hash": authorities.control_plane.producer_hash,
+        }
+    )
+    verifier = ProductionEvidenceVerifier(
+        tmp_path / "evidence", root=root, verifier=verifier_identity
+    )
+    with pytest.raises(ProductionEvidenceError) as rejected:
+        verifier.verify(context=aliased, authorities=authorities, references=refs)
+    assert rejected.value.code == "holdout_plan_authority_not_separated"
 
 
 def test_rejects_producer_verifier_identity_collision(tmp_path: Path) -> None:
@@ -274,42 +344,49 @@ def test_context_and_verifier_identity_drift_fail_closed(tmp_path: Path) -> None
 def test_d_review_record_requires_verified_evidence_or_explicit_blockers(tmp_path: Path) -> None:
     root, verifier_identity, _authorities, context, refs = _fixture(tmp_path / "evidence")
     summary = refs[0]
-    content = FormalEvidenceAcceptanceReviewContent(
-        review_id="m2a-d-review-0001",
-        decision="accepted_for_formal_window",
-        reason="All required Formal evidence was independently re-read and verified.",
-        readiness_audit_id="nmz36-formal-readiness-v2",
-        readiness_audit_base_commit="2" * 40,
-        readiness_manifest_hash=_fixed("3"),
-        readiness_report_hash=_fixed("4"),
-        authority_context_id=context.authority_context_id,
-        authority_context_hash=context.context_hash,
-        target_lock_hash=_fixed("5"),
-        terminal_path="zero_promotion",
-        evidence_root=root,
-        verifier=verifier_identity,
-        verification_input_digest=_fixed("6"),
-        verified_evidence_count=len(refs),
-        verification_summary_uri=summary.uri,
-        verification_summary_hash=summary.sha256,
-        reviewed_at=NOW,
-    )
+    base = {
+        "review_id": "m2a-d-review-0001",
+        "decision": "blocked",
+        "blocker_codes": (
+            "allowlisted_signature_verification_not_bound",
+            "recursive_semantic_verification_not_bound",
+        ),
+        "reason": "Recursive semantic and signature verification are not bound yet.",
+        "readiness_audit_id": "nmz36-formal-readiness-v2",
+        "readiness_audit_base_commit": "2" * 40,
+        "readiness_manifest_hash": _fixed("3"),
+        "readiness_report_hash": _fixed("4"),
+        "authority_context_id": context.authority_context_id,
+        "authority_context_hash": context.context_hash,
+        "target_lock_hash": _fixed("5"),
+        "terminal_path": "zero_promotion",
+        "evidence_root": root,
+        "verifier": verifier_identity,
+        "verification_input_digest": _fixed("6"),
+        "verified_evidence_count": len(refs),
+        "verification_summary_uri": summary.uri,
+        "verification_summary_hash": summary.sha256,
+        "reviewed_at": NOW,
+    }
+    content = FormalEvidenceAcceptanceReviewContent(**base)
     review = publish_formal_evidence_acceptance_review(content, signature="test-signature")
-    assert review.decision == "accepted_for_formal_window"
+    assert review.decision == "blocked"
     assert review.owner_window_authorization == "not_granted"
 
-    with pytest.raises(ValidationError, match="cannot contain blockers or be empty"):
+    with pytest.raises(ValidationError, match="accepted_for_formal_window is unavailable"):
         FormalEvidenceAcceptanceReviewContent.model_validate(
             {
-                **content.model_dump(mode="json"),
-                "verified_evidence_count": 0,
+                **base,
+                "decision": "accepted_for_formal_window",
+                "blocker_codes": (),
             }
         )
     with pytest.raises(ValidationError, match="requires explicit blocker"):
         FormalEvidenceAcceptanceReviewContent.model_validate(
             {
-                **content.model_dump(mode="json"),
+                **base,
                 "decision": "blocked",
+                "blocker_codes": (),
             }
         )
 

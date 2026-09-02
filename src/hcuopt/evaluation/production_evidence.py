@@ -42,7 +42,21 @@ class VerifiedProductionEvidence(ContractModel):
     verifier_identity_hash: str
     verified_objects: tuple[ProductionFormalEvidenceRef, ...]
     input_digest: str
-    status: Literal["verified"] = "verified"
+    status: Literal["objects_verified"] = "objects_verified"
+    verification_scope: Literal["content_addressing_and_role_binding"] = (
+        "content_addressing_and_role_binding"
+    )
+    acceptance_blocker_codes: tuple[
+        Literal[
+            "recursive_semantic_verification_not_bound",
+            "allowlisted_signature_verification_not_bound",
+        ],
+        ...,
+    ] = (
+        "recursive_semantic_verification_not_bound",
+        "allowlisted_signature_verification_not_bound",
+    )
+    accepted_for_formal_window: Literal[False] = False
     hcu_accessed: Literal[False] = False
     automatic_release_allowed: Literal[False] = False
 
@@ -52,7 +66,7 @@ _EXPECTED_ROLE = {
     "search_plan": "control_plane",
     "search_measurement": "measurement_producer",
     "search_cleanup": "measurement_producer",
-    "holdout_reveal": "control_plane",
+    "holdout_reveal": "holdout_plan_authority",
     "holdout_measurement": "measurement_producer",
     "holdout_cleanup": "measurement_producer",
     "source_family": "source_artifact_producer",
@@ -119,6 +133,7 @@ class ProductionEvidenceVerifier:
                 "formal_verifier_identity_drift",
                 "runtime Formal Verifier differs from the frozen authority set",
             )
+        self._require_holdout_authority_separation(context, authorities)
         self._read_content_addressed(
             self.verifier.identity_evidence_uri,
             self.verifier.identity_evidence_hash,
@@ -149,7 +164,7 @@ class ProductionEvidenceVerifier:
                     "formal_evidence_identity_reused", "Formal Evidence URI is reused"
                 )
             seen_uris.add(reference.uri)
-            self._verify_role(reference, authorities)
+            self._verify_role(reference, authorities, context)
             encoded = self._read_content_addressed(reference.uri, reference.sha256)
             if len(encoded) != reference.byte_count:
                 raise ProductionEvidenceError(
@@ -199,6 +214,7 @@ class ProductionEvidenceVerifier:
         self,
         reference: ProductionFormalEvidenceRef,
         authorities: FormalEvidenceAuthoritySet,
+        context: FormalAuthorityContextDescriptor,
     ) -> None:
         expected_role = _EXPECTED_ROLE[reference.evidence_class]
         if reference.producer_role != expected_role:
@@ -206,7 +222,12 @@ class ProductionEvidenceVerifier:
                 "formal_evidence_role_mismatch",
                 f"{reference.evidence_class} Evidence is signed by the wrong role",
             )
-        if expected_role == "independent_verifier":
+        if expected_role == "holdout_plan_authority":
+            expected_identity = (
+                context.holdout_plan_authority_id,
+                context.holdout_plan_authority_hash,
+            )
+        elif expected_role == "independent_verifier":
             expected_identity = (
                 self.verifier.verifier_id,
                 self.verifier.identity_hash,
@@ -222,6 +243,34 @@ class ProductionEvidenceVerifier:
             raise ProductionEvidenceError(
                 "formal_evidence_producer_mismatch",
                 "Formal Evidence producer identity drifted",
+            )
+
+    def _require_holdout_authority_separation(
+        self,
+        context: FormalAuthorityContextDescriptor,
+        authorities: FormalEvidenceAuthoritySet,
+    ) -> None:
+        other_ids = {
+            authorities.control_plane.producer_id,
+            authorities.measurement_producer.producer_id,
+            authorities.source_artifact_producer.producer_id,
+            authorities.project_owner.producer_id,
+            self.verifier.verifier_id,
+        }
+        other_hashes = {
+            authorities.control_plane.producer_hash,
+            authorities.measurement_producer.producer_hash,
+            authorities.source_artifact_producer.producer_hash,
+            authorities.project_owner.producer_hash,
+            self.verifier.identity_hash,
+        }
+        if (
+            context.holdout_plan_authority_id in other_ids
+            or context.holdout_plan_authority_hash in other_hashes
+        ):
+            raise ProductionEvidenceError(
+                "holdout_plan_authority_not_separated",
+                "Holdout Plan Authority must be role-separated from every other Formal authority",
             )
 
     def _read_content_addressed(self, uri: str, expected_hash: str) -> bytes:

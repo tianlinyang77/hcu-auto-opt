@@ -20,6 +20,7 @@ FORMAL_EVIDENCE_ACCEPTANCE_REVIEW_SCHEMA_VERSION = "m2a-formal-evidence-acceptan
 
 FormalEvidenceProducerRole = Literal[
     "control_plane",
+    "holdout_plan_authority",
     "measurement_producer",
     "source_artifact_producer",
     "independent_verifier",
@@ -254,8 +255,10 @@ class FormalEvidenceAcceptanceReviewContent(_FrozenAcceptanceModel):
         if self.reviewed_at.tzinfo is None or self.reviewed_at.utcoffset() is None:
             raise ValueError("Formal acceptance review time must be timezone-aware")
         if self.decision == "accepted_for_formal_window":
-            if self.blocker_codes or self.verified_evidence_count < 1:
-                raise ValueError("accepted Formal evidence cannot contain blockers or be empty")
+            raise ValueError(
+                "accepted_for_formal_window is unavailable until recursive semantic "
+                "verification and allowlisted signature verification are bound"
+            )
         elif not self.blocker_codes:
             raise ValueError("blocked Formal evidence requires explicit blocker codes")
         return self

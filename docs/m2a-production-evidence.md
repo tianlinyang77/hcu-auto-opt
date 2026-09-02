@@ -28,10 +28,11 @@ Context must bind the resulting identity Hash and the exact Evidence Root Hash.
 
 The authority set keeps these principals distinct:
 
-- A: control-plane Context, plans and reveal authority;
+- A: control-plane Context and non-secret Search orchestration;
 - B: Search/Holdout measurements and cleanup receipts;
 - C: Source and Artifact Family evidence;
-- D: correctness, Barrier, FWER and final EvidenceBundle verification;
+- D: Holdout Plan/Reveal authority, correctness, Barrier, FWER and final
+  EvidenceBundle verification;
 - project owner: human Signoff and exact window decision.
 
 IDs and identity Hashes must be unique across roles. Evidence with a substituted
@@ -40,12 +41,17 @@ different Formal stages.
 
 ## D acceptance record
 
-The versioned D review record can state only `accepted_for_formal_window` or
-`blocked`. Acceptance requires non-empty verified evidence and no blockers;
-blocked requires explicit, stable blocker codes. The record binds readiness,
-Target Lock, Formal Authority Context, terminal path, Evidence Root, D Verifier,
-verification input digest and summary object. Its signed Hash is evidence for the
-later readiness audit, not project-owner window authorization.
+The versioned D review record reserves `accepted_for_formal_window` for the later
+recursive verifier, but this first slice can publish only `blocked` with explicit,
+stable blocker codes. Re-reading content-addressed objects and checking their
+declared producer roles does not prove that their embedded Round, Context, Family,
+Plan, Barrier, FWER and EvidenceBundle bindings agree. Acceptance remains disabled
+until those semantic checks and an allowlisted signature verifier are connected.
+
+The blocked record still binds readiness, Target Lock, Formal Authority Context,
+terminal path, Evidence Root, D Verifier, verification input digest and summary
+object. Its signed Hash is evidence for the later readiness audit, not project-owner
+window authorization.
 
 `automatic_release_allowed=false` and `hcu_accessed=false` are permanent in this
 slice.
