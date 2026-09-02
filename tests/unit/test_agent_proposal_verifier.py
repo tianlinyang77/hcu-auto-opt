@@ -26,6 +26,7 @@ from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionRecord,
     RunnerProvenance,
     runner_execution_receipt_id_for,
+    runner_provenance_identity_hash,
 )
 from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
@@ -251,7 +252,14 @@ def _terminal_attempt(
         adapter_version=runner_adapter.adapter_version,
         implementation_kind=runner_adapter.implementation_kind,
         source_commit=runner_adapter.source_commit,
-        identity_hash=_sha(canonical_json_bytes(runner_adapter.model_dump(mode="json"))),
+        identity_hash=runner_provenance_identity_hash(
+            profile=runner_adapter.profile,
+            capability=runner_adapter.capability,
+            adapter_name=runner_adapter.adapter_name,
+            adapter_version=runner_adapter.adapter_version,
+            implementation_kind=runner_adapter.implementation_kind,
+            source_commit=runner_adapter.source_commit,
+        ),
     )
     record = RunnerExecutionRecord(
         attempt_id=attempt_id,
@@ -1108,7 +1116,15 @@ def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) ->
     receipt_path = tmp_path / "bad-runner" / "receipt.json"
     receipt = json.loads(receipt_path.read_text("utf-8"))
     receipt["execution"]["runner_provenance"]["profile"] = "tampered-runner-profile"
-    receipt["execution"]["runner_provenance"]["identity_hash"] = _fixed_hash("f")
+    runner_provenance = receipt["execution"]["runner_provenance"]
+    runner_provenance["identity_hash"] = runner_provenance_identity_hash(
+        profile=runner_provenance["profile"],
+        capability=runner_provenance["capability"],
+        adapter_name=runner_provenance["adapter_name"],
+        adapter_version=runner_provenance["adapter_version"],
+        implementation_kind=runner_provenance["implementation_kind"],
+        source_commit=runner_provenance["source_commit"],
+    )
     receipt_ref = _write(receipt_path, receipt)
     context = _replace_status_attempt(
         tmp_path / "bad-runner",
@@ -1134,6 +1150,25 @@ def test_distinct_runner_and_generator_provenance_is_required(tmp_path: Path) ->
     with pytest.raises(AgentProposalEvidenceError) as generator_error:
         verifier.verify(context)
     assert generator_error.value.code == "batch_provenance_invalid"
+
+
+def test_runner_provenance_identity_hash_is_independently_recomputed(tmp_path: Path) -> None:
+    context, verifier = _build(tmp_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt = json.loads(receipt_path.read_text("utf-8"))
+    receipt["execution"]["runner_provenance"]["identity_hash"] = _fixed_hash("f")
+    receipt_ref = _write(receipt_path, receipt)
+    context = _replace_status_attempt(
+        tmp_path,
+        context,
+        0,
+        runner_receipt_hash=receipt_ref["content_hash"],
+    )
+
+    with pytest.raises(AgentProposalEvidenceError) as raised:
+        verifier.verify(context)
+
+    assert raised.value.code == "evidence_schema_invalid"
 
 
 def test_attempt_batch_status_and_raw_output_binding(tmp_path: Path) -> None:

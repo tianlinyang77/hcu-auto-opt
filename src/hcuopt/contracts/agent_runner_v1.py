@@ -35,6 +35,28 @@ def _canonical_json_bytes(value: object) -> bytes:
     ) + "\n").encode("utf-8")
 
 
+def runner_provenance_identity_hash(
+    *,
+    profile: str,
+    capability: str,
+    adapter_name: str,
+    adapter_version: str,
+    implementation_kind: str,
+    source_commit: str | None,
+) -> str:
+    """Hash the complete stable identity of a Runner adapter."""
+
+    payload = {
+        "adapter_name": adapter_name,
+        "adapter_version": adapter_version,
+        "capability": capability,
+        "implementation_kind": implementation_kind,
+        "profile": profile,
+        "source_commit": source_commit,
+    }
+    return "sha256:" + hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
 class RunnerProvenance(ContractModel):
     profile: str = Field(min_length=1, max_length=200)
     capability: Literal["agent_runner"] = "agent_runner"
@@ -43,6 +65,20 @@ class RunnerProvenance(ContractModel):
     implementation_kind: Literal["real", "fake"]
     source_commit: str | None = Field(default=None, min_length=1, max_length=200)
     identity_hash: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def require_reproducible_identity(self) -> RunnerProvenance:
+        expected = runner_provenance_identity_hash(
+            profile=self.profile,
+            capability=self.capability,
+            adapter_name=self.adapter_name,
+            adapter_version=self.adapter_version,
+            implementation_kind=self.implementation_kind,
+            source_commit=self.source_commit,
+        )
+        if self.identity_hash != expected:
+            raise ValueError("Runner Provenance identity Hash does not match its fields")
+        return self
 
 
 class RunnerExecutionRecord(ContractModel):
@@ -98,10 +134,11 @@ class RunnerExecutionRecord(ContractModel):
             raise ValueError("Runner cleanup cannot be verified after process cleanup failed")
         if self.cleanup_status == "failed" and self.status != "cleanup_failed":
             raise ValueError("failed Runner cleanup requires cleanup_failed status")
-        if self.status == "succeeded" and (
-            self.cleanup_status != "verified" or self.tokens_consumed is None
-        ):
-            raise ValueError("successful Runner execution requires usage and verified cleanup")
+        if self.status == "succeeded":
+            if self.exit_code != 0:
+                raise ValueError("successful Runner execution requires exit_code 0")
+            if self.cleanup_status != "verified" or self.tokens_consumed is None:
+                raise ValueError("successful Runner execution requires usage and verified cleanup")
         if tuple(sorted(self.environment_names)) != self.environment_names:
             raise ValueError("Runner environment names must be sorted")
         if len(set(self.environment_names)) != len(self.environment_names):
@@ -174,6 +211,7 @@ __all__ = [
     "RunnerExecutionRecord",
     "RunnerExecutionStatus",
     "RunnerProvenance",
+    "runner_provenance_identity_hash",
     "runner_execution_receipt_hash",
     "runner_execution_receipt_id_for",
 ]

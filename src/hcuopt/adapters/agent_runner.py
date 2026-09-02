@@ -25,6 +25,7 @@ from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionRecord,
     RunnerExecutionStatus,
     RunnerProvenance,
+    runner_provenance_identity_hash,
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 
@@ -280,7 +281,6 @@ def _input_manifest_hash(request: AgentRunRequest) -> str:
 
 
 def _freeze_provenance(provenance: AdapterProvenance) -> RunnerProvenance:
-    payload = provenance.model_dump(mode="json")
     return RunnerProvenance(
         profile=provenance.profile,
         capability=provenance.capability,
@@ -288,7 +288,14 @@ def _freeze_provenance(provenance: AdapterProvenance) -> RunnerProvenance:
         adapter_version=provenance.adapter_version,
         implementation_kind=provenance.implementation_kind,
         source_commit=provenance.source_commit,
-        identity_hash=_sha256_bytes(_canonical_json_bytes(payload)),
+        identity_hash=runner_provenance_identity_hash(
+            profile=provenance.profile,
+            capability=provenance.capability,
+            adapter_name=provenance.adapter_name,
+            adapter_version=provenance.adapter_version,
+            implementation_kind=provenance.implementation_kind,
+            source_commit=provenance.source_commit,
+        ),
     )
 
 

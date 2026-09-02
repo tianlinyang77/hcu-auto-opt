@@ -8,10 +8,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from hcuopt.adapters.agent_runner import AgentRunResult
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
     RunnerExecutionReceiptRef,
+    RunnerExecutionRecord,
     runner_execution_receipt_hash,
     runner_execution_receipt_id_for,
 )
@@ -77,7 +80,14 @@ class RunnerExecutionReceiptStore:
         self.root = root.resolve()
 
     def publish(self, result: AgentRunResult) -> RunnerExecutionReceiptRef:
-        execution = result.evidence
+        try:
+            execution = RunnerExecutionRecord.model_validate(
+                result.evidence.model_dump(mode="json")
+            )
+        except ValidationError as error:
+            raise SourceArtifactError(
+                "Runner Receipt Store rejected an invalid Execution Record"
+            ) from error
         raw_output_uri = None
         raw_output_hash = None
         raw_output_bytes = 0

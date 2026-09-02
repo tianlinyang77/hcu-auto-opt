@@ -46,7 +46,7 @@
         "adapter_version": "1.0.0",
         "implementation_kind": "real",
         "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
-        "identity_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+        "identity_hash": "sha256:b3fdec586507d04ddcb0d851976300e32278eabd31c0997190abc7a647701ecb"
       },
       "generator_adapter_profile": "m2b-agent-a-v1",
       "generator_artifact_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
@@ -77,7 +77,7 @@
         "adapter_version": "1.0.0",
         "implementation_kind": "real",
         "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
-        "identity_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        "identity_hash": "sha256:b3fdec586507d04ddcb0d851976300e32278eabd31c0997190abc7a647701ecb"
       },
       "generator_adapter_profile": "m2b-agent-a-v1",
       "generator_artifact_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
@@ -115,7 +115,7 @@
         "adapter_version": "1.0.0",
         "implementation_kind": "real",
         "source_commit": "3448f0cfd689bf71118578eb0392f597b4f443ae",
-        "identity_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        "identity_hash": "sha256:b3fdec586507d04ddcb0d851976300e32278eabd31c0997190abc7a647701ecb"
       },
       "generator_adapter_profile": "m2b-agent-b-v1",
       "generator_artifact_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",

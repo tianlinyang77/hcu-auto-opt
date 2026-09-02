@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from pydantic import ValidationError
+
 from hcuopt.agent.identity import (
     apex_generation_plan_hash,
     candidate_generation_request_hash,
@@ -109,6 +111,13 @@ def validate_runner_receipt(
     receipt: RunnerExecutionReceipt,
     batch: CandidateProposalBatch | None,
 ) -> None:
+    try:
+        receipt = RunnerExecutionReceipt.model_validate(receipt.model_dump(mode="json"))
+    except ValidationError as error:
+        raise AgentAuthorityError(
+            "runner_receipt_contract_invalid",
+            "Runner Receipt does not satisfy the shared execution Contract",
+        ) from error
     execution = receipt.execution
     authoritative_request_hash = candidate_generation_request_hash(run.request)
     if run.request_hash != authoritative_request_hash:

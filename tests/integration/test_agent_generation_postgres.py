@@ -39,9 +39,11 @@ from hcuopt.agent.identity import (
     knowledge_snapshot_hash,
 )
 from hcuopt.contracts.agent_runner_v1 import (
+    RunnerExecutionReceipt,
     RunnerExecutionReceiptRef,
     RunnerExecutionRecord,
     RunnerProvenance,
+    runner_provenance_identity_hash,
 )
 from hcuopt.contracts.agent_v1 import (
     ApexGenerationPlan,
@@ -313,7 +315,14 @@ class AgentGenerationPostgresTests(unittest.TestCase):
                 adapter_name="ScriptedRunner",
                 adapter_version="1.0.0",
                 implementation_kind="real" if real_generator else "fake",
-                identity_hash=_hash("d"),
+                identity_hash=runner_provenance_identity_hash(
+                    profile="m2b-postgres-runner-v1",
+                    capability="agent_runner",
+                    adapter_name="ScriptedRunner",
+                    adapter_version="1.0.0",
+                    implementation_kind="real" if real_generator else "fake",
+                    source_commit=None,
+                ),
             ),
             generator_artifact_hash=generator.generator_artifact_hash,
             status=runner_status,
@@ -935,6 +944,44 @@ class AgentGenerationPostgresTests(unittest.TestCase):
             self.repository.list_candidate_proposal_refs(start.generation_run_id),
             (),
         )
+
+    def test_settlement_revalidates_forged_runner_receipt_before_writing(self) -> None:
+        start = self.coordinator.start(
+            _start_request("agent-postgres-forged-receipt-v1"),
+            self.repository,
+        )
+        claim = self.repository.claim_generation_attempt("worker-a", lease_seconds=10, now=NOW)
+        assert claim is not None
+        batch, (reference, batch_uri) = self._settlement(
+            claim,
+            normalized_patch_hash=_hash("c"),
+        )
+        assert batch is not None and batch_uri is not None
+        valid_receipt = self.receipt_store.load(reference)
+        forged_receipt = valid_receipt.model_copy(
+            update={
+                "execution": valid_receipt.execution.model_copy(update={"exit_code": 17})
+            }
+        )
+
+        class ForgedReceiptReader:
+            def load(self, _reference: RunnerExecutionReceiptRef) -> RunnerExecutionReceipt:
+                return forged_receipt
+
+        with self.assertRaises(Conflict):
+            self.repository.settle_generation_attempt(
+                claim.attempt.attempt_id,
+                claim.attempt.claim_token,
+                batch,
+                reference,
+                runner_receipt_reader=ForgedReceiptReader(),
+                batch_uri=batch_uri,
+                now=NOW + timedelta(seconds=1),
+            )
+
+        status = self.repository.generation_run_status(start.generation_run_id)
+        self.assertEqual(status.attempts[0].state, "running")
+        self.assertEqual(status.proposals, ())
 
     def test_request_hash_drift_fails_closed_before_proposal_persistence(self) -> None:
         drift_cases: tuple[tuple[str, str | UUID], ...] = (

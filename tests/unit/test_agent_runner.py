@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from hcuopt.adapters.agent_runner import (
     AgentInputFile,
@@ -20,10 +21,12 @@ from hcuopt.adapters.agent_runner import (
     AgentRunnerAdapter,
     AgentRunnerSafetyError,
     AgentRunRequest,
+    AgentRunResult,
     DeterministicAgentRunner,
     LocalCommandAgentRunner,
 )
 from hcuopt.adapters.agent_runner_receipt import RunnerExecutionReceiptStore
+from hcuopt.contracts.agent_runner_v1 import RunnerExecutionRecord
 from hcuopt.domain.errors import SourceArtifactError
 from hcuopt.source_hash import file_uri_to_path
 
@@ -181,6 +184,33 @@ def test_runner_receipt_store_rejects_tampered_output(tmp_path: Path) -> None:
 
     with pytest.raises(SourceArtifactError, match="raw output changed"):
         store.load(reference)
+
+
+@pytest.mark.parametrize("exit_code", [None, 17])
+def test_successful_runner_contract_requires_zero_exit_code(
+    tmp_path: Path, exit_code: int | None
+) -> None:
+    result = DeterministicAgentRunner(
+        proposal_bytes=b'{"proposal":"fixture"}', reported_tokens=9
+    ).run(_request(), tmp_path / "runner")
+    payload = result.evidence.model_dump(mode="json")
+    payload["exit_code"] = exit_code
+
+    with pytest.raises(ValidationError, match="exit_code 0"):
+        RunnerExecutionRecord.model_validate(payload)
+
+
+def test_runner_receipt_store_revalidates_execution_contract(tmp_path: Path) -> None:
+    result = DeterministicAgentRunner(
+        proposal_bytes=b'{"proposal":"fixture"}', reported_tokens=9
+    ).run(_request(), tmp_path / "runner")
+    forged = AgentRunResult(
+        proposal_bytes=result.proposal_bytes,
+        evidence=result.evidence.model_copy(update={"exit_code": 17}),
+    )
+
+    with pytest.raises(SourceArtifactError, match="invalid Execution Record"):
+        RunnerExecutionReceiptStore(tmp_path / "receipts").publish(forged)
 
 
 def test_local_runner_preserves_literal_argv_without_a_shell(tmp_path: Path) -> None:
