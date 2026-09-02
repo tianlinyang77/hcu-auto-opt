@@ -17,6 +17,7 @@ from hcuopt.adapters.m2_candidate import (
 )
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.contracts.m1 import CandidateSourcePackageManifest
+from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.operator_v1 import (
     OperatorProfileRef,
     OperatorRoundStartRequest,
@@ -401,6 +402,209 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
         )
         self.assertEqual(hotspot.hotspot.source, "profiler")
         self.assertEqual(hotspot.symbol, "sglang.fixture.layer_norm")
+
+    def test_formal_authority_rereads_exact_non_synthetic_family_inputs(self) -> None:
+        baseline_task_id = uuid4()
+        source_snapshot_id = uuid4()
+        baseline_epoch_id = uuid4()
+        hotspot_id = uuid4()
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET stage0_authority = 'formal',
+                    project_mode = 'degraded_manual_intake'
+                WHERE task_id = %s
+                """,
+                (self.ids["task_id"],),
+            )
+            cursor.execute(
+                """
+                UPDATE stage0_runs
+                SET mode = 'formal'
+                WHERE stage0_run_id = %s
+                """,
+                (self.ids["stage0_run_id"],),
+            )
+            cursor.execute(
+                """
+                INSERT INTO stage0_evidence (task_id, evidence, report, stage0_run_id)
+                SELECT task_id, %s, %s, stage0_run_id
+                FROM stage0_runs
+                WHERE stage0_run_id = %s
+                """,
+                (
+                    Jsonb(
+                        {
+                            "synthetic": False,
+                            "stage0_run_id": str(self.ids["stage0_run_id"]),
+                            "protocol_version": "operator-scripted-stage0-v1",
+                            "protocol_hash": self.target.required_stage0_protocol_hash,
+                        }
+                    ),
+                    Jsonb(
+                        {
+                            "evidence_authority": "formal",
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                    self.ids["stage0_run_id"],
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, name, workload_id, idempotency_key, state, budget,
+                    automatic_release_allowed, workflow_type, target_id,
+                    target_snapshot_id, adapter_profile, stage0_run_id,
+                    stage0_authority, project_mode
+                ) VALUES (
+                    %s, 'Formal Operator Baseline', %s, %s, 'completed',
+                    '{}'::jsonb, FALSE, 'manual_candidate', %s, %s, %s, %s,
+                    'formal', 'degraded_manual_intake'
+                )
+                """,
+                (
+                    baseline_task_id,
+                    self.workload.workload_id,
+                    f"formal-operator-baseline-{baseline_task_id}",
+                    self.target.target_id,
+                    self.ids["target_snapshot_id"],
+                    self.target.adapter_profile,
+                    self.ids["stage0_run_id"],
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO source_snapshots (
+                    snapshot_id, task_id, kind, repository, commit, tree_hash,
+                    source_hash, worktree_uri, clean, idempotency_key,
+                    adapter_provenance, synthetic, created_at
+                ) VALUES (
+                    %s, %s, 'baseline', 'fixture://formal-operator-source',
+                    'formal-operator-commit', %s, %s,
+                    'fixture://formal-operator-worktree', TRUE, %s, %s, FALSE, now()
+                )
+                """,
+                (
+                    source_snapshot_id,
+                    baseline_task_id,
+                    _hash("formal-tree"),
+                    _hash("baseline-source"),
+                    f"formal-operator-source-{source_snapshot_id}",
+                    Jsonb([{"implementation_kind": "real"}]),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO baseline_epochs (
+                    baseline_epoch_id, task_id, hardware_fingerprint,
+                    software_fingerprint, workload_id, configuration_hash,
+                    frozen, baseline_kind, target_snapshot_id, stage0_run_id,
+                    stage0_protocol_hash, source_snapshot_id, workload_hash,
+                    image_digest, adapter_profile
+                ) VALUES (
+                    %s, %s, 'formal-hardware', 'formal-software', %s, %s,
+                    TRUE, 'manual_candidate', %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    baseline_epoch_id,
+                    baseline_task_id,
+                    self.workload.workload_id,
+                    self.workload.configuration_hash,
+                    self.ids["target_snapshot_id"],
+                    self.ids["stage0_run_id"],
+                    self.target.required_stage0_protocol_hash,
+                    source_snapshot_id,
+                    self.workload.workload_hash,
+                    _hash("formal-image"),
+                    self.target.adapter_profile,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO hotspots (
+                    hotspot_id, task_id, baseline_epoch_id, symbol, share_ratio,
+                    opportunity_score, patchability, evidence, candidate_kind,
+                    actor, intake_hash, idempotency_key
+                ) VALUES (
+                    %s, %s, %s, 'sglang.fixture.layer_norm', 0.2, 0.5,
+                    'patchable', %s, 'business', 'operator-c', %s, %s
+                )
+                """,
+                (
+                    hotspot_id,
+                    baseline_task_id,
+                    baseline_epoch_id,
+                    Jsonb(
+                        {
+                            "profiler_raw_output_uri": PROFILER_URI,
+                            "profiler_raw_output_hash": _hash("profiler"),
+                            "correctness_spec_uri": CORRECTNESS_URI,
+                            "correctness_spec_hash": _hash("correctness"),
+                            "replacement_point": REPLACEMENT_POINT,
+                            "shape": [1, 128],
+                            "dtype": "float16",
+                        }
+                    ),
+                    _hash("formal-hotspot-intake"),
+                    f"formal-operator-hotspot-{hotspot_id}",
+                ),
+            )
+        self.connection.commit()
+        family = BusinessCandidateFamilyManifest(
+            family_id="operator-postgres-formal-family-v1",
+            source_package_store_id=self.target.candidate_package_store_id,
+            source_package_store_hash=self.target.candidate_package_store_hash,
+            target_snapshot_id=self.ids["target_snapshot_id"],
+            stage0_run_id=self.ids["stage0_run_id"],
+            baseline_epoch_id=baseline_epoch_id,
+            baseline_source_hash=_hash("baseline-source"),
+            hotspot_id=hotspot_id,
+            replacement_point=REPLACEMENT_POINT,
+            profiler_evidence_uri=PROFILER_URI,
+            profiler_evidence_hash=_hash("profiler"),
+            overlay_mount_target=MOUNT_TARGET,
+            overlay_file_path=OVERLAY_PATH,
+            members=(
+                {
+                    "candidate_id": uuid4(),
+                    "source_package_ref": {
+                        "candidate_source_hash": _hash("formal-candidate-0"),
+                        "source_package_hash": _hash("formal-package-0"),
+                        "manifest_hash": _hash("formal-manifest-0"),
+                        "manifest_schema_version": "m1-candidate-source-v1",
+                    },
+                    "optimization_intent": "exercise Formal Candidate zero",
+                },
+                {
+                    "candidate_id": uuid4(),
+                    "source_package_ref": {
+                        "candidate_source_hash": _hash("formal-candidate-1"),
+                        "source_package_hash": _hash("formal-package-1"),
+                        "manifest_hash": _hash("formal-manifest-1"),
+                        "manifest_schema_version": "m1-candidate-source-v1",
+                    },
+                    "optimization_intent": "exercise Formal Candidate one",
+                },
+            ),
+            reviewed_by="operator-postgres-formal-reviewer",
+            reviewed_at=datetime.now(timezone.utc),
+        )
+
+        resolved = self.repository.resolve_formal_operator_authority(
+            self.target,
+            self.workload,
+            family,
+        )
+
+        self.assertFalse(resolved.authority.synthetic)
+        self.assertEqual(resolved.authority.target_snapshot_id, family.target_snapshot_id)
+        self.assertEqual(resolved.authority.stage0_run_id, family.stage0_run_id)
+        self.assertEqual(resolved.authority.baseline_epoch_id, family.baseline_epoch_id)
+        self.assertEqual(resolved.authority.hotspot_id, family.hotspot_id)
+        self.assertEqual(resolved.hotspot.profiler_evidence_hash, family.profiler_evidence_hash)
 
     def test_operator_round_list_reads_only_finalized_intents(self) -> None:
         coordinator, start = self._startable_suite()

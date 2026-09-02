@@ -53,7 +53,7 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
 
     assert report.decision == "hold"
     assert report.generated_at == FIXED_TIME
-    assert report.verified_evidence_count == 25
+    assert report.verified_evidence_count == 28
     assert len(report.gate_results) == 13
     assert set(report.blocker_codes) == {
         "business_candidate_family",
