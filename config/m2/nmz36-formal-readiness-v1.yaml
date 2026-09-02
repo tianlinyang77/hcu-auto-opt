@@ -54,11 +54,11 @@ gates:
         digest_mode: text_lf
         evidence_type: business_candidate_source_family_contract
       - path: src/hcuopt/adapters/business_candidate_family.py
-        sha256: sha256:e5dfb2ca510b5518c0cd7f66a983a151e8bd16e048946bc8a2764c6aa677550a
+        sha256: sha256:1408ffce21b857117f043ea54c3fe8e634c4d0fdaee435f1d1d58082c6cdf2f7
         digest_mode: text_lf
         evidence_type: business_candidate_store_verifier
       - path: docs/m2a-business-candidate-family.md
-        sha256: sha256:ea1dffcd678d526e4f74e9db8127cfd8153b90f78f1a9dfa62a5b00281b8efc3
+        sha256: sha256:5cd94a33691a8c0ad48264d464333b8c56e9108b09b2c504ec0115ffdf47a768
         digest_mode: text_lf
         evidence_type: candidate_family_freeze_and_handoff_contract
   - code: formal_authority_persistence

@@ -86,7 +86,12 @@ def _store(root: Path) -> CandidateSourcePackageStore:
     )
 
 
-def _family(tmp_path: Path, *, second_kind: str = "business"):
+def _family(
+    tmp_path: Path,
+    *,
+    second_kind: str = "business",
+    second_content: bytes = b"def free_v2(value):\n    return value + 0\n",
+):
     baseline_source_hash = _hash("a")
     first_manifest, first = _publish_package(
         tmp_path,
@@ -100,7 +105,7 @@ def _family(tmp_path: Path, *, second_kind: str = "business"):
         candidate_id=UUID("00000000-0000-0000-0000-000000000022"),
         candidate_source_hash=_hash("c"),
         baseline_source_hash=baseline_source_hash,
-        content=b"def free_v2(value):\n    return value + 0\n",
+        content=second_content,
         candidate_kind=second_kind,
     )
     manifest = BusinessCandidateFamilyManifest(
@@ -171,6 +176,18 @@ def test_business_family_rejects_tampered_package_file(tmp_path: Path) -> None:
     source.write_text("tampered\n", encoding="utf-8")
 
     with pytest.raises(SourceArtifactError, match="hash mismatch"):
+        _verifier(tmp_path).verify(manifest)
+
+
+def test_business_family_rejects_distinct_packages_with_duplicate_overlay_content(
+    tmp_path: Path,
+) -> None:
+    shared_content = b"def free_v1(value):\n    return value\n"
+    manifest, first, second = _family(tmp_path, second_content=shared_content)
+
+    assert first["candidate_id"] != second["candidate_id"]
+    assert first["source_package_ref"] != second["source_package_ref"]
+    with pytest.raises(SourceArtifactError, match="duplicate Overlay source content"):
         _verifier(tmp_path).verify(manifest)
 
 

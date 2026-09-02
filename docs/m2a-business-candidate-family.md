@@ -28,7 +28,8 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
   假设。
 - Family 固定 `track=triton`、`release_mode=overlay`、`candidate_kind=business`、
   `synthetic=false`、`automatic_release_allowed=false`。
-- Candidate ID、Candidate Source Hash、Package Hash 和 Manifest Hash 任一重复都会被拒绝。
+- Candidate ID、Candidate Source Hash、Package Hash、Manifest Hash 或经 Store 重读验证的 Overlay
+  文件内容 Hash 任一重复都会被拒绝；不能只换 UUID 或外层元数据复用同一源码。
 - `source_family_hash` 对 Manifest 成员的书写顺序无关，但对任一权威字段、包身份或优化意图
   的变化敏感。
 
@@ -42,6 +43,7 @@ Compiler 必须从已验证 source family 确定性产生 Round Intake，并在 
 3. Candidate/Hotspot/Baseline/Source/Profiler/replacement point 与 Family 一致；
 4. Package 外层 Hash 由原始 Manifest Hash 和文件清单重新计算；
 5. 每个成员必须是 `business`，且所有成员替换同一个批准的 Overlay 文件和挂载目标。
+6. 所有成员经重读验证的 Overlay 文件内容 Hash 必须唯一。
 
 任何文件篡改、fixture 混入、Store/Package/Manifest/Source Hash 漂移或 Authority 不一致都会
 抛出 `SourceArtifactError`，不得把 Family 标为 frozen。
