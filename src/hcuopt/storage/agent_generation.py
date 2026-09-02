@@ -22,6 +22,7 @@ from hcuopt.agent.authority import (
     validate_runner_receipt,
 )
 from hcuopt.agent.identity import candidate_proposal_batch_hash
+from hcuopt.contracts.agent_read_model_v1 import AgentGenerationEvidencePublication
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
     RunnerExecutionReceiptRef,
@@ -86,6 +87,10 @@ class AgentGenerationRepositoryMixin:
                 if name != "schema_version"
             }
         )
+
+    @staticmethod
+    def _evidence_publication(row: dict[str, Any]) -> AgentGenerationEvidencePublication:
+        return AgentGenerationEvidencePublication.model_validate(row["publication"])
 
     @staticmethod
     def _run_insert_values(run: GenerationRun) -> tuple[Any, ...]:
@@ -1015,3 +1020,81 @@ class AgentGenerationRepositoryMixin:
             ).fetchone()
             assert row is not None
             return self._generation_run(row)
+
+    def publish_agent_generation_evidence_publication(
+        self,
+        publication: AgentGenerationEvidencePublication,
+    ) -> AgentGenerationEvidencePublication:
+        """Publish one immutable D index after the Generation Run is terminal."""
+
+        with self.connection() as connection:  # type: ignore[attr-defined]
+            run = connection.execute(
+                """
+                SELECT state FROM agent_generation_runs
+                WHERE generation_run_id = %s FOR SHARE
+                """,
+                (publication.generation_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(
+                    f"Agent Generation Run not found: {publication.generation_run_id}"
+                )
+            if run["state"] not in {"completed", "failed", "cancelled"}:
+                raise Conflict(
+                    "Agent Generation Evidence Read Model requires a terminal Run"
+                )
+            row = connection.execute(
+                """
+                INSERT INTO agent_generation_evidence_read_models (
+                    generation_run_id, verifier_version, input_digest, publication,
+                    published_at, dev_only, formal_readiness, performance_conclusion,
+                    formal_intake_allowed, hcu_access_allowed,
+                    measurement_access_allowed, automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, TRUE, 'hold', 'not_measured',
+                    FALSE, FALSE, FALSE, FALSE
+                )
+                ON CONFLICT (generation_run_id) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    publication.generation_run_id,
+                    publication.verifier_version,
+                    publication.input_digest,
+                    Jsonb(publication.model_dump(mode="json")),
+                    publication.published_at,
+                ),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM agent_generation_evidence_read_models
+                    WHERE generation_run_id = %s
+                    """,
+                    (publication.generation_run_id,),
+                ).fetchone()
+            assert row is not None
+            stored = self._evidence_publication(row)
+            if stored != publication:
+                raise Conflict(
+                    "Agent Generation Evidence publication changed during replay"
+                )
+            return stored
+
+    def get_agent_generation_evidence_publication(
+        self,
+        generation_run_id: UUID,
+    ) -> AgentGenerationEvidencePublication:
+        with self.connection() as connection:  # type: ignore[attr-defined]
+            row = connection.execute(
+                """
+                SELECT * FROM agent_generation_evidence_read_models
+                WHERE generation_run_id = %s
+                """,
+                (generation_run_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(
+                f"Agent Generation Evidence Read Model not found: {generation_run_id}"
+            )
+        return self._evidence_publication(row)

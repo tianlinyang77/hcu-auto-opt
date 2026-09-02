@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
+from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
     RoundBudgetFinalizeRequest,
@@ -95,6 +96,11 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    AgentGenerationReadModelError,
+)
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.evaluation.m2_authority import HoldoutRevealResult
 from hcuopt.evaluation.m2_models import (
     MultipleComparisonResult,
@@ -211,6 +217,7 @@ def create_app(
     operator_start_coordinator: OperatorStartCoordinator | None = None,
     operator_read_models: OperatorReadModelService | None = None,
     operator_discovery: OperatorDiscoveryService | None = None,
+    agent_evidence_read_models: AgentGenerationEvidenceReadService | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -335,11 +342,43 @@ def create_app(
             },
         )
 
+    @application.exception_handler(AgentGenerationReadModelError)
+    async def agent_evidence_handler(
+        _request: Request, exc: AgentGenerationReadModelError
+    ) -> JSONResponse:
+        unavailable = exc.code == "agent_evidence_root_unavailable"
+        return JSONResponse(
+            status_code=503 if unavailable else 422,
+            content={
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": unavailable,
+            },
+        )
+
     def repo(request: Request) -> PostgresRepository:
         return request.app.state.repository
 
     def workflow(request: Request) -> WorkflowCoordinator:
         return workflow_factory(repo(request))
+
+    def agent_evidence_service(request: Request) -> AgentGenerationEvidenceReadService:
+        if agent_evidence_read_models is not None:
+            return agent_evidence_read_models
+        evidence_root = os.getenv("HCUOPT_AGENT_EVIDENCE_ROOT")
+        if evidence_root is None:
+            raise AgentGenerationReadModelError(
+                "agent_evidence_root_unavailable",
+                "HCUOPT_AGENT_EVIDENCE_ROOT is required for Agent evidence reads",
+            )
+        try:
+            reader = HashedEvidenceReader(Path(evidence_root))
+        except (OSError, ValueError) as exc:
+            raise AgentGenerationReadModelError(
+                "agent_evidence_root_unavailable",
+                "configured Agent evidence root is unavailable",
+            ) from exc
+        return AgentGenerationEvidenceReadService(repo(request), reader)
 
     def framework_workflow(request: Request) -> FrameworkSmokeCoordinator:
         selected = workflow(request)
@@ -554,6 +593,16 @@ def create_app(
         request: Request,
     ) -> OperatorRoundReport:
         return read_models.report(round_id, repo(request))
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/evidence",
+        response_model=AgentGenerationReadModel,
+    )
+    def get_operator_agent_generation_evidence(
+        generation_run_id: UUID,
+        request: Request,
+    ) -> AgentGenerationReadModel:
+        return agent_evidence_service(request).get(generation_run_id)
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:
