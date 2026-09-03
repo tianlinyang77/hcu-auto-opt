@@ -1,7 +1,7 @@
 schema_version: m2a-formal-readiness-v1
-audit_id: nmz36-m2a-formal-readiness-20260831-v2
-audit_base_commit: 915861c61843867a8d74145df2d7bb8ed3f4ef8a
-observed_at: 2026-08-31T09:42:47+08:00
+audit_id: nmz36-m2a-formal-readiness-20260902-v3
+audit_base_commit: 916431356bc845a9cdd2a12792106ad719052d11
+observed_at: 2026-09-02T10:30:00+08:00
 
 profile_draft:
   profile_version: 1
@@ -25,7 +25,7 @@ profile_draft:
   hotspot_id: ec941d47-206a-5f18-8538-ae9c18c1e0ec
   replacement_point: sglang.srt.mem_cache.allocator.PagedTokenToKVPoolAllocator.free
   candidate_kind: business
-  candidate_family_state: missing
+  candidate_family_state: frozen
   expected_candidate_count: 2
   max_promoted: 2
   family_alpha: 0.05
@@ -38,29 +38,41 @@ profile_draft:
     max_holdout_samples: 800
     max_wall_seconds: 14400
     max_exclusive_lease_seconds: 14400
-  candidate_packages: []
-  candidate_family_hash: null
+  candidate_packages:
+    - candidate_source_hash: sha256:f27c1546bc5bd46741ae98ad0b96d51974a0108af316f9d557daa2f82556fbc2
+      source_package_hash: sha256:dc419c39a238c28d7f8e78c91743fdab96ff6ce5b89e0ceb0aa09aa41644441e
+      manifest_hash: sha256:8f78fc27022f0f842eb35d06e1508485c06556711c46a5be5ce79d6375f62987
+      manifest_schema_version: m1-candidate-source-v1
+    - candidate_source_hash: sha256:a830e81d589f2199a223fbbb4afa9d74bfcbf546540259e22f32ffa02b83162a
+      source_package_hash: sha256:2745cb4cc8d7359a7b62457ad612cdb126cfbca9cbe462227488310b704cfc9a
+      manifest_hash: sha256:6aa4004edc500bdbfa06847aa8e926decc2b7269ecc623259e1b1644468a0dcb
+      manifest_schema_version: m1-candidate-source-v1
+  candidate_family_hash: sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17
   automatic_release_allowed: false
 
 gates:
   - code: business_candidate_family
     owner: C
-    status: block
-    summary: The source-family Contract, deterministic Hash, and fail-closed Store verifier now exist, but only one historical business Candidate is evidenced and no immutable 2-member Manifest is frozen.
-    required_action: Publish a second real business startup-Overlay package, freeze the 2-member source Family, and preserve an independent verification record; scripted fixtures cannot count.
+    status: pass
+    summary: Two different real SGLang allocator Overlay Candidates are frozen in one content-addressed Store and independently replayed from the locked Baseline source.
+    required_action: Preserve the Store, Family and verification record unchanged; A and D must reread them before any separately authorized Formal window.
     evidence:
-      - path: src/hcuopt/contracts/m2_candidate_family_v1.py
-        sha256: sha256:643583f76c0a4a83846123f8c962c65881c76953ff4eca252c49141e7ed2d4f1
+      - path: config/m2/nmz36-business-candidate-store-v1.json
+        sha256: sha256:0f67b371fc2398ed6cb2e1a0a52310273bcc2f3593467df104ed2850f1b90560
         digest_mode: text_lf
-        evidence_type: business_candidate_source_family_contract
-      - path: src/hcuopt/adapters/business_candidate_family.py
-        sha256: sha256:1408ffce21b857117f043ea54c3fe8e634c4d0fdaee435f1d1d58082c6cdf2f7
+        evidence_type: frozen_business_candidate_store_descriptor
+      - path: config/m2/nmz36-business-candidate-family-v1.json
+        sha256: sha256:1434bc6a9e650ee8c611a2a2e6a7200f6a64a35bf1033d8cd8cfc99c9b310c17
         digest_mode: text_lf
-        evidence_type: business_candidate_store_verifier
-      - path: docs/m2a-business-candidate-family.md
-        sha256: sha256:5cd94a33691a8c0ad48264d464333b8c56e9108b09b2c504ec0115ffdf47a768
+        evidence_type: canonical_two_member_business_candidate_family
+      - path: docs/evidence/m2a-business-candidate-family/sha256-1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42.json
+        sha256: sha256:1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42
         digest_mode: text_lf
-        evidence_type: candidate_family_freeze_and_handoff_contract
+        evidence_type: independent_store_reread_and_baseline_replay_record
+      - path: docs/evidence/m2a-business-candidate-family-20260902.md
+        sha256: sha256:0d5844b613283fe9db70ed8e295250313a384e966a045df3970b28f27bb4b6e6
+        digest_mode: text_lf
+        evidence_type: human_readable_candidate_family_acceptance
   - code: formal_authority_persistence
     owner: D
     status: hold
@@ -168,7 +180,7 @@ gates:
     required_action: After every A/B/C/D blocker is resolved, request one separate project-owner decision naming the exact host, HCU, time window, Family Hash, and maximum budget.
     evidence:
       - path: docs/adr/0009-m2a-round-barrier.md
-        sha256: sha256:9ebe62bf486204939d4e766a96a9deb08d4549205bd93efb66db5c5ab35d6aa5
+        sha256: sha256:71218d2057698dce4910559097a43818e6754f063c445ebdc1013a3356d265f5
         digest_mode: text_lf
         evidence_type: formal_authorization_policy
   - code: round_signoff_outbox
@@ -224,9 +236,13 @@ reviews:
     reason: Target Lock refresh, Formal measurement Adapter, resource window, and budget review remain open.
     evidence: null
   - owner: C
-    decision: pending
-    reason: The required two-member immutable business Candidate Family does not exist.
-    evidence: null
+    decision: accepted_for_formal_window
+    reason: Two real and source-distinct SGLang allocator Candidates were reread from one frozen Store and their complete Candidate Source Hashes were independently replayed from the locked Baseline without HCU access.
+    evidence:
+      path: docs/evidence/m2a-business-candidate-family/sha256-1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42.json
+      sha256: sha256:1bdc51d87374eeb9462b53576f45ba8d8cd0f70585f4bfacedf83f8cb96dbc42
+      digest_mode: text_lf
+      evidence_type: c_accepted_for_formal_window
   - owner: D
     decision: pending
     reason: Formal writers, protected Finalizer, and Signoff evidence verification exist, but PostgreSQL 17 CI, production protected stores, and formal D acceptance remain open.

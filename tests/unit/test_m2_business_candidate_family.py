@@ -160,6 +160,19 @@ def test_business_family_verifies_two_real_packages_and_hashes_order_independent
     )
 
 
+def test_business_family_v1_remains_compatible_without_workload_field(
+    tmp_path: Path,
+) -> None:
+    manifest, _first, _second = _family(tmp_path)
+    encoded = canonical_json_bytes(manifest)
+
+    assert b'"workload_id"' not in encoded
+    assert BusinessCandidateFamilyManifest.model_validate_json(encoded) == manifest
+    assert business_candidate_source_family_hash(manifest) == (
+        "sha256:7fc4c048d5a6b6e0bc084c606b004adde5c68bef0d20b1c17586f8cfb9eadbbb"
+    )
+
+
 def test_business_family_rejects_fixture_package(tmp_path: Path) -> None:
     manifest, _first, _second = _family(tmp_path, second_kind="fixture")
 
