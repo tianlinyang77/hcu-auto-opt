@@ -10,6 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
 from uuid import UUID, uuid5
 
 import pytest
@@ -61,6 +62,11 @@ from hcuopt.contracts.agent_verification_v1 import (
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.platform_v1 import AdapterProvenance, SourceSnapshot
 from hcuopt.domain.errors import Conflict
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    build_agent_generation_evidence_publication,
+)
+from hcuopt.evaluation.agent_proposal_reporting import write_agent_generation_report
 from hcuopt.evaluation.agent_proposal_verifier import (
     AgentProposalVerifier,
     build_agent_generation_read_model,
@@ -840,7 +846,43 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         result = AgentProposalVerifier(HashedEvidenceReader(self.evidence_root)).verify(context)
         read_model = build_agent_generation_read_model(result)
 
+        report_root = (
+            self.evidence_root
+            / "generation-read-models"
+            / str(started.generation_run_id)
+        )
+        report_root.mkdir(parents=True)
+        artifacts = write_agent_generation_report(report_root, context, result)
+        publication = build_agent_generation_evidence_publication(
+            context,
+            result,
+            artifacts,
+        )
+        stored_publication = (
+            self.repository.publish_agent_generation_evidence_publication(publication)
+        )
+        replayed_publication = (
+            self.repository.publish_agent_generation_evidence_publication(publication)
+        )
+        durable_read_model = AgentGenerationEvidenceReadService(
+            self.repository,
+            HashedEvidenceReader(self.evidence_root),
+        ).get(started.generation_run_id)
+
         self.assertEqual(result.status, "ready_for_review")
+        self.assertEqual(stored_publication, publication)
+        self.assertEqual(replayed_publication, publication)
+        self.assertEqual(durable_read_model, read_model)
+        assert psycopg is not None
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.repository.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE agent_generation_evidence_read_models
+                    SET input_digest = %s WHERE generation_run_id = %s
+                    """,
+                    (_hash("f"), started.generation_run_id),
+                )
         self.assertEqual(
             [item.status for item in result.attempts],
             ["timed_out", "succeeded", "succeeded"],
@@ -890,31 +932,43 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         self.assertEqual(reconciled.budget_consumed.attempts, 1)
 
     def test_concurrent_claims_respect_plan_concurrency(self) -> None:
-        start = self.coordinator.start(
-            _start_request("agent-postgres-concurrency-v1", max_concurrency=1),
-            self.repository,
-        )
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            claims = list(
-                pool.map(
-                    lambda ordinal: self.repository.claim_generation_attempt(
-                        f"worker-{ordinal}",
-                        lease_seconds=10,
-                        generation_run_id=start.generation_run_id,
-                        now=NOW,
+        for iteration in range(5):
+            with self.subTest(iteration=iteration):
+                start = self.coordinator.start(
+                    _start_request(
+                        f"agent-postgres-concurrency-{iteration}-v1",
+                        max_concurrency=1,
                     ),
-                    range(2),
+                    self.repository,
                 )
-            )
+                ready = Barrier(2)
 
-        self.assertEqual(sum(item is not None for item in claims), 1)
-        running = [
-            item
-            for item in self.repository.list_generation_attempts(start.generation_run_id)
-            if item.state == "running"
-        ]
-        self.assertEqual(len(running), 1)
+                def claim(
+                    ordinal: int,
+                    barrier: Barrier = ready,
+                    current_iteration: int = iteration,
+                    generation_run_id: UUID = start.generation_run_id,
+                ) -> GenerationAttemptClaim | None:
+                    barrier.wait(timeout=5)
+                    return self.repository.claim_generation_attempt(
+                        f"worker-{current_iteration}-{ordinal}",
+                        lease_seconds=10,
+                        generation_run_id=generation_run_id,
+                        now=NOW,
+                    )
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    claims = list(pool.map(claim, range(2)))
+
+                self.assertEqual(sum(item is not None for item in claims), 1)
+                running = [
+                    item
+                    for item in self.repository.list_generation_attempts(
+                        start.generation_run_id
+                    )
+                    if item.state == "running"
+                ]
+                self.assertEqual(len(running), 1)
 
     def test_attempt_budget_overrun_fails_closed_without_proposal_ref(self) -> None:
         start = self.coordinator.start(
