@@ -992,7 +992,9 @@ def test_durable_read_model_rejects_tampered_published_artifact(tmp_path: Path) 
 
 def test_durable_read_model_rejects_missing_published_artifact(tmp_path: Path) -> None:
     repository, reader, publication, _result = _published_terminal_read_model(tmp_path)
-    (tmp_path / "published" / "report.md").unlink()
+    report_path = tmp_path / "published" / "report.md"
+    report_path.chmod(0o644)
+    report_path.unlink()
 
     with pytest.raises(AgentGenerationReadModelError) as raised:
         AgentGenerationEvidenceReadService(repository, reader).get(
