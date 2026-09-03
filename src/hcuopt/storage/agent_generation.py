@@ -624,9 +624,9 @@ class AgentGenerationRepositoryMixin:
             raise ValueError("Agent generator claim lease must be between 1 and 7200 seconds")
         effective_now = now or datetime.now(timezone.utc)
         with self.connection() as connection:  # type: ignore[attr-defined]
-            run_row = connection.execute(
+            candidate_rows = connection.execute(
                 """
-                SELECT run.* FROM agent_generation_runs AS run
+                SELECT run.generation_run_id FROM agent_generation_runs AS run
                 WHERE run.state = 'running'
                   AND (%s::uuid IS NULL OR run.generation_run_id = %s)
                   AND EXISTS (
@@ -634,20 +634,44 @@ class AgentGenerationRepositoryMixin:
                       WHERE pending.generation_run_id = run.generation_run_id
                         AND pending.state = 'pending'
                   )
-                  AND (
-                      SELECT count(*) FROM agent_generator_attempts AS active
-                      WHERE active.generation_run_id = run.generation_run_id
-                        AND active.state = 'running'
-                  ) < (run.plan->>'max_concurrency')::integer
                 ORDER BY run.created_at, run.generation_run_id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
                 """,
                 (generation_run_id, generation_run_id),
-            ).fetchone()
-            if run_row is None:
+            ).fetchall()
+            run: GenerationRun | None = None
+            for candidate_row in candidate_rows:
+                run_row = connection.execute(
+                    """
+                    SELECT run.* FROM agent_generation_runs AS run
+                    WHERE run.generation_run_id = %s
+                      AND run.state = 'running'
+                      AND EXISTS (
+                          SELECT 1 FROM agent_generator_attempts AS pending
+                          WHERE pending.generation_run_id = run.generation_run_id
+                            AND pending.state = 'pending'
+                      )
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (candidate_row["generation_run_id"],),
+                ).fetchone()
+                if run_row is None:
+                    continue
+                locked_run = self._generation_run(run_row)
+                active_row = connection.execute(
+                    """
+                    SELECT count(*) AS active_count
+                    FROM agent_generator_attempts
+                    WHERE generation_run_id = %s AND state = 'running'
+                    """,
+                    (locked_run.generation_run_id,),
+                ).fetchone()
+                assert active_row is not None
+                if int(active_row["active_count"]) >= locked_run.plan.max_concurrency:
+                    continue
+                run = locked_run
+                break
+            if run is None:
                 return None
-            run = self._generation_run(run_row)
             attempt_row = connection.execute(
                 """
                 SELECT * FROM agent_generator_attempts
