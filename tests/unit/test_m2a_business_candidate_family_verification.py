@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -274,19 +275,21 @@ def test_repository_nmz36_family_is_canonical_and_store_verified() -> None:
         compile(source, f"candidate-{candidate_id}/allocator.py", "exec")
 
 
-def test_content_addressed_json_remains_lf_with_autocrlf_checkout(
-    tmp_path: Path,
+def test_content_addressed_store_remains_byte_exact_with_autocrlf_checkout(
+    request: pytest.FixtureRequest,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    paths = (
+    store_root = root / "config/m2/nmz36-business-candidate-store-v1"
+    store_paths = tuple(
+        sorted(
+            path.relative_to(root)
+            for path in store_root.rglob("*")
+            if path.is_file()
+        )
+    )
+    canonical_json_paths = (
         Path("config/m2/nmz36-business-candidate-store-v1.json"),
         Path("config/m2/nmz36-business-candidate-family-v1.json"),
-        *sorted(
-            path.relative_to(root)
-            for path in (
-                root / "config/m2/nmz36-business-candidate-store-v1"
-            ).rglob("*.json")
-        ),
         *sorted(
             path.relative_to(root)
             for path in (
@@ -294,8 +297,11 @@ def test_content_addressed_json_remains_lf_with_autocrlf_checkout(
             ).glob("*.json")
         ),
     )
-    source = tmp_path / "source"
-    checkout = tmp_path / "checkout"
+    paths = (*canonical_json_paths, *store_paths)
+    test_root = Path(tempfile.mkdtemp(prefix="hcuopt-m2a-"))
+    request.addfinalizer(lambda: shutil.rmtree(test_root, ignore_errors=True))
+    source = test_root / "source"
+    checkout = test_root / "checkout"
     source.mkdir()
     shutil.copyfile(root / ".gitattributes", source / ".gitattributes")
     for relative_path in paths:
@@ -316,7 +322,7 @@ def test_content_addressed_json_remains_lf_with_autocrlf_checkout(
     git("config", "user.name", "test", cwd=source)
     git("config", "user.email", "test@example.invalid", cwd=source)
     git("add", ".", cwd=source)
-    git("commit", "--quiet", "-m", "canonical JSON fixture", cwd=source)
+    git("commit", "--quiet", "-m", "content-addressed fixture", cwd=source)
     git(
         "clone",
         "--quiet",
@@ -325,13 +331,21 @@ def test_content_addressed_json_remains_lf_with_autocrlf_checkout(
         "core.autocrlf=true",
         str(source),
         str(checkout),
-        cwd=tmp_path,
+        cwd=test_root,
     )
 
     for relative_path in paths:
         assert (checkout / relative_path).read_bytes() == (root / relative_path).read_bytes()
-        attribute = git("check-attr", "eol", "--", relative_path.as_posix(), cwd=checkout)
-        assert attribute.stdout.strip().endswith("eol: lf")
+        if relative_path in store_paths:
+            attribute = git(
+                "check-attr", "text", "--", relative_path.as_posix(), cwd=checkout
+            )
+            assert attribute.stdout.strip().endswith("text: unset")
+        else:
+            attribute = git(
+                "check-attr", "eol", "--", relative_path.as_posix(), cwd=checkout
+            )
+            assert attribute.stdout.strip().endswith("eol: lf")
 
 
 def test_page_head_candidate_preserves_full_page_release_membership() -> None:
