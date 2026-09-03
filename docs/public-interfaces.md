@@ -114,6 +114,21 @@ Scripted Coordinator 显式注入 Evidence Reader；synthetic Evidence 不能进
 面向 CLI/Web 的 Operator Facade 继续以版本化 Profile、Plan Preview 和可重建 Read Model 提供
 受控外观，不复制领域状态；草案见 [M2 Operator Contract 草案](m2-operator-contract-draft.md)。
 
+M2a B 线新增 `m2a-formal-phase-execution-v1`，作为 Scripted Runner 之外的独立信任域。
+`M2FormalPhaseExecutionRequest` 将 A1 Formal Authorization/Resolved Plan、Formal Authority Context、
+三类 Profile、Round/Candidate/Artifact、Search 或 Holdout Plan、Target Lock refresh、
+Target/Host/HCU/CPU/NUMA、批准窗口、独占 Lease/续租/Fencing Token 和 Round Budget reservation
+冻结为同一请求。`M2FormalPhaseExecutionAdapter` 还必须通过部署侧 Reader 重读完整 Authorization
+和 Resolved Plan，并以部署签名验证器复验 owner signature，不能只核对请求里的 Hash。
+Adapter 只调用现有 `run_manual_performance()` Harness，不采样、不裁决；它在执行前后检查窗口、
+续租截止与 Fence，复核原始 Evidence URI/Hash 和 cleanup，按
+是否启动选择 release 或 settle，并由 `M2FormalPhaseExecutionReceiptStore` 发布内容寻址且
+Receipt ID write-once 的终态回执。成功回执保存完整 `RoundMeasurementRef`；部署显式配置的
+durable isolation authority 跨 Worker/重启拒绝复用 Measurement、sample/process/cache identity。
+Receipt 与 budget evidence 使用 no-follow 受保护根和原子 publish-once。过期 Lease 的恢复通过
+注入的 fenced recovery 完成，不由 Adapter 另建 Cleaner。无 HCU 测试只验证 Contract 和失败关闭，不获得 Formal Measurement 或
+`faster` 权限。
+
 OX-1 已提供 `m2-operator-v1` 的 synthetic Profile Registry 和持久化 Plan Preview。当前默认
 Catalog 只注册 Scripted Target/Workload/Measurement 三类不可变 Profile；公共接口包括
 `GET /v1/operator/identity`、Profile list/show，以及
