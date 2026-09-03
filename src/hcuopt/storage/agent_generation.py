@@ -22,6 +22,7 @@ from hcuopt.agent.authority import (
     validate_runner_receipt,
 )
 from hcuopt.agent.identity import candidate_proposal_batch_hash
+from hcuopt.contracts.agent_read_model_v1 import AgentGenerationEvidencePublication
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
     RunnerExecutionReceiptRef,
@@ -86,6 +87,10 @@ class AgentGenerationRepositoryMixin:
                 if name != "schema_version"
             }
         )
+
+    @staticmethod
+    def _evidence_publication(row: dict[str, Any]) -> AgentGenerationEvidencePublication:
+        return AgentGenerationEvidencePublication.model_validate(row["publication"])
 
     @staticmethod
     def _run_insert_values(run: GenerationRun) -> tuple[Any, ...]:
@@ -619,9 +624,9 @@ class AgentGenerationRepositoryMixin:
             raise ValueError("Agent generator claim lease must be between 1 and 7200 seconds")
         effective_now = now or datetime.now(timezone.utc)
         with self.connection() as connection:  # type: ignore[attr-defined]
-            run_row = connection.execute(
+            candidate_rows = connection.execute(
                 """
-                SELECT run.* FROM agent_generation_runs AS run
+                SELECT run.generation_run_id FROM agent_generation_runs AS run
                 WHERE run.state = 'running'
                   AND (%s::uuid IS NULL OR run.generation_run_id = %s)
                   AND EXISTS (
@@ -629,20 +634,44 @@ class AgentGenerationRepositoryMixin:
                       WHERE pending.generation_run_id = run.generation_run_id
                         AND pending.state = 'pending'
                   )
-                  AND (
-                      SELECT count(*) FROM agent_generator_attempts AS active
-                      WHERE active.generation_run_id = run.generation_run_id
-                        AND active.state = 'running'
-                  ) < (run.plan->>'max_concurrency')::integer
                 ORDER BY run.created_at, run.generation_run_id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
                 """,
                 (generation_run_id, generation_run_id),
-            ).fetchone()
-            if run_row is None:
+            ).fetchall()
+            run: GenerationRun | None = None
+            for candidate_row in candidate_rows:
+                run_row = connection.execute(
+                    """
+                    SELECT run.* FROM agent_generation_runs AS run
+                    WHERE run.generation_run_id = %s
+                      AND run.state = 'running'
+                      AND EXISTS (
+                          SELECT 1 FROM agent_generator_attempts AS pending
+                          WHERE pending.generation_run_id = run.generation_run_id
+                            AND pending.state = 'pending'
+                      )
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (candidate_row["generation_run_id"],),
+                ).fetchone()
+                if run_row is None:
+                    continue
+                locked_run = self._generation_run(run_row)
+                active_row = connection.execute(
+                    """
+                    SELECT count(*) AS active_count
+                    FROM agent_generator_attempts
+                    WHERE generation_run_id = %s AND state = 'running'
+                    """,
+                    (locked_run.generation_run_id,),
+                ).fetchone()
+                assert active_row is not None
+                if int(active_row["active_count"]) >= locked_run.plan.max_concurrency:
+                    continue
+                run = locked_run
+                break
+            if run is None:
                 return None
-            run = self._generation_run(run_row)
             attempt_row = connection.execute(
                 """
                 SELECT * FROM agent_generator_attempts
@@ -1015,3 +1044,81 @@ class AgentGenerationRepositoryMixin:
             ).fetchone()
             assert row is not None
             return self._generation_run(row)
+
+    def publish_agent_generation_evidence_publication(
+        self,
+        publication: AgentGenerationEvidencePublication,
+    ) -> AgentGenerationEvidencePublication:
+        """Publish one immutable D index after the Generation Run is terminal."""
+
+        with self.connection() as connection:  # type: ignore[attr-defined]
+            run = connection.execute(
+                """
+                SELECT state FROM agent_generation_runs
+                WHERE generation_run_id = %s FOR SHARE
+                """,
+                (publication.generation_run_id,),
+            ).fetchone()
+            if run is None:
+                raise NotFound(
+                    f"Agent Generation Run not found: {publication.generation_run_id}"
+                )
+            if run["state"] not in {"completed", "failed", "cancelled"}:
+                raise Conflict(
+                    "Agent Generation Evidence Read Model requires a terminal Run"
+                )
+            row = connection.execute(
+                """
+                INSERT INTO agent_generation_evidence_read_models (
+                    generation_run_id, verifier_version, input_digest, publication,
+                    published_at, dev_only, formal_readiness, performance_conclusion,
+                    formal_intake_allowed, hcu_access_allowed,
+                    measurement_access_allowed, automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, TRUE, 'hold', 'not_measured',
+                    FALSE, FALSE, FALSE, FALSE
+                )
+                ON CONFLICT (generation_run_id) DO NOTHING
+                RETURNING *
+                """,
+                (
+                    publication.generation_run_id,
+                    publication.verifier_version,
+                    publication.input_digest,
+                    Jsonb(publication.model_dump(mode="json")),
+                    publication.published_at,
+                ),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM agent_generation_evidence_read_models
+                    WHERE generation_run_id = %s
+                    """,
+                    (publication.generation_run_id,),
+                ).fetchone()
+            assert row is not None
+            stored = self._evidence_publication(row)
+            if stored != publication:
+                raise Conflict(
+                    "Agent Generation Evidence publication changed during replay"
+                )
+            return stored
+
+    def get_agent_generation_evidence_publication(
+        self,
+        generation_run_id: UUID,
+    ) -> AgentGenerationEvidencePublication:
+        with self.connection() as connection:  # type: ignore[attr-defined]
+            row = connection.execute(
+                """
+                SELECT * FROM agent_generation_evidence_read_models
+                WHERE generation_run_id = %s
+                """,
+                (generation_run_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(
+                f"Agent Generation Evidence Read Model not found: {generation_run_id}"
+            )
+        return self._evidence_publication(row)

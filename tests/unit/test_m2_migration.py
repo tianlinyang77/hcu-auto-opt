@@ -13,7 +13,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[14] == "0014_m2_formal_signoff_outbox.sql"
     assert MIGRATIONS[15] == "0015_m2b_agent_generation_authority.sql"
     assert MIGRATIONS[16] == "0016_m2b_runner_execution_receipt.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 17))
+    assert MIGRATIONS[17] == "0017_m2b_agent_evidence_read_model.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 18))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
