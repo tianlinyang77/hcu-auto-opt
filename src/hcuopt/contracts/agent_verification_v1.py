@@ -291,8 +291,8 @@ class AgentGenerationReadModel(ReadModel):
     package_promotion_status: str
     formal_readiness: Literal["hold"] = "hold"
     adapter_provenance: tuple[AdapterProvenance, ...]
-    synthetic: bool
-    environment: str
-    performance_conclusion: str
-    formal_intake_allowed: bool
-    automatic_release_allowed: bool
+    synthetic: Literal[True] = True
+    environment: Literal["scripted_dev_only"] = "scripted_dev_only"
+    performance_conclusion: Literal["not_measured"] = "not_measured"
+    formal_intake_allowed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
