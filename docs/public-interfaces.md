@@ -189,6 +189,12 @@ C 的实现边界位于：
   是应用 Overlay 后的完整 Candidate Worktree Hash，不是 Overlay 文件目录 Hash；
 - `src/hcuopt/adapters/business_candidate_family.py`：继续作为 2–4 个 business Package 的唯一
   source-family Verifier，并公开真实 Adapter Provenance 供 Promotion Receipt 冻结。
+- `BusinessCandidatePackageStoreDescriptor`：固定 C 线可信 Store、锁定 Baseline、共同测试任务、
+  允许替换路径和 2～4 个既有 `CandidateSourcePackageRef`；它是 Store 的部署描述，不是新的
+  Candidate 格式；
+- `BusinessCandidateFamilyVerificationRecord`：记录 Store 重读、完整 Baseline 源码重放和
+  Candidate Source Hash 复算结果，并携带 Store 描述固定的测试任务；记录固定为不访问 HCU、
+  未测量性能且不能自动发布。
 
 受控晋级固定为两阶段：
 
