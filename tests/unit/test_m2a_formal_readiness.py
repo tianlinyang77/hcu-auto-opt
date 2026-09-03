@@ -53,7 +53,7 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
 
     assert report.decision == "hold"
     assert report.generated_at == FIXED_TIME
-    assert report.verified_evidence_count == 23
+    assert report.verified_evidence_count == 26
     assert len(report.gate_results) == 13
     assert set(report.blocker_codes) == {
         "formal_authority_persistence",
@@ -62,7 +62,6 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
         "formal_operator_profiles",
         "formal_plan_compiler",
         "formal_start_intent",
-        "owner_window_authorization",
         "round_signoff_outbox",
         "target_lock_refresh",
         "review_a_pending",
@@ -177,6 +176,59 @@ def test_text_lf_digest_is_stable_across_checkout_line_endings(tmp_path: Path) -
     report = _auditor().evaluate(manifest, tmp_path)
 
     assert all(result.evidence_status == "verified" for result in report.gate_results)
+
+
+def test_ready_for_window_authorization_keeps_owner_decision_on_hold(
+    tmp_path: Path,
+) -> None:
+    evidence_path = tmp_path / "evidence.txt"
+    evidence_path.write_bytes(b"ready\n")
+    raw = load_formal_readiness_manifest(MANIFEST_PATH).model_dump(mode="json")
+    evidence = {
+        "path": "evidence.txt",
+        "sha256": _sha256(b"ready\n"),
+        "digest_mode": "raw_bytes",
+        "evidence_type": "test_ready_evidence",
+    }
+    raw["profile_draft"].update(
+        {
+            "registration_state": "implementation_ready_unregistered",
+            "candidate_family_state": "frozen",
+            "budget_state": "accepted",
+            "candidate_packages": [
+                {
+                    "candidate_source_hash": "sha256:" + "1" * 64,
+                    "source_package_hash": "sha256:" + "2" * 64,
+                    "manifest_hash": "sha256:" + "3" * 64,
+                    "manifest_schema_version": "m1-candidate-source-v1",
+                },
+                {
+                    "candidate_source_hash": "sha256:" + "4" * 64,
+                    "source_package_hash": "sha256:" + "5" * 64,
+                    "manifest_hash": "sha256:" + "6" * 64,
+                    "manifest_schema_version": "m1-candidate-source-v1",
+                },
+            ],
+            "candidate_family_hash": "sha256:" + "7" * 64,
+        }
+    )
+    for gate in raw["gates"]:
+        gate["status"] = "hold" if gate["code"] == "owner_window_authorization" else "pass"
+        gate["evidence"] = [evidence]
+    for review in raw["reviews"]:
+        review["decision"] = "accepted_for_formal_window"
+        review["evidence"] = evidence
+    manifest = FormalReadinessManifest.model_validate(raw)
+
+    report = _auditor().evaluate(manifest, tmp_path)
+
+    owner_gate = next(
+        gate for gate in report.gate_results if gate.code == "owner_window_authorization"
+    )
+    assert report.decision == "ready_for_window_authorization"
+    assert report.blocker_codes == ()
+    assert owner_gate.effective_status == "hold"
+    assert report.profile_registration_allowed is False
 
 
 @pytest.mark.parametrize("mutation", ["missing", "out_of_order"])

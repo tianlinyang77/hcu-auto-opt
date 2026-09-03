@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from hcuopt.contracts.operator_v1 import (
 from hcuopt.domain.enums import SearchRoundRunMode
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator.errors import (
+    OperatorFormalAuthorizationNotActive,
     OperatorPlanHashMismatch,
     OperatorProfileModeMismatch,
     OperatorProfileNotFound,
@@ -61,9 +63,26 @@ class OperatorProfileCatalog:
     def __init__(
         self,
         profiles: tuple[OperatorProfileDescriptor, ...],
-        *,
-        allow_real_profiles: bool = False,
     ) -> None:
+        self._initialize(profiles)
+
+    def _initialize(
+        self,
+        profiles: tuple[OperatorProfileDescriptor, ...],
+        *,
+        formal_authorization_hash: str | None = None,
+        formal_window_starts_at: datetime | None = None,
+        formal_window_expires_at: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        formal_fields = (
+            formal_authorization_hash,
+            formal_window_starts_at,
+            formal_window_expires_at,
+        )
+        has_formal_authorization = all(value is not None for value in formal_fields)
+        if any(value is not None for value in formal_fields) != has_formal_authorization:
+            raise ValueError("Formal Profile Catalog authorization must be atomic")
         indexed: dict[tuple[str, str, int], OperatorProfileDescriptor] = {}
         for profile in profiles:
             content = OperatorProfileContent.model_validate(
@@ -71,14 +90,40 @@ class OperatorProfileCatalog:
             )
             if operator_profile_hash(content) != profile.profile_hash:
                 raise ValueError("Operator Profile content does not match profile_hash")
-            if not allow_real_profiles and not profile.synthetic:
+            if not has_formal_authorization and not profile.synthetic:
                 raise ValueError("Real Operator Profiles require separate authorization")
+            if has_formal_authorization and profile.synthetic:
+                raise ValueError("Formal Operator Profile Catalog cannot mix synthetic Profiles")
             identity = (profile.profile_kind, profile.profile_id, profile.profile_version)
             if identity in indexed:
                 raise ValueError("Operator Profile identity must be unique")
             indexed[identity] = profile
         self._profiles = indexed
         self.catalog_hash = profile_catalog_hash(tuple(indexed.values()))
+        self.formal_authorization_hash = formal_authorization_hash
+        self._formal_window_starts_at = formal_window_starts_at
+        self._formal_window_expires_at = formal_window_expires_at
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def _from_verified_formal_profiles(
+        cls,
+        profiles: tuple[OperatorProfileDescriptor, ...],
+        *,
+        authorization_hash: str,
+        window_starts_at: datetime,
+        window_expires_at: datetime,
+        clock: Callable[[], datetime],
+    ) -> OperatorProfileCatalog:
+        catalog = cls.__new__(cls)
+        catalog._initialize(
+            profiles,
+            formal_authorization_hash=authorization_hash,
+            formal_window_starts_at=window_starts_at,
+            formal_window_expires_at=window_expires_at,
+            clock=clock,
+        )
+        return catalog
 
     def list(
         self, profile_kind: str | None = None
@@ -118,6 +163,18 @@ class OperatorProfileCatalog:
             raise OperatorPlanHashMismatch("Operator Profile Hash changed")
         if profile.state == "revoked":
             raise OperatorProfileRevoked("Operator Profile cannot start new work")
+        if not profile.synthetic:
+            assert self._formal_window_starts_at is not None
+            assert self._formal_window_expires_at is not None
+            now = self._clock()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise OperatorFormalAuthorizationNotActive(
+                    "Formal authorization clock must be timezone-aware"
+                )
+            if not self._formal_window_starts_at <= now < self._formal_window_expires_at:
+                raise OperatorFormalAuthorizationNotActive(
+                    "Formal Operator Profile authorization window is not active"
+                )
         if run_mode not in profile.allowed_run_modes:
             raise OperatorProfileModeMismatch(
                 "Operator Profile does not allow the requested run mode"

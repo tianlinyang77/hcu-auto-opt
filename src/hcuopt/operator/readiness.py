@@ -59,6 +59,10 @@ def formal_readiness_manifest_hash(manifest: FormalReadinessManifest) -> str:
     return _sha256_bytes(canonical_json_bytes(manifest))
 
 
+def formal_readiness_report_hash(report: FormalReadinessReport) -> str:
+    return _sha256_bytes(canonical_json_bytes(report))
+
+
 class FormalReadinessAuditor:
     """Verify one no-HCU readiness snapshot without granting execution authority."""
 
@@ -106,7 +110,13 @@ class FormalReadinessAuditor:
                     verified_paths.add(reference.path)
             evidence_status = self._combined_evidence_status(statuses)
             effective_status = gate.status if evidence_status == "verified" else "block"
-            if effective_status != "pass":
+            # This gate records that the separate project-owner decision is still
+            # absent. It must stay on hold while deciding whether the implementation
+            # is ready to request that decision; invalid policy evidence still blocks.
+            owner_decision_pending = (
+                gate.code == "owner_window_authorization" and effective_status == "hold"
+            )
+            if effective_status != "pass" and not owner_decision_pending:
                 blockers.add(gate.code)
             if evidence_status != "verified":
                 blockers.add(f"{gate.code}_evidence_{evidence_status}")

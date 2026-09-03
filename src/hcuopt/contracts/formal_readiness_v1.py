@@ -58,7 +58,10 @@ class FormalReadinessEvidenceRef(ContractModel):
 
 class FormalProfileDraft(ContractModel):
     profile_version: int = Field(ge=1)
-    registration_state: Literal["draft_unregistered"] = "draft_unregistered"
+    registration_state: Literal[
+        "draft_unregistered",
+        "implementation_ready_unregistered",
+    ] = "draft_unregistered"
     run_mode: Literal["formal"] = "formal"
     project_mode: Literal["degraded_manual_intake"] = "degraded_manual_intake"
     target_profile_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
@@ -160,7 +163,7 @@ class FormalReadinessManifest(ContractModel):
             self.profile_draft.registration_state == "draft_unregistered"
             and by_code["formal_operator_profiles"].status == "pass"
         ):
-            raise ValueError("unregistered Formal Profiles cannot pass readiness")
+            raise ValueError("unimplemented Formal Profile registration cannot pass readiness")
         if (
             self.profile_draft.candidate_family_state == "missing"
             and by_code["business_candidate_family"].status == "pass"
