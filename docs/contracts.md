@@ -26,6 +26,8 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | CandidateProposal | Agent | A/C/D | 同时冻结完整 Request Hash 与待审 Patch 身份；不是 Candidate 或性能结论 |
 | CandidateProposalReviewRecord | C/人工审核人 | A/C/D | 决策绑定 Proposal、Request、Patch、Baseline、Hotspot、审核人、原因、时间、幂等键和审核证据 |
 | CandidateProposalPromotionReceipt | C | A/D | 只引用既有 `CandidateSourcePackageRef` 与 M2a source-family verifier 证据；不得新造 Candidate/Artifact/Family |
+| BusinessCandidatePackageStoreDescriptor | C | A/D | 固定同一可信 Store 中的 2～4 个真实源码包、Baseline、测试任务和允许替换路径 |
+| BusinessCandidateFamilyVerificationRecord | C Verifier | A/D | Store 重读和 Baseline 源码重放均通过，并固定 Store 描述中的测试任务；只表示可申请正式测试窗口，不表示正确或更快 |
 | ApexGenerationPlan | A | Agent/B/C/D | 只控制生成器、Generator Artifact Hash、重试、去重和生成预算；不控制 Round/HCU |
 | AgentRunRequest / RunnerExecutionRecord | A/B runtime | B Receipt Store | 受限 Runner 边界；绑定 Attempt/Run/Request/Plan/generator、Runner provenance、Generator/Executable 内容 Hash；进程域、输入、环境和生成预算受限，失败时不返回 Proposal bytes |
 | RunnerExecutionReceipt / Ref | B deployment | A/C/D | 内容寻址且不可变；绑定执行状态、实际 usage、raw output、cleanup 与 Runner provenance；失败 Receipt 不暴露 raw Proposal |
