@@ -1,4 +1,9 @@
 from hcuopt.operator.discovery import OperatorDiscoveryService
+from hcuopt.operator.formal_plans import (
+    FormalOperatorPlanCompiler,
+    formal_operator_preview_request_digest,
+    formal_operator_resolved_plan_hash,
+)
 from hcuopt.operator.formal_profiles import (
     DeploymentFormalProfileGrantVerifier,
     build_formal_operator_profile_catalog,
@@ -31,9 +36,12 @@ __all__ = [
     "OperatorStartCoordinator",
     "HmacScriptedPlanAuthority",
     "DeploymentFormalProfileGrantVerifier",
+    "FormalOperatorPlanCompiler",
     "build_operator_service_identity",
     "build_formal_operator_profile_catalog",
     "build_scripted_operator_profile_catalog",
+    "formal_operator_preview_request_digest",
+    "formal_operator_resolved_plan_hash",
     "operator_profile_hash",
     "operator_preview_request_digest",
     "operator_resolved_plan_hash",

@@ -106,7 +106,7 @@ gates:
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py
-        sha256: sha256:cbd95b8b45c7a912439ac35b58d064f364a8024c1d9f3348b02430918c4ecc14
+        sha256: sha256:8b288c32e19adc3d644b83e38f7d3f7f46a0c815ba92c2835a221c6ff26fae73
         digest_mode: text_lf
         evidence_type: formal_repository_terminal_transactions
       - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql
@@ -147,14 +147,26 @@ gates:
         evidence_type: formal_profile_authorization_negative_tests
   - code: formal_plan_compiler
     owner: A
-    status: block
-    summary: Operator Plan Preview explicitly rejects every mode except synthetic Scripted.
-    required_action: Add a separate Formal compiler path that resolves live PostgreSQL Authority, business Candidate Store bindings, Target Lock freshness, and D-owned sealed Holdout plans.
+    status: hold
+    summary: A2a now has a separate Formal Plan Contract, compiler, Store reread, canonical Family member mapping, PostgreSQL Authority reread, and fail-closed drift tests without creating a Round.
+    required_action: Keep this gate on hold until D-owned sealed Holdout Authority is frozen and A3/A4 add separately persisted Start/reconcile plus PostgreSQL concurrency and crash-recovery coverage.
     evidence:
       - path: src/hcuopt/operator/plans.py
         sha256: sha256:786f0d33d197b41a7dae9f17c5d6cfcbdee61663c56e2c0ad5139053b7821742
         digest_mode: text_lf
         evidence_type: scripted_only_plan_compiler
+      - path: src/hcuopt/contracts/m2_formal_operator_v1.py
+        sha256: sha256:f86906a808f0a2537101d12b2a091ca9d4706058731192a41f779f4bcfc7affb
+        digest_mode: text_lf
+        evidence_type: isolated_formal_plan_contract
+      - path: src/hcuopt/operator/formal_plans.py
+        sha256: sha256:9a5d3ca3ad81227f8f9f877e91cb46a2b2f901484676f3fbd163ac499bbd0738
+        digest_mode: text_lf
+        evidence_type: formal_plan_compiler_and_revalidation
+      - path: tests/unit/test_formal_operator_plans.py
+        sha256: sha256:c83425c2d5c01df38dcd9e144ee74fbd2e4fcb6f83cc7de9cbe603f9fd84bce7
+        digest_mode: text_lf
+        evidence_type: formal_plan_compiler_negative_tests
   - code: formal_start_intent
     owner: A
     status: block

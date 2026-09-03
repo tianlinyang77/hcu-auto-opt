@@ -24,6 +24,7 @@ from hcuopt.contracts.m2 import (
     RoundCandidateBuildTerminal,
     SearchRound,
 )
+from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.m2_formal_authority_v1 import (
     FormalAuthorityContextDescriptor,
     FormalAuthorityContextRef,
@@ -31,6 +32,7 @@ from hcuopt.contracts.m2_formal_authority_v1 import (
     FormalVerifierRef,
     formal_authority_context_ref,
 )
+from hcuopt.contracts.m2_formal_operator_v1 import FormalOperatorAuthoritySnapshot
 from hcuopt.contracts.m2_formal_signoff_v1 import (
     FormalDecisionSignature,
     FormalRoundSignoff,
@@ -587,6 +589,186 @@ class PostgresRepository(AgentGenerationRepositoryMixin):
             profiler_evidence_hash=evidence["profiler_raw_output_hash"],
             synthetic=True,
         )
+
+    def resolve_formal_operator_authority(
+        self,
+        target: TargetOperatorProfileRefs,
+        workload: WorkloadOperatorProfileRefs,
+        candidate_family: BusinessCandidateFamilyManifest,
+    ) -> FormalOperatorAuthoritySnapshot:
+        """Reread one exact non-synthetic Authority selected by a frozen Family."""
+
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    snapshot.target_snapshot_id,
+                    snapshot.target_id,
+                    snapshot.target_fingerprint,
+                    run.stage0_run_id,
+                    run.mode AS stage0_mode,
+                    run.state AS stage0_state,
+                    run.protocol_version AS stage0_protocol_version,
+                    stage0_task.stage0_authority,
+                    stage0_task.project_mode AS stage0_project_mode,
+                    stage0_task.automatic_release_allowed AS stage0_auto_release,
+                    stage0_evidence.evidence AS stage0_evidence,
+                    stage0_evidence.report AS stage0_report,
+                    baseline.baseline_epoch_id,
+                    baseline.frozen AS baseline_frozen,
+                    baseline.baseline_kind,
+                    baseline.target_snapshot_id AS baseline_target_snapshot_id,
+                    baseline.stage0_run_id AS baseline_stage0_run_id,
+                    baseline.stage0_protocol_hash,
+                    baseline.workload_id,
+                    baseline.workload_hash,
+                    baseline.configuration_hash,
+                    baseline.image_digest,
+                    source.source_hash AS baseline_source_hash,
+                    source.clean AS baseline_source_clean,
+                    source.synthetic AS baseline_source_synthetic,
+                    source.adapter_provenance AS baseline_source_provenance,
+                    hotspot.hotspot_id,
+                    hotspot.baseline_epoch_id AS hotspot_baseline_epoch_id,
+                    hotspot.intake_hash AS hotspot_intake_hash,
+                    hotspot.candidate_kind AS hotspot_candidate_kind,
+                    hotspot.evidence AS hotspot_evidence
+                FROM target_snapshots AS snapshot
+                JOIN stage0_runs AS run
+                  ON run.target_snapshot_id = snapshot.target_snapshot_id
+                JOIN tasks AS stage0_task ON stage0_task.task_id = run.task_id
+                JOIN stage0_evidence
+                  ON stage0_evidence.stage0_run_id = run.stage0_run_id
+                JOIN baseline_epochs AS baseline
+                  ON baseline.target_snapshot_id = snapshot.target_snapshot_id
+                 AND baseline.stage0_run_id = run.stage0_run_id
+                JOIN source_snapshots AS source
+                  ON source.snapshot_id = baseline.source_snapshot_id
+                JOIN hotspots AS hotspot
+                  ON hotspot.baseline_epoch_id = baseline.baseline_epoch_id
+                WHERE snapshot.target_snapshot_id = %s
+                  AND run.stage0_run_id = %s
+                  AND baseline.baseline_epoch_id = %s
+                  AND hotspot.hotspot_id = %s
+                FOR SHARE OF snapshot, run, stage0_task, stage0_evidence,
+                    baseline, source, hotspot
+                """,
+                (
+                    candidate_family.target_snapshot_id,
+                    candidate_family.stage0_run_id,
+                    candidate_family.baseline_epoch_id,
+                    candidate_family.hotspot_id,
+                ),
+            ).fetchone()
+        if row is None:
+            raise NotFound("matching Formal Operator Authority not found")
+
+        stage0_evidence = dict(row["stage0_evidence"])
+        stage0_report = dict(row["stage0_report"])
+        source_provenance = row["baseline_source_provenance"]
+        expected_authority = {
+            "target_id": target.target_id,
+            "target_fingerprint": target.target_spec_hash,
+            "stage0_mode": Stage0RunMode.FORMAL.value,
+            "stage0_state": Stage0RunState.FINALIZED.value,
+            "stage0_authority": "formal",
+            "stage0_project_mode": ProjectMode.DEGRADED_MANUAL_INTAKE.value,
+            "stage0_auto_release": False,
+            "baseline_frozen": True,
+            "baseline_kind": WorkflowType.MANUAL_CANDIDATE.value,
+            "baseline_target_snapshot_id": candidate_family.target_snapshot_id,
+            "baseline_stage0_run_id": candidate_family.stage0_run_id,
+            "stage0_protocol_hash": target.required_stage0_protocol_hash,
+            "workload_id": workload.workload_id,
+            "workload_hash": workload.workload_hash,
+            "configuration_hash": workload.configuration_hash,
+            "baseline_source_hash": candidate_family.baseline_source_hash,
+            "baseline_source_clean": True,
+            "baseline_source_synthetic": False,
+            "hotspot_baseline_epoch_id": candidate_family.baseline_epoch_id,
+            "hotspot_candidate_kind": ManualCandidateKind.BUSINESS.value,
+        }
+        if any(row[name] != value for name, value in expected_authority.items()):
+            raise Conflict("Formal Operator Authority bindings do not match")
+        if (
+            stage0_evidence.get("synthetic") is not False
+            or stage0_evidence.get("stage0_run_id")
+            != str(candidate_family.stage0_run_id)
+            or stage0_evidence.get("protocol_version")
+            != row["stage0_protocol_version"]
+            or stage0_evidence.get("protocol_hash")
+            != target.required_stage0_protocol_hash
+            or stage0_report.get("evidence_authority") != "formal"
+            or stage0_report.get("automatic_release_allowed") is not False
+            or not isinstance(source_provenance, list)
+            or not source_provenance
+            or any(
+                not isinstance(item, dict)
+                or item.get("implementation_kind") == "fake"
+                for item in source_provenance
+            )
+        ):
+            raise Conflict("Formal Operator Authority evidence is incomplete or synthetic")
+
+        evidence = dict(row["hotspot_evidence"])
+        hotspot_payload: dict[str, Any] = {
+            "source": (
+                "manual"
+                if evidence.get("manual_intake_uri") is not None
+                or evidence.get("manual_intake_hash") is not None
+                else "profiler"
+            ),
+            "hotspot_id": row["hotspot_id"],
+            "hotspot_intake_hash": row["hotspot_intake_hash"],
+            "profiler_evidence_uri": evidence.get("profiler_raw_output_uri"),
+            "profiler_evidence_hash": evidence.get("profiler_raw_output_hash"),
+            "correctness_evidence_uri": evidence.get("correctness_spec_uri"),
+            "correctness_evidence_hash": evidence.get("correctness_spec_hash"),
+            "replacement_point": evidence.get("replacement_point"),
+            "workload_hash": row["workload_hash"],
+            "shape": tuple(evidence.get("shape", ())),
+            "dtype": evidence.get("dtype"),
+        }
+        if hotspot_payload["source"] == "manual":
+            hotspot_payload.update(
+                manual_intake_uri=evidence.get("manual_intake_uri"),
+                manual_intake_hash=evidence.get("manual_intake_hash"),
+            )
+        try:
+            hotspot = (
+                ManualOperatorHotspotRef.model_validate(hotspot_payload)
+                if hotspot_payload["source"] == "manual"
+                else ProfilerOperatorHotspotRef.model_validate(hotspot_payload)
+            )
+        except ValidationError as error:
+            raise Conflict("stored Formal Hotspot Authority is incomplete or invalid") from error
+        if (
+            evidence.get("replacement_point") != candidate_family.replacement_point
+            or evidence.get("profiler_raw_output_uri")
+            != candidate_family.profiler_evidence_uri
+            or evidence.get("profiler_raw_output_hash")
+            != candidate_family.profiler_evidence_hash
+        ):
+            raise Conflict("Formal Hotspot Authority drifted from the Candidate Family")
+
+        authority = ResolvedOperatorAuthority(
+            target_snapshot_id=row["target_snapshot_id"],
+            stage0_run_id=row["stage0_run_id"],
+            stage0_protocol_hash=row["stage0_protocol_hash"],
+            baseline_epoch_id=row["baseline_epoch_id"],
+            baseline_source_hash=row["baseline_source_hash"],
+            hotspot_id=row["hotspot_id"],
+            replacement_point=evidence["replacement_point"],
+            workload_id=row["workload_id"],
+            workload_hash=row["workload_hash"],
+            configuration_hash=row["configuration_hash"],
+            image_digest=row["image_digest"],
+            adapter_profile=target.adapter_profile,
+            profiler_evidence_uri=evidence["profiler_raw_output_uri"],
+            profiler_evidence_hash=evidence["profiler_raw_output_hash"],
+            synthetic=False,
+        )
+        return FormalOperatorAuthoritySnapshot(authority=authority, hotspot=hotspot)
 
     def assert_operator_candidate_ids_available(
         self,
