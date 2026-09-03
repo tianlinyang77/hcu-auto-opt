@@ -76,9 +76,14 @@ release_mode: hot_patch | overlay | manual_only
 
 M2a Formal Phase Adapter 在预算 reserve 前必须同时验证 A1 Authorization/Resolved Plan、Authority
 Context、版本化 Adapter Profile、Target Lock refresh、Target/Host/HCU/CPU/NUMA、批准窗口、独占
-Lease 的权威回执/续租截止时间和当前 Fencing Token。过期 Lease 先通过注入的 fenced recovery
+Lease 的权威回执/续租截止时间和当前 Fencing Token。A1 Authorization 与 A2a Resolved Plan 必须
+由部署侧重读并复验 owner signature、内容 Hash、Profile/Family/预算/窗口，不能信任请求自报。
+过期 Lease 先通过注入的 fenced recovery
 恢复资源再拒绝执行；Harness 未启动时取消使用 release；一旦启动，成功、timeout、证据失败和
-cleanup 失败都使用 settle，并发布内容寻址、Receipt ID 不可改绑的终态回执。回执固定
+cleanup 失败都使用 settle；同步 Harness 的计划上限和实际执行均不得跨续租截止时间。成功回执
+携带既有完整 `RoundMeasurementRef`，durable authority 跨进程拒绝复用 Measurement、原始证据、
+baseline sample、process identity 与 cache namespace。终态回执通过 no-follow 受保护根原子发布，
+Receipt ID 不可改绑，并固定
 `performance_conclusion=not_measured`，统计裁决仍只属于 D。
 
 错误使用稳定结构：

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,16 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import pytest
 from pydantic import ValidationError
 
+from hcuopt.contracts.formal_profile_authorization_v1 import (
+    FormalProfileGrantVerifierRef,
+    FormalProfileSetRef,
+    FormalProfileWindowAuthorization,
+    FormalProfileWindowAuthorizationContent,
+    publish_formal_profile_window_authorization,
+)
 from hcuopt.contracts.m2 import (
     BudgetUsage,
+    CandidateSourcePackageRef,
     RoundBudget,
     RoundBudgetMutationResult,
     RoundBudgetReservationView,
@@ -35,6 +44,13 @@ from hcuopt.contracts.m2_formal_execution_v1 import (
     publish_m2_formal_execution_adapter_profile,
     publish_m2_formal_target_lock_refresh,
 )
+from hcuopt.contracts.m2_formal_operator_v1 import FormalResolvedRoundPlan
+from hcuopt.contracts.operator_v1 import (
+    OperatorProfileRef,
+    ProfilerOperatorHotspotRef,
+    ResolvedOperatorAuthority,
+    ResolvedOperatorCandidate,
+)
 from hcuopt.contracts.platform_v1 import AdapterProvenance, MeasurementSeries
 from hcuopt.contracts.v1 import ManualPerformanceEvidenceResult
 from hcuopt.domain.enums import (
@@ -46,17 +62,64 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.domain.errors import SourceArtifactError
 from hcuopt.measurement.harness import MeasurementSafetyError
+from hcuopt.measurement.m2_formal_isolation import (
+    SqliteM2FormalPhaseIsolationAuthority,
+)
 from hcuopt.measurement.m2_formal_receipt import M2FormalPhaseExecutionReceiptStore
 from hcuopt.measurement.m2_formal_runner import (
     M2FormalExecutionFailure,
     M2FormalHarnessFailure,
     M2FormalPhaseExecutionAdapter,
-    M2FormalPhaseIsolationRegistry,
 )
 from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan
+from hcuopt.operator.formal_plans import formal_operator_resolved_plan_hash
 
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
 PROFILE = "m2a-formal-measurement-v1"
+VERIFIER_REF = FormalProfileGrantVerifierRef(
+    verifier_id="test-formal-verifier",
+    verifier_version="1",
+    verifier_hash="sha256:" + "1" * 64,
+    signature_scheme="test-sha256-v1",
+    key_id="test-key",
+)
+AUTHORIZATIONS: dict[object, FormalProfileWindowAuthorization] = {}
+RESOLVED_PLANS: dict[str, FormalResolvedRoundPlan] = {}
+
+
+class AuthorityReader:
+    def load_authorization(self, authorization_id):  # type: ignore[no-untyped-def]
+        return AUTHORIZATIONS[authorization_id]
+
+    def load_resolved_plan(self, resolved_plan_hash):  # type: ignore[no-untyped-def]
+        return RESOLVED_PLANS[resolved_plan_hash]
+
+
+class AuthorizationVerifier:
+    verifier_ref = VERIFIER_REF
+
+    def verify_signature(self, *, authorization_hash, signature):  # type: ignore[no-untyped-def]
+        return bool(authorization_hash and signature == "test-signature")
+
+
+class StaticAuthorityReader:
+    def __init__(self, authorization, plan):  # type: ignore[no-untyped-def]
+        self.authorization = authorization
+        self.plan = plan
+
+    def load_authorization(self, authorization_id):  # type: ignore[no-untyped-def]
+        del authorization_id
+        return self.authorization
+
+    def load_resolved_plan(self, resolved_plan_hash):  # type: ignore[no-untyped-def]
+        del resolved_plan_hash
+        return self.plan
+
+
+class RejectingAuthorizationVerifier(AuthorizationVerifier):
+    def verify_signature(self, *, authorization_hash, signature):  # type: ignore[no-untyped-def]
+        del authorization_hash, signature
+        return False
 
 
 def _hash(value: str) -> str:
@@ -193,6 +256,149 @@ def _member(round_authority: SearchRound, phase: RoundPhase) -> RoundCandidate:
     )
 
 
+def _register_execution_authority(
+    round_authority: SearchRound,
+    authority,
+    member: RoundCandidate,
+) -> tuple[FormalProfileWindowAuthorization, str]:  # type: ignore[no-untyped-def]
+    profiles = FormalProfileSetRef(
+        target_profile=OperatorProfileRef(
+            profile_id="test-formal-target",
+            profile_version=1,
+            profile_kind="target",
+            profile_hash=authority.target_profile_hash,
+        ),
+        workload_profile=OperatorProfileRef(
+            profile_id="test-formal-workload",
+            profile_version=1,
+            profile_kind="workload",
+            profile_hash=authority.workload_profile_hash,
+        ),
+        measurement_profile=OperatorProfileRef(
+            profile_id="test-formal-measurement",
+            profile_version=1,
+            profile_kind="measurement",
+            profile_hash=authority.measurement_profile_hash,
+        ),
+    )
+    assert round_authority.candidate_family_hash is not None
+    authorization = publish_formal_profile_window_authorization(
+        FormalProfileWindowAuthorizationContent(
+            authorization_id=uuid4(),
+            decision="authorized",
+            readiness_audit_id="test-formal-readiness",
+            readiness_audit_base_commit="a" * 40,
+            readiness_manifest_hash=_hash("readiness-manifest"),
+            readiness_report_hash=_hash("readiness-report"),
+            profiles=profiles,
+            source_family_hash=round_authority.candidate_family_hash,
+            budget=round_authority.budget,
+            host_id="nmz36",
+            resource_id="hcu-7",
+            window_starts_at=NOW - timedelta(minutes=1),
+            window_expires_at=NOW + timedelta(minutes=10),
+            authorized_by="test-formal-owner",
+            authorization_evidence_uri="evidence:///formal/window.json",
+            authorization_evidence_hash=_hash("window-evidence"),
+            issued_at=NOW - timedelta(minutes=2),
+            verifier=VERIFIER_REF,
+        ),
+        signature="test-signature",
+    )
+    assert member.artifact_id is not None
+    assert member.artifact_hash is not None
+    candidate = ResolvedOperatorCandidate(
+        ordinal=0,
+        candidate_id=member.candidate_id,
+        source_package_store_id=member.source_package_store_id,
+        source_package_store_version=1,
+        source_package_store_hash=member.source_package_store_hash,
+        source_package_ref=CandidateSourcePackageRef(
+            candidate_source_hash=member.candidate_source_hash,
+            source_package_hash=member.source_package_hash,
+            manifest_hash=member.source_manifest_hash,
+            manifest_schema_version=member.source_manifest_version,
+        ),
+        baseline_source_hash=member.baseline_source_hash,
+        hotspot_id=round_authority.hotspot_id,
+        replacement_point=round_authority.replacement_point,
+        candidate_kind="business",
+        optimization_intent=member.optimization_intent,
+    )
+    second = candidate.model_copy(
+        update={
+            "ordinal": 1,
+            "candidate_id": uuid5(member.candidate_id, "second-formal-candidate"),
+            "source_package_ref": candidate.source_package_ref.model_copy(
+                update={
+                    "candidate_source_hash": _hash(
+                        f"second-candidate-{member.candidate_id}"
+                    ),
+                    "source_package_hash": _hash(f"second-package-{member.candidate_id}"),
+                    "manifest_hash": _hash(f"second-manifest-{member.candidate_id}"),
+                }
+            ),
+            "optimization_intent": "second Formal business Candidate",
+        }
+    )
+    hotspot = ProfilerOperatorHotspotRef(
+        source="profiler",
+        hotspot_id=round_authority.hotspot_id,
+        hotspot_intake_hash=_hash("hotspot-intake"),
+        profiler_evidence_uri="evidence:///formal/profiler.json",
+        profiler_evidence_hash=_hash("profiler-evidence"),
+        correctness_evidence_uri="evidence:///formal/correctness.json",
+        correctness_evidence_hash=_hash("correctness-evidence"),
+        replacement_point=round_authority.replacement_point,
+        workload_hash=round_authority.workload_hash,
+        shape=(1,),
+        dtype="float32",
+    )
+    plan = FormalResolvedRoundPlan(
+        target_profile=profiles.target_profile,
+        workload_profile=profiles.workload_profile,
+        measurement_profile=profiles.measurement_profile,
+        hotspot=hotspot,
+        authority=ResolvedOperatorAuthority(
+            target_snapshot_id=round_authority.target_snapshot_id,
+            stage0_run_id=round_authority.stage0_run_id,
+            stage0_protocol_hash=round_authority.stage0_protocol_hash,
+            baseline_epoch_id=round_authority.baseline_epoch_id,
+            baseline_source_hash=member.baseline_source_hash,
+            hotspot_id=round_authority.hotspot_id,
+            replacement_point=round_authority.replacement_point,
+            workload_id=round_authority.workload_id,
+            workload_hash=round_authority.workload_hash,
+            configuration_hash=round_authority.configuration_hash,
+            image_digest=round_authority.image_digest,
+            adapter_profile=round_authority.adapter_profile,
+            profiler_evidence_uri=hotspot.profiler_evidence_uri,
+            profiler_evidence_hash=hotspot.profiler_evidence_hash,
+            synthetic=False,
+        ),
+        candidates=(candidate, second),
+        candidate_input_set_hash=_hash(f"candidate-inputs-{member.candidate_id}"),
+        search_protocol_version="m2-search-v1",
+        search_protocol_hash=_hash("search-protocol"),
+        holdout_protocol_version="m2-holdout-v1",
+        holdout_protocol_hash=_hash("holdout-protocol"),
+        selection_rule_hash=round_authority.selection_rule_hash,
+        budget=round_authority.budget,
+        max_promoted=round_authority.max_promoted,
+        formal_authorization_hash=authorization.authorization_hash,
+        authorized_host_id=authorization.host_id,
+        authorized_resource_id=authorization.resource_id,
+        authorization_window_starts_at=authorization.window_starts_at,
+        authorization_window_expires_at=authorization.window_expires_at,
+        authorized_source_family_hash=authorization.source_family_hash,
+        source_family_hash=authorization.source_family_hash,
+    )
+    resolved_plan_hash = formal_operator_resolved_plan_hash(plan)
+    AUTHORIZATIONS[authorization.authorization_id] = authorization
+    RESOLVED_PLANS[resolved_plan_hash] = plan
+    return authorization, resolved_plan_hash
+
+
 def _request(round_authority, authority, member, phase):  # type: ignore[no-untyped-def]
     phase_plan_hash = (
         round_authority.search_plan_hash
@@ -209,14 +415,20 @@ def _request(round_authority, authority, member, phase):  # type: ignore[no-unty
         exclusive_lease_seconds=20,
     )
     adapter_profile = _adapter_profile()
+    authorization, resolved_plan_hash = _register_execution_authority(
+        round_authority, authority, member
+    )
     binding = M2FormalExecutionBinding(
-        formal_authorization_id=uuid4(),
-        formal_authorization_hash=_hash("formal-authorization"),
-        resolved_plan_hash=_hash("resolved-plan"),
+        formal_authorization_id=authorization.authorization_id,
+        formal_authorization_hash=authorization.authorization_hash,
+        resolved_plan_hash=resolved_plan_hash,
         authority_context_id=authority.authority_context_id,
         authority_context_hash=authority.context_hash,
         round_id=round_authority.round_id,
         task_id=round_authority.task_id,
+        candidate_family_hash=round_authority.candidate_family_hash,
+        artifact_family_hash=round_authority.artifact_family_hash,
+        holdout_family_hash=round_authority.holdout_family_hash,
         round_candidate_id=member.round_candidate_id,
         candidate_id=member.candidate_id,
         artifact_id=member.artifact_id,
@@ -254,8 +466,8 @@ def _request(round_authority, authority, member, phase):  # type: ignore[no-unty
         lease_renewal_sequence=1,
         lease_expires_at=NOW + timedelta(minutes=20),
         window=M2FormalExecutionWindow(
-            starts_at=NOW - timedelta(minutes=1),
-            expires_at=NOW + timedelta(minutes=10),
+            starts_at=authorization.window_starts_at,
+            expires_at=authorization.window_expires_at,
         ),
         job_id=job_id,
         attempt=1,
@@ -344,6 +556,14 @@ class TickClock:
         return value
 
 
+class SequenceClock:
+    def __init__(self, *values: datetime) -> None:
+        self.values = iter(values)
+
+    def __call__(self) -> datetime:
+        return next(self.values)
+
+
 def _result(tmp_path: Path, request) -> ManualPerformanceEvidenceResult:  # type: ignore[no-untyped-def]
     raw = tmp_path / f"raw-{request.binding.phase.value}.json"
     raw.write_text(
@@ -359,9 +579,11 @@ def _result(tmp_path: Path, request) -> ManualPerformanceEvidenceResult:  # type
         adapter_version="1",
         implementation_kind="real",
     )
+    measurement_id = uuid4()
     return ManualPerformanceEvidenceResult(
         candidate_id=request.binding.candidate_id,
         measurement=MeasurementSeries(
+            measurement_id=measurement_id,
             status="measured",
             metric_name="kernel_elapsed",
             unit="ns",
@@ -370,7 +592,12 @@ def _result(tmp_path: Path, request) -> ManualPerformanceEvidenceResult:  # type
             raw_samples_uri=raw.resolve().as_uri(),
             raw_samples_hash=digest,
             environment_fingerprint=_hash("environment"),
-            summary={"plan_hash": request.binding.measurement_plan_hash},
+            summary={
+                "plan_hash": request.binding.measurement_plan_hash,
+                "baseline_sample_set_hash": _hash(f"baseline-{measurement_id}"),
+                "process_identity_set_hash": _hash(f"process-{measurement_id}"),
+                "cache_namespace_set_hash": _hash(f"cache-{measurement_id}"),
+            },
             adapter_provenance=provenance,
         ),
         cleanup_evidence=_cleanup(request.binding),
@@ -394,6 +621,13 @@ def _cleanup(binding):  # type: ignore[no-untyped-def]
             "clocks_restored": True,
         },
     }
+
+
+def _directory_symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink is unavailable: {error}")
 
 
 def _refresh(binding, mode="matched"):  # type: ignore[no-untyped-def]
@@ -458,6 +692,9 @@ def _adapter(
     target_lock=lambda _binding, _now: True,
     recover_expired=None,
     probe=None,
+    authority_reader=None,
+    authorization_verifier=None,
+    clock=None,
 ):  # type: ignore[no-untyped-def]
     return M2FormalPhaseExecutionAdapter(
         harness=harness,
@@ -465,12 +702,17 @@ def _adapter(
         target_lock_probe=probe or TargetLockProbe(),
         budget_authority=budget,
         receipt_store=M2FormalPhaseExecutionReceiptStore(tmp_path / "receipts"),
+        authority_reader=authority_reader or AuthorityReader(),
+        authorization_verifier=authorization_verifier or AuthorizationVerifier(),
+        isolation_authority=(
+            registry
+            or SqliteM2FormalPhaseIsolationAuthority(tmp_path / "formal-isolation.sqlite3")
+        ),
         lease_is_live=live,
         target_lock_is_live=target_lock,
         recover_resource=_cleanup,
         recover_expired_lease=recover_expired,
-        isolation_registry=registry,
-        clock=StepClock(),
+        clock=clock or StepClock(),
         monotonic_ns=TickClock(),
     )
 
@@ -532,6 +774,16 @@ def test_formal_search_executes_through_unique_harness_and_settles(tmp_path: Pat
     receipt = M2FormalPhaseExecutionReceiptStore(tmp_path / "receipts").load(outcome.receipt_ref)
     assert receipt.execution.status == "succeeded"
     assert receipt.execution.binding.phase is RoundPhase.SEARCH
+    assert receipt.execution.measurement_ref is not None
+    assert receipt.execution.measurement_ref.baseline_sample_set_hash == (
+        harness.result.measurement.summary["baseline_sample_set_hash"]
+    )
+    assert receipt.execution.measurement_ref.process_identity_set_hash == (
+        harness.result.measurement.summary["process_identity_set_hash"]
+    )
+    assert receipt.execution.measurement_ref.cache_namespace_set_hash == (
+        harness.result.measurement.summary["cache_namespace_set_hash"]
+    )
     assert receipt.performance_conclusion == "not_measured"
     assert receipt.synthetic is False
     assert harness.payloads[0]["host_id"] == "nmz36"
@@ -550,7 +802,7 @@ def test_search_and_holdout_use_independent_execution_receipts(tmp_path: Path) -
     authority = _authority(search_round)
     search_member = _member(search_round, RoundPhase.SEARCH)
     search_request = _request(search_round, authority, search_member, RoundPhase.SEARCH)
-    registry = M2FormalPhaseIsolationRegistry()
+    registry = SqliteM2FormalPhaseIsolationAuthority(tmp_path / "phase-isolation.sqlite3")
     search = _adapter(
         tmp_path,
         Harness(_result(tmp_path, search_request)),
@@ -601,7 +853,7 @@ def test_holdout_cannot_reuse_search_measurement_identity(tmp_path: Path) -> Non
     member = _member(search_round, RoundPhase.SEARCH)
     search_request = _request(search_round, authority, member, RoundPhase.SEARCH)
     search_result = _result(tmp_path, search_request)
-    registry = M2FormalPhaseIsolationRegistry()
+    registry = SqliteM2FormalPhaseIsolationAuthority(tmp_path / "phase-isolation.sqlite3")
     _adapter(
         tmp_path,
         Harness(search_result),
@@ -645,7 +897,9 @@ def test_holdout_cannot_reuse_search_measurement_identity(tmp_path: Path) -> Non
             tmp_path,
             Harness(reused),
             RecordingBudget(),
-            registry=registry,
+            registry=SqliteM2FormalPhaseIsolationAuthority(
+                tmp_path / "phase-isolation.sqlite3"
+            ),
         ).run(
             round_authority=holdout_round,
             formal_authority=authority,
@@ -659,6 +913,129 @@ def test_holdout_cannot_reuse_search_measurement_identity(tmp_path: Path) -> Non
     )
     assert receipt.execution.status == "evidence_invalid"
     assert receipt.execution.error_code == "phase_identity_reused"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "baseline_sample_set_hash",
+        "process_identity_set_hash",
+        "cache_namespace_set_hash",
+    ],
+)
+def test_durable_isolation_rejects_cross_process_evidence_reuse(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    search_round = _round(RoundPhase.SEARCH)
+    authority = _authority(search_round)
+    member = _member(search_round, RoundPhase.SEARCH)
+    search_request = _request(search_round, authority, member, RoundPhase.SEARCH)
+    search_result = _result(tmp_path, search_request)
+    database = tmp_path / "durable-isolation.sqlite3"
+    _adapter(
+        tmp_path,
+        Harness(search_result),
+        RecordingBudget(),
+        registry=SqliteM2FormalPhaseIsolationAuthority(database),
+    ).run(
+        round_authority=search_round,
+        formal_authority=authority,
+        member=member,
+        request=search_request,
+        output_dir=tmp_path / f"search-{field_name}",
+    )
+
+    holdout_round = SearchRound.model_validate(
+        {
+            **search_round.model_dump(mode="python"),
+            "state": SearchRoundState.HOLDOUT_MEASURING,
+            "holdout_family_hash": _hash("holdout-family"),
+            "holdout_plan_hash": _hash("holdout-plan"),
+            "holdout_reveal_lease_id": uuid4(),
+            "holdout_reveal_evidence_hash": _hash("holdout-reveal"),
+        }
+    )
+    holdout_member = member.model_copy(update={"state": RoundCandidateState.SEARCH_MEASURED})
+    holdout_request = _request(holdout_round, authority, holdout_member, RoundPhase.HOLDOUT)
+    holdout_result = _result(tmp_path, holdout_request)
+    summary = dict(holdout_result.measurement.summary)
+    summary[field_name] = search_result.measurement.summary[field_name]
+    reused = holdout_result.model_copy(
+        update={"measurement": holdout_result.measurement.model_copy(update={"summary": summary})}
+    )
+
+    with pytest.raises(M2FormalExecutionFailure) as captured:
+        _adapter(
+            tmp_path,
+            Harness(reused),
+            RecordingBudget(),
+            registry=SqliteM2FormalPhaseIsolationAuthority(database),
+        ).run(
+            round_authority=holdout_round,
+            formal_authority=authority,
+            member=holdout_member,
+            request=holdout_request,
+            output_dir=tmp_path / f"holdout-{field_name}",
+        )
+
+    receipt = M2FormalPhaseExecutionReceiptStore(tmp_path / "receipts").load(
+        captured.value.receipt_ref
+    )
+    assert receipt.execution.status == "evidence_invalid"
+    assert receipt.execution.measurement_ref is None
+
+
+def test_execution_rereads_plan_and_rejects_content_drift(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    authorization = AUTHORIZATIONS[request.binding.formal_authorization_id]
+    plan = RESOLVED_PLANS[request.binding.resolved_plan_hash].model_copy(
+        update={"selection_rule_hash": _hash("drifted-selection-rule")}
+    )
+    harness = Harness(_result(tmp_path, request))
+
+    with pytest.raises(MeasurementSafetyError, match="Plan content Hash drifted"):
+        _adapter(
+            tmp_path,
+            harness,
+            RecordingBudget(),
+            authority_reader=StaticAuthorityReader(authorization, plan),
+        ).run(
+            round_authority=round_authority,
+            formal_authority=authority,
+            member=member,
+            request=request,
+            output_dir=tmp_path / "plan-drift",
+        )
+
+    assert harness.payloads == []
+
+
+def test_execution_rejects_owner_signature_before_harness(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    harness = Harness(_result(tmp_path, request))
+
+    with pytest.raises(MeasurementSafetyError, match="signature was rejected"):
+        _adapter(
+            tmp_path,
+            harness,
+            RecordingBudget(),
+            authorization_verifier=RejectingAuthorizationVerifier(),
+        ).run(
+            round_authority=round_authority,
+            formal_authority=authority,
+            member=member,
+            request=request,
+            output_dir=tmp_path / "signature-rejected",
+        )
+
+    assert harness.payloads == []
 
 
 @pytest.mark.parametrize(
@@ -710,6 +1087,50 @@ def test_formal_preflight_and_budget_fail_before_harness(tmp_path: Path, mode: s
     assert harness.payloads == []
     if mode != "budget":
         assert probe.bindings == []
+
+
+def test_execution_crossing_renewal_deadline_fails_closed(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    binding = request.binding.model_copy(
+        update={"lease_renewal_due_at": NOW + timedelta(seconds=2)}
+    )
+    reservation = request.reservation.model_copy(
+        update={
+            "planned": BudgetUsage(
+                search_samples=8,
+                wall_seconds=1,
+                exclusive_lease_seconds=1,
+            )
+        }
+    )
+    request = request.model_copy(
+        update={"binding": binding, "reservation": reservation}
+    )
+    budget = RecordingBudget()
+
+    with pytest.raises(M2FormalExecutionFailure) as captured:
+        _adapter(
+            tmp_path,
+            Harness(_result(tmp_path, request)),
+            budget,
+            clock=SequenceClock(NOW, NOW + timedelta(seconds=1), NOW + timedelta(seconds=2)),
+        ).run(
+            round_authority=round_authority,
+            formal_authority=authority,
+            member=member,
+            request=request,
+            output_dir=tmp_path / "renewal-crossed",
+        )
+
+    receipt = M2FormalPhaseExecutionReceiptStore(tmp_path / "receipts").load(
+        captured.value.receipt_ref
+    )
+    assert receipt.execution.status == "fence_lost"
+    assert receipt.execution.error_code == "lease_renewal_overdue"
+    assert budget.finalizes[0].ledger_entry.entry_type is RoundBudgetEntryType.SETTLE
 
 
 def test_expired_lease_recovers_before_rejecting_execution(tmp_path: Path) -> None:
@@ -879,6 +1300,11 @@ def test_receipt_id_cannot_be_rebound(tmp_path: Path) -> None:
         target_lock_probe=TargetLockProbe(),
         budget_authority=RecordingBudget(),
         receipt_store=store,
+        authority_reader=AuthorityReader(),
+        authorization_verifier=AuthorizationVerifier(),
+        isolation_authority=SqliteM2FormalPhaseIsolationAuthority(
+            tmp_path / "phase-isolation.sqlite3"
+        ),
         lease_is_live=lambda _binding, _now: True,
         target_lock_is_live=lambda _binding, _now: True,
         recover_resource=_cleanup,
@@ -920,3 +1346,97 @@ def test_identical_execution_receipt_replay_is_idempotent(tmp_path: Path) -> Non
     receipt = store.load(outcome.receipt_ref)
 
     assert store.publish(receipt.execution) == outcome.receipt_ref
+
+
+def test_concurrent_identical_receipt_publication_is_atomic(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    source_store = M2FormalPhaseExecutionReceiptStore(tmp_path / "source-receipts")
+    outcome = M2FormalPhaseExecutionAdapter(
+        harness=Harness(_result(tmp_path, request)),
+        adapter_profile=_adapter_profile(),
+        target_lock_probe=TargetLockProbe(),
+        budget_authority=RecordingBudget(),
+        receipt_store=source_store,
+        authority_reader=AuthorityReader(),
+        authorization_verifier=AuthorizationVerifier(),
+        isolation_authority=SqliteM2FormalPhaseIsolationAuthority(
+            tmp_path / "source-isolation.sqlite3"
+        ),
+        lease_is_live=lambda _binding, _now: True,
+        target_lock_is_live=lambda _binding, _now: True,
+        recover_resource=_cleanup,
+        clock=StepClock(),
+        monotonic_ns=TickClock(),
+    ).run(
+        round_authority=round_authority,
+        formal_authority=authority,
+        member=member,
+        request=request,
+        output_dir=tmp_path / "source-execution",
+    )
+    record = source_store.load(outcome.receipt_ref).execution
+    store = M2FormalPhaseExecutionReceiptStore(tmp_path / "concurrent-receipts")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        references = tuple(pool.map(lambda _index: store.publish(record), range(16)))
+
+    assert len(set(references)) == 1
+
+
+def test_receipt_store_rejects_parent_symlink_escape(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    trusted_store = M2FormalPhaseExecutionReceiptStore(tmp_path / "receipts")
+    outcome = _adapter(
+        tmp_path,
+        Harness(_result(tmp_path, request)),
+        RecordingBudget(),
+    ).run(
+        round_authority=round_authority,
+        formal_authority=authority,
+        member=member,
+        request=request,
+        output_dir=tmp_path / "trusted-execution",
+    )
+    record = trusted_store.load(outcome.receipt_ref).execution
+    store_root = tmp_path / "symlinked-store"
+    outside = tmp_path / "outside-store"
+    store_root.mkdir()
+    outside.mkdir()
+    _directory_symlink_or_skip(store_root / "receipts", outside)
+    store = M2FormalPhaseExecutionReceiptStore(store_root)
+
+    with pytest.raises(SourceArtifactError, match="link|trusted"):
+        store.publish(record)
+
+    assert tuple(outside.rglob("*")) == ()
+
+
+def test_budget_evidence_rejects_parent_symlink_escape(tmp_path: Path) -> None:
+    round_authority = _round(RoundPhase.SEARCH)
+    authority = _authority(round_authority)
+    member = _member(round_authority, RoundPhase.SEARCH)
+    request = _request(round_authority, authority, member, RoundPhase.SEARCH)
+    output_dir = tmp_path / "unsafe-execution"
+    outside = tmp_path / "outside-budget"
+    output_dir.mkdir()
+    outside.mkdir()
+    _directory_symlink_or_skip(output_dir / "budget", outside)
+    harness = Harness(_result(tmp_path, request))
+
+    with pytest.raises(SourceArtifactError, match="link|trusted"):
+        _adapter(tmp_path, harness, RecordingBudget()).run(
+            round_authority=round_authority,
+            formal_authority=authority,
+            member=member,
+            request=request,
+            output_dir=output_dir,
+        )
+
+    assert harness.payloads == []
+    assert tuple(outside.rglob("*")) == ()

@@ -15,7 +15,7 @@ from hcuopt.contracts.base import ContractModel
 from hcuopt.contracts.m2 import BudgetUsage
 from hcuopt.contracts.platform_v1 import SHA256_PATTERN, AdapterProvenance
 from hcuopt.domain.enums import LeaseScope, RoundPhase
-from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan
+from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan, RoundMeasurementRef
 
 M2_FORMAL_EXECUTION_CONTRACT_VERSION = "m2a-formal-phase-execution-v1"
 _HCU_RESOURCE_PATTERN = re.compile(r"^hcu-(0|[1-9][0-9]*)$")
@@ -217,6 +217,9 @@ class M2FormalExecutionBinding(FrozenFormalExecutionModel):
     authority_context_hash: str = Field(pattern=SHA256_PATTERN)
     round_id: UUID
     task_id: UUID
+    candidate_family_hash: str = Field(pattern=SHA256_PATTERN)
+    artifact_family_hash: str = Field(pattern=SHA256_PATTERN)
+    holdout_family_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     round_candidate_id: UUID
     candidate_id: UUID
     artifact_id: UUID
@@ -296,9 +299,12 @@ class M2FormalExecutionBinding(FrozenFormalExecutionModel):
         if self.resource_id != f"hcu-{self.device_index}":
             raise ValueError("Formal execution HCU resource and device index differ")
         if self.phase is RoundPhase.SEARCH:
-            if self.holdout_reveal_evidence_hash is not None:
+            if (
+                self.holdout_family_hash is not None
+                or self.holdout_reveal_evidence_hash is not None
+            ):
                 raise ValueError("Search execution cannot consume Holdout reveal evidence")
-        elif self.holdout_reveal_evidence_hash is None:
+        elif self.holdout_family_hash is None or self.holdout_reveal_evidence_hash is None:
             raise ValueError("Holdout execution requires reveal evidence")
         return self
 
@@ -375,9 +381,7 @@ class M2FormalPhaseExecutionRecord(FrozenFormalExecutionModel):
     actual: BudgetUsage
     lease_held_seconds: float = Field(ge=0)
     harness_active_seconds: float = Field(ge=0)
-    measurement_id: UUID | None = None
-    raw_evidence_uri: str | None = Field(default=None, min_length=1, max_length=4000)
-    raw_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    measurement_ref: RoundMeasurementRef | None = None
     sample_count: int = Field(default=0, ge=0, le=10_000_000)
     cleanup_evidence: dict[str, Any] | None = None
     cleanup_status: Literal["verified", "failed"]
@@ -424,22 +428,15 @@ class M2FormalPhaseExecutionRecord(FrozenFormalExecutionModel):
             or self.adapter_provenance.adapter_version != binding.adapter_profile_version
         ):
             raise ValueError("Formal execution Adapter provenance differs from its Profile")
-        evidence_fields = (
-            self.measurement_id,
-            self.raw_evidence_uri,
-            self.raw_evidence_hash,
-        )
-        if any(value is not None for value in evidence_fields) != all(
-            value is not None for value in evidence_fields
-        ):
-            raise ValueError("Formal execution evidence fields must be atomic")
         if self.status == "succeeded":
-            if any(value is None for value in evidence_fields) or self.sample_count < 1:
-                raise ValueError("successful Formal execution requires raw evidence")
+            if self.measurement_ref is None or self.sample_count < 1:
+                raise ValueError("successful Formal execution requires a Round Measurement Ref")
             if self.error_code is not None:
                 raise ValueError("successful Formal execution cannot contain an error")
             if self.cleanup_status != "verified" or self.termination_reason is not None:
                 raise ValueError("successful Formal execution requires verified cleanup")
+        elif self.measurement_ref is not None:
+            raise ValueError("failed Formal execution cannot publish a Round Measurement Ref")
         elif self.error_code is None:
             raise ValueError("failed Formal execution requires an error code")
         elif self.termination_reason is None:
@@ -448,6 +445,44 @@ class M2FormalPhaseExecutionRecord(FrozenFormalExecutionModel):
             raise ValueError("Formal execution requires a terminal cleanup receipt")
         if (self.status == "cleanup_failed") != (self.cleanup_status == "failed"):
             raise ValueError("cleanup failure status must match its cleanup receipt")
+        if self.measurement_ref is not None:
+            reference = self.measurement_ref
+            expected = (
+                binding.round_id,
+                binding.round_candidate_id,
+                binding.candidate_id,
+                binding.phase,
+                binding.candidate_family_hash,
+                binding.artifact_family_hash,
+                binding.holdout_family_hash,
+                binding.artifact_id,
+                binding.artifact_hash,
+                binding.measurement_plan_hash,
+                binding.phase_plan_hash,
+                binding.holdout_reveal_evidence_hash,
+                binding.lease_id,
+                binding.resource_id,
+                binding.fencing_token,
+            )
+            actual = (
+                reference.round_id,
+                reference.round_candidate_id,
+                reference.candidate_id,
+                reference.phase,
+                reference.candidate_family_hash,
+                reference.artifact_family_hash,
+                reference.holdout_family_hash,
+                reference.artifact_id,
+                reference.artifact_hash,
+                reference.measurement_plan_hash,
+                reference.phase_plan_hash,
+                reference.holdout_reveal_evidence_hash,
+                reference.lease_id,
+                reference.resource_id,
+                reference.fencing_token,
+            )
+            if actual != expected or reference.measurement_id is None:
+                raise ValueError("Round Measurement Ref differs from Formal execution binding")
         return self
 
 

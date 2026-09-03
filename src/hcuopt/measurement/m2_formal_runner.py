@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from hcuopt.contracts.formal_profile_authorization_v1 import (
+    FormalProfileWindowAuthorization,
+)
 from hcuopt.contracts.m2 import (
     BudgetUsage,
     RoundBudgetFinalizeRequest,
@@ -33,6 +36,7 @@ from hcuopt.contracts.m2_formal_execution_v1 import (
     m2_formal_execution_id_for,
     m2_formal_phase_execution_request_hash,
 )
+from hcuopt.contracts.m2_formal_operator_v1 import FormalResolvedRoundPlan
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.contracts.v1 import ManualPerformanceEvidenceResult
 from hcuopt.domain.enums import (
@@ -45,10 +49,17 @@ from hcuopt.domain.enums import (
 )
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.measurement.harness import MeasurementSafetyError
-from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan, utcnow
+from hcuopt.measurement.m2_models import (
+    M2PhaseBudgetReservationPlan,
+    RoundMeasurementRef,
+    utcnow,
+)
+from hcuopt.operator.formal_plans import formal_operator_resolved_plan_hash
+from hcuopt.operator.formal_profiles import DeploymentFormalProfileGrantVerifier
 from hcuopt.source_hash import file_uri_to_path
 
-from .m2_formal_receipt import M2FormalPhaseExecutionReceiptStore
+from .m2_formal_isolation import M2FormalPhaseIsolationAuthority
+from .m2_formal_receipt import M2FormalPhaseExecutionReceiptStore, _publish_once
 from .m2_runner import M2RoundBudgetAuthority
 
 
@@ -70,6 +81,17 @@ class M2FormalTargetLockRefreshProbe(Protocol):
         binding: M2FormalExecutionBinding,
         observed_at: datetime,
     ) -> M2FormalTargetLockRefreshReport: ...
+
+
+@runtime_checkable
+class M2FormalExecutionAuthorityReader(Protocol):
+    """Deployment-owned re-read boundary for the exact A1 and A2a objects."""
+
+    def load_authorization(
+        self, authorization_id: UUID
+    ) -> FormalProfileWindowAuthorization: ...
+
+    def load_resolved_plan(self, resolved_plan_hash: str) -> FormalResolvedRoundPlan: ...
 
 
 class M2FormalHarnessFailure(MeasurementSafetyError):
@@ -98,41 +120,6 @@ class M2FormalExecutionFailure(MeasurementSafetyError):
         self.receipt_ref = receipt_ref
 
 
-class M2FormalPhaseIsolationRegistry:
-    _UNIQUE_FIELDS = ("measurement_id", "raw_evidence_uri", "raw_evidence_hash")
-
-    def __init__(self) -> None:
-        self._seen: dict[str, set[object]] = {field: set() for field in self._UNIQUE_FIELDS}
-        self._phase_plans: dict[tuple[UUID, RoundPhase], tuple[str, str]] = {}
-
-    def validate(self, record: M2FormalPhaseExecutionRecord) -> None:
-        if record.status != "succeeded":
-            return
-        for field in self._UNIQUE_FIELDS:
-            if getattr(record, field) in self._seen[field]:
-                raise MeasurementSafetyError(f"Formal phase isolation rejected reused {field}")
-        other = (
-            RoundPhase.HOLDOUT if record.binding.phase is RoundPhase.SEARCH else RoundPhase.SEARCH
-        )
-        other_plans = self._phase_plans.get((record.binding.round_id, other))
-        if other_plans is not None and (
-            record.binding.phase_plan_hash in other_plans
-            or record.binding.measurement_plan_hash in other_plans
-        ):
-            raise MeasurementSafetyError("Search and Holdout require distinct execution plans")
-
-    def commit(self, record: M2FormalPhaseExecutionRecord) -> None:
-        self.validate(record)
-        if record.status != "succeeded":
-            return
-        for field in self._UNIQUE_FIELDS:
-            self._seen[field].add(getattr(record, field))
-        self._phase_plans[(record.binding.round_id, record.binding.phase)] = (
-            record.binding.phase_plan_hash,
-            record.binding.measurement_plan_hash,
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class M2FormalPhaseExecutionOutcome:
     receipt_ref: M2FormalPhaseExecutionReceiptRef
@@ -153,13 +140,15 @@ class M2FormalPhaseExecutionAdapter:
         target_lock_probe: M2FormalTargetLockRefreshProbe,
         budget_authority: M2RoundBudgetAuthority,
         receipt_store: M2FormalPhaseExecutionReceiptStore,
+        authority_reader: M2FormalExecutionAuthorityReader,
+        authorization_verifier: DeploymentFormalProfileGrantVerifier,
+        isolation_authority: M2FormalPhaseIsolationAuthority,
         lease_is_live: Callable[[M2FormalExecutionBinding, datetime], bool],
         target_lock_is_live: Callable[[M2FormalExecutionBinding, datetime], bool],
         recover_resource: Callable[[M2FormalExecutionBinding], Mapping[str, Any]],
         recover_expired_lease: (
             Callable[[M2FormalExecutionBinding], Mapping[str, Any]] | None
         ) = None,
-        isolation_registry: M2FormalPhaseIsolationRegistry | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic_ns: Callable[[], int] | None = None,
         provenance: AdapterProvenance | None = None,
@@ -169,11 +158,13 @@ class M2FormalPhaseExecutionAdapter:
         self.target_lock_probe = target_lock_probe
         self.budget_authority = budget_authority
         self.receipt_store = receipt_store
+        self.authority_reader = authority_reader
+        self.authorization_verifier = authorization_verifier
+        self.isolation_authority = isolation_authority
         self.lease_is_live = lease_is_live
         self.target_lock_is_live = target_lock_is_live
         self.recover_resource = recover_resource
         self.recover_expired_lease = recover_expired_lease or recover_resource
-        self.isolation_registry = isolation_registry or M2FormalPhaseIsolationRegistry()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_ns = monotonic_ns or time.monotonic_ns
         self.provenance = provenance or AdapterProvenance(
@@ -208,6 +199,13 @@ class M2FormalPhaseExecutionAdapter:
             )
         self._validate_authority(round_authority, formal_authority, member, request)
         target_lock_refresh = self._validate_live_binding(request, now)
+        self._validate_deployment_authority(
+            round_authority,
+            formal_authority,
+            member,
+            request,
+            now,
+        )
 
         _, reserve_hash = self._write_payload(
             output_dir / "budget" / "reserve",
@@ -277,6 +275,10 @@ class M2FormalPhaseExecutionAdapter:
         if failure is None:
             if finished_at >= request.binding.window.expires_at:
                 failure = TimeoutError("Formal execution exceeded its approved window")
+            elif finished_at >= request.binding.lease_renewal_due_at:
+                failure = MeasurementSafetyError(
+                    "Formal execution crossed its Lease renewal deadline"
+                )
             elif finished_at >= request.binding.lease_expires_at or not self.lease_is_live(
                 request.binding, finished_at
             ):
@@ -296,7 +298,11 @@ class M2FormalPhaseExecutionAdapter:
             cleanup_evidence,
             request.binding,
         )
-        measurement = result.measurement if result is not None and failure is None else None
+        measurement_ref = (
+            self._measurement_ref(round_authority, member, request, result)
+            if result is not None and failure is None
+            else None
+        )
         record = M2FormalPhaseExecutionRecord(
             execution_id=m2_formal_execution_id_for(request.binding),
             request_hash=request_hash,
@@ -309,9 +315,7 @@ class M2FormalPhaseExecutionAdapter:
             actual=actual,
             lease_held_seconds=elapsed,
             harness_active_seconds=elapsed,
-            measurement_id=measurement.measurement_id if measurement is not None else None,
-            raw_evidence_uri=(measurement.raw_samples_uri if measurement is not None else None),
-            raw_evidence_hash=(measurement.raw_samples_hash if measurement is not None else None),
+            measurement_ref=measurement_ref,
             sample_count=actual_sample_count,
             cleanup_evidence=cleanup_evidence,
             cleanup_status="verified" if cleanup_healthy else "failed",
@@ -321,16 +325,14 @@ class M2FormalPhaseExecutionAdapter:
             error_code=error_code,
         )
         try:
-            self.isolation_registry.validate(record)
+            self.isolation_authority.claim(record)
         except Exception as exc:
             failure = exc
             record = M2FormalPhaseExecutionRecord.model_validate(
                 {
                     **record.model_dump(mode="python"),
                     "status": "evidence_invalid",
-                    "measurement_id": None,
-                    "raw_evidence_uri": None,
-                    "raw_evidence_hash": None,
+                    "measurement_ref": None,
                     "error_code": "phase_identity_reused",
                     "termination_reason": f"{type(exc).__name__}: {str(exc)[:400]}",
                 }
@@ -371,7 +373,6 @@ class M2FormalPhaseExecutionAdapter:
         receipt_ref = self.receipt_store.publish(record)
         if failure is not None:
             raise M2FormalExecutionFailure(str(failure), receipt_ref=receipt_ref) from failure
-        self.isolation_registry.commit(record)
         return M2FormalPhaseExecutionOutcome(
             receipt_ref=receipt_ref,
             reservation=reserved,
@@ -454,13 +455,16 @@ class M2FormalPhaseExecutionAdapter:
         if now >= binding.lease_renewal_due_at:
             raise MeasurementSafetyError("Formal execution Lease renewal is overdue")
         remaining_window = (binding.window.expires_at - now).total_seconds()
+        remaining_renewal = (binding.lease_renewal_due_at - now).total_seconds()
         remaining_lease = (binding.lease_expires_at - now).total_seconds()
         if (
             request.reservation.planned.wall_seconds > remaining_window
+            or request.reservation.planned.wall_seconds > remaining_renewal
             or request.reservation.planned.exclusive_lease_seconds > remaining_lease
+            or request.reservation.planned.exclusive_lease_seconds > remaining_renewal
         ):
             raise MeasurementSafetyError(
-                "Formal execution Budget does not fit its live window and Lease"
+                "Formal execution Budget does not fit its window, Lease, and renewal interval"
             )
         if not self.lease_is_live(binding, now):
             raise MeasurementSafetyError("Formal execution rejected a stale Fencing Token")
@@ -500,6 +504,125 @@ class M2FormalPhaseExecutionAdapter:
                 "Formal execution requires a current real Target Lock refresh"
             )
         return refresh
+
+    def _validate_deployment_authority(
+        self,
+        round_authority: SearchRound,
+        formal_authority: FormalAuthorityContextDescriptor,
+        member: RoundCandidate,
+        request: M2FormalPhaseExecutionRequest,
+        now: datetime,
+    ) -> None:
+        binding = request.binding
+        try:
+            authorization = FormalProfileWindowAuthorization.model_validate(
+                self.authority_reader.load_authorization(binding.formal_authorization_id)
+            )
+            plan = FormalResolvedRoundPlan.model_validate(
+                self.authority_reader.load_resolved_plan(binding.resolved_plan_hash)
+            )
+        except Exception as error:
+            raise MeasurementSafetyError(
+                "Formal execution could not reread A authorization and resolved Plan"
+            ) from error
+
+        if (
+            authorization.authorization_id != binding.formal_authorization_id
+            or authorization.authorization_hash != binding.formal_authorization_hash
+            or authorization.decision != "authorized"
+            or self.authorization_verifier.verifier_ref != authorization.verifier
+        ):
+            raise MeasurementSafetyError("Formal window authorization binding drifted")
+        try:
+            signature_valid = self.authorization_verifier.verify_signature(
+                authorization_hash=authorization.authorization_hash,
+                signature=authorization.signature,
+            )
+        except Exception as error:
+            raise MeasurementSafetyError(
+                "Formal authorization signature verification failed closed"
+            ) from error
+        if signature_valid is not True:
+            raise MeasurementSafetyError("Formal authorization signature was rejected")
+        if not authorization.window_starts_at <= now < authorization.window_expires_at:
+            raise MeasurementSafetyError("Formal window authorization is not active")
+        if formal_operator_resolved_plan_hash(plan) != binding.resolved_plan_hash:
+            raise MeasurementSafetyError("Formal resolved Plan content Hash drifted")
+
+        authorized_profiles = (
+            authorization.profiles.target_profile,
+            authorization.profiles.workload_profile,
+            authorization.profiles.measurement_profile,
+        )
+        plan_profiles = (
+            plan.target_profile,
+            plan.workload_profile,
+            plan.measurement_profile,
+        )
+        profile_hashes = tuple(item.profile_hash for item in plan_profiles)
+        if (
+            plan_profiles != authorized_profiles
+            or profile_hashes
+            != (
+                binding.target_profile_hash,
+                binding.workload_profile_hash,
+                binding.measurement_profile_hash,
+            )
+            or plan.formal_authorization_hash != authorization.authorization_hash
+            or plan.authorized_host_id != authorization.host_id
+            or plan.authorized_resource_id != authorization.resource_id
+            or plan.authorization_window_starts_at != authorization.window_starts_at
+            or plan.authorization_window_expires_at != authorization.window_expires_at
+            or binding.host_id != authorization.host_id
+            or binding.resource_id != authorization.resource_id
+            or binding.window.starts_at != authorization.window_starts_at
+            or binding.window.expires_at != authorization.window_expires_at
+            or plan.authorized_source_family_hash != authorization.source_family_hash
+            or plan.source_family_hash != authorization.source_family_hash
+            or binding.candidate_family_hash != authorization.source_family_hash
+            or plan.budget != authorization.budget
+            or round_authority.budget != authorization.budget
+            or plan.max_promoted != round_authority.max_promoted
+            or plan.selection_rule_hash != round_authority.selection_rule_hash
+        ):
+            raise MeasurementSafetyError(
+                "Formal resolved Plan differs from its authorization, Profiles, Family, or Budget"
+            )
+
+        authority = plan.authority
+        if authority is None or (
+            authority.target_snapshot_id != formal_authority.target_snapshot_id
+            or authority.stage0_run_id != round_authority.stage0_run_id
+            or authority.stage0_protocol_hash != formal_authority.stage0_protocol_hash
+            or authority.baseline_epoch_id != round_authority.baseline_epoch_id
+            or authority.hotspot_id != round_authority.hotspot_id
+            or authority.replacement_point != round_authority.replacement_point
+            or authority.workload_id != round_authority.workload_id
+            or authority.workload_hash != round_authority.workload_hash
+            or authority.configuration_hash != round_authority.configuration_hash
+            or authority.image_digest != round_authority.image_digest
+            or authority.adapter_profile != round_authority.adapter_profile
+        ):
+            raise MeasurementSafetyError("Formal resolved Plan Authority drifted from the Round")
+
+        resolved_member = next(
+            (item for item in plan.candidates if item.candidate_id == member.candidate_id),
+            None,
+        )
+        if resolved_member is None or (
+            resolved_member.source_package_store_id != member.source_package_store_id
+            or resolved_member.source_package_store_hash != member.source_package_store_hash
+            or resolved_member.source_package_ref.candidate_source_hash
+            != member.candidate_source_hash
+            or resolved_member.source_package_ref.source_package_hash
+            != member.source_package_hash
+            or resolved_member.source_package_ref.manifest_hash != member.source_manifest_hash
+            or resolved_member.baseline_source_hash != member.baseline_source_hash
+            or resolved_member.hotspot_id != round_authority.hotspot_id
+            or resolved_member.replacement_point != round_authority.replacement_point
+            or resolved_member.optimization_intent != member.optimization_intent
+        ):
+            raise MeasurementSafetyError("Formal resolved Plan Candidate binding drifted")
 
     @staticmethod
     def _validate_authority(
@@ -541,6 +664,9 @@ class M2FormalPhaseExecutionAdapter:
             or formal_authority.stage0_protocol_hash != binding.stage0_protocol_hash
             or formal_authority.candidate_family_hash != round_authority.candidate_family_hash
             or formal_authority.artifact_family_hash != round_authority.artifact_family_hash
+            or binding.candidate_family_hash != round_authority.candidate_family_hash
+            or binding.artifact_family_hash != round_authority.artifact_family_hash
+            or binding.holdout_family_hash != round_authority.holdout_family_hash
             or round_authority.adapter_profile != binding.adapter_profile
         ):
             raise MeasurementSafetyError("Formal Authority Context binding differs")
@@ -631,6 +757,14 @@ class M2FormalPhaseExecutionAdapter:
             or measurement.adapter_provenance.implementation_kind != "real"
             or measurement.sample_count != request.reservation.expected_sample_count
             or measurement.summary.get("plan_hash") != request.binding.measurement_plan_hash
+            or not all(
+                isinstance(measurement.summary.get(name), str)
+                for name in (
+                    "baseline_sample_set_hash",
+                    "process_identity_set_hash",
+                    "cache_namespace_set_hash",
+                )
+            )
             or not isinstance(fence, Mapping)
             or not isinstance(health, Mapping)
             or fence.get("fenced") is not True
@@ -657,6 +791,51 @@ class M2FormalPhaseExecutionAdapter:
             raise MeasurementSafetyError("Formal raw evidence Hash does not match")
 
     @staticmethod
+    def _measurement_ref(
+        round_authority: SearchRound,
+        member: RoundCandidate,
+        request: M2FormalPhaseExecutionRequest,
+        result: ManualPerformanceEvidenceResult,
+    ) -> RoundMeasurementRef:
+        measurement = result.measurement
+        assert round_authority.candidate_family_hash is not None
+        assert round_authority.artifact_family_hash is not None
+        assert member.artifact_id is not None
+        assert member.artifact_hash is not None
+        assert measurement.raw_samples_uri is not None
+        assert measurement.raw_samples_hash is not None
+        return RoundMeasurementRef(
+            round_measurement_ref_id=uuid5(
+                NAMESPACE_URL,
+                "hcuopt:m2a-round-measurement-ref:"
+                f"{round_authority.round_id}:{member.candidate_id}:"
+                f"{request.binding.phase.value}:{measurement.measurement_id}",
+            ),
+            round_id=round_authority.round_id,
+            round_candidate_id=member.round_candidate_id,
+            candidate_id=member.candidate_id,
+            phase=request.binding.phase,
+            candidate_family_hash=round_authority.candidate_family_hash,
+            artifact_family_hash=round_authority.artifact_family_hash,
+            holdout_family_hash=round_authority.holdout_family_hash,
+            artifact_id=member.artifact_id,
+            artifact_hash=member.artifact_hash,
+            measurement_id=measurement.measurement_id,
+            raw_evidence_uri=measurement.raw_samples_uri,
+            raw_evidence_hash=measurement.raw_samples_hash,
+            measurement_plan_hash=request.binding.measurement_plan_hash,
+            phase_plan_hash=request.binding.phase_plan_hash,
+            holdout_reveal_evidence_hash=request.binding.holdout_reveal_evidence_hash,
+            baseline_sample_set_hash=measurement.summary["baseline_sample_set_hash"],
+            process_identity_set_hash=measurement.summary["process_identity_set_hash"],
+            cache_namespace_set_hash=measurement.summary["cache_namespace_set_hash"],
+            lease_id=request.binding.lease_id,
+            resource_id=request.binding.resource_id,
+            fencing_token=request.binding.fencing_token,
+            created_at=measurement.created_at,
+        )
+
+    @staticmethod
     def _terminal_status(
         failure: Exception | None,
         cleanup: Mapping[str, Any] | None,
@@ -670,6 +849,8 @@ class M2FormalPhaseExecutionAdapter:
             return "timed_out", "execution_timed_out"
         if isinstance(failure, M2FormalHarnessFailure):
             return "failed", failure.error_code
+        if "renewal deadline" in str(failure):
+            return "fence_lost", "lease_renewal_overdue"
         if "Fence became stale" in str(failure):
             return "fence_lost", "fencing_token_lost"
         return "evidence_invalid", "formal_evidence_invalid"
@@ -771,20 +952,16 @@ class M2FormalPhaseExecutionAdapter:
         encoded = canonical_json_bytes(value)
         digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         path = root / f"{identity}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.read_bytes() != encoded:
-            raise MeasurementSafetyError("Formal evidence identity already has other bytes")
-        if not path.exists():
-            path.write_bytes(encoded)
-        return path.resolve(strict=True).as_uri(), digest
+        _publish_once(root, path, encoded)
+        return path.absolute().as_uri(), digest
 
 
 __all__ = [
     "M2FormalExecutionFailure",
+    "M2FormalExecutionAuthorityReader",
     "M2FormalHarnessFailure",
     "M2FormalPhaseExecutionAdapter",
     "M2FormalPhaseExecutionOutcome",
-    "M2FormalPhaseIsolationRegistry",
     "M2FormalTargetLockRefreshProbe",
     "M2FormalUniqueMeasurementHarness",
 ]

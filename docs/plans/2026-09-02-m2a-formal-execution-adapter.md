@@ -28,7 +28,10 @@ synthetic Target Lock refresh, and phase-specific Holdout/Search binding drift.
 ### Adapter lifecycle
 
 `M2FormalPhaseExecutionAdapter` performs all preflight checks before reserving
-budget. It then reserves through the existing `M2RoundBudgetAuthority`, invokes
+budget. It re-reads the complete signed A1 authorization and A2a resolved plan
+through deployment-owned interfaces and verifies their hashes, signature,
+profiles, family, budget, window, Round, and Candidate. It then reserves through
+the existing `M2RoundBudgetAuthority`, invokes
 the injected unique Measurement Harness, independently re-reads/hashes the raw
 evidence, verifies phase/target/lease/cleanup bindings, settles actual usage, and
 publishes a content-addressed immutable execution Receipt.
@@ -43,7 +46,10 @@ fixes `performance_conclusion=not_measured` and
 
 Formal execution Receipts are content-addressed and publish-once. Search and
 Holdout cannot reuse phase plan, measurement, raw evidence, process identity or
-cache namespace identities.
+cache namespace identities. Successful Receipts embed the existing complete
+`RoundMeasurementRef`; a durable SQLite-backed reference authority enforces
+uniqueness across worker restarts and processes. Receipt and budget evidence
+stores reject parent symlinks and publish atomically.
 
 ## TDD implementation plan
 
