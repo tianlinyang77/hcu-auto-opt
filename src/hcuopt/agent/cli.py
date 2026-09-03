@@ -15,12 +15,17 @@ from pydantic import ValidationError
 from hcuopt.agent.authority import AgentAuthorityError, ApexGenerationCoordinator
 from hcuopt.contracts.agent_v1 import GenerationRunStartRequest
 from hcuopt.domain.errors import ContractError
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+)
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.storage.repository import PostgresRepository
 
 AGENT_GENERATION_COMMANDS = {
     "agent-generation-start",
     "agent-generation-status",
     "agent-generation-reconcile",
+    "agent-generation-evidence",
 }
 
 
@@ -48,11 +53,24 @@ def configure_agent_generation_parsers(
     reconcile.add_argument("generation_run_id", type=UUID)
     reconcile.add_argument("--database-url")
 
+    evidence = subparsers.add_parser(
+        "agent-generation-evidence",
+        help="rebuild and verify one durable Agent Generation evidence read model",
+    )
+    evidence.add_argument("generation_run_id", type=UUID)
+    evidence.add_argument("--database-url")
+    evidence.add_argument(
+        "--evidence-root",
+        type=Path,
+        default=os.getenv("HCUOPT_AGENT_EVIDENCE_ROOT"),
+    )
+
 
 def run_agent_generation_command(
     args: argparse.Namespace,
     *,
     repository_factory: Callable[[str], Any] = PostgresRepository,
+    evidence_service_factory: Callable[[Any, Path], Any] | None = None,
 ) -> int | None:
     if args.command not in AGENT_GENERATION_COMMANDS:
         return None
@@ -70,8 +88,22 @@ def run_agent_generation_command(
             result = coordinator.start(request, repository)
         elif args.command == "agent-generation-status":
             result = coordinator.status(args.generation_run_id, repository)
-        else:
+        elif args.command == "agent-generation-reconcile":
             result = coordinator.reconcile(args.generation_run_id, repository)
+        else:
+            if args.evidence_root is None:
+                raise ValueError(
+                    "--evidence-root or HCUOPT_AGENT_EVIDENCE_ROOT is required"
+                )
+            service = (
+                evidence_service_factory(repository, args.evidence_root)
+                if evidence_service_factory is not None
+                else AgentGenerationEvidenceReadService(
+                    repository,
+                    HashedEvidenceReader(args.evidence_root),
+                )
+            )
+            result = service.get(args.generation_run_id)
     except (AgentAuthorityError, ContractError, OSError, ValidationError, ValueError) as exc:
         print(f"Agent Generation command failed: {exc}", file=sys.stderr)
         return 2

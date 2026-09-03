@@ -21,6 +21,7 @@ from hcuopt.agent.identity import (
     candidate_proposal_review_record_hash,
     knowledge_snapshot_hash,
 )
+from hcuopt.contracts.agent_read_model_v1 import AgentPublishedEvidenceRef
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
     RunnerExecutionRecord,
@@ -48,6 +49,11 @@ from hcuopt.contracts.agent_verification_v1 import (
     AgentProposalVerificationContext,
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    AgentGenerationReadModelError,
+    build_agent_generation_evidence_publication,
+)
 from hcuopt.evaluation.agent_proposal_reporting import (
     AGENT_GENERATION_WARNING,
     build_agent_generation_evidence,
@@ -900,6 +906,173 @@ def test_evidence_and_report_are_deterministic_and_immutable(tmp_path: Path) -> 
     (report_root / "report.md").write_text("tampered", encoding="utf-8")
     with pytest.raises(ValueError, match="different content"):
         write_agent_generation_report(report_root, context, result)
+
+
+class _ReadModelRepository:
+    def __init__(self, publication, status) -> None:  # type: ignore[no-untyped-def]
+        self.publication = publication
+        self.status = status
+
+    def get_agent_generation_evidence_publication(self, generation_run_id):  # type: ignore[no-untyped-def]
+        assert generation_run_id == self.publication.generation_run_id
+        return self.publication
+
+    def generation_run_status(self, generation_run_id):  # type: ignore[no-untyped-def]
+        assert generation_run_id == self.status.run.generation_run_id
+        return self.status
+
+
+def _published_terminal_read_model(root: Path):  # type: ignore[no-untyped-def]
+    context, _verifier = _build(root)
+    status = GenerationRunStatusView.model_validate_json(
+        (root / "status.json").read_bytes()
+    )
+    overall_review = _write(
+        root / "overall-review.json",
+        {"generation_run_id": str(context.generation_run_id), "decision": "complete"},
+    )
+    run_payload = status.run.model_dump(mode="json")
+    run_payload.update(
+        {
+            "state": "completed",
+            "review_evidence_uri": overall_review["uri"],
+            "review_evidence_hash": overall_review["content_hash"],
+            "finished_at": NOW.isoformat(),
+            "version": status.run.version + 1,
+        }
+    )
+    completed_status = GenerationRunStatusView(
+        run=GenerationRun.model_validate(run_payload),
+        attempts=status.attempts,
+        proposals=status.proposals,
+        budget_ledger=status.budget_ledger,
+    )
+    context = _rewrite_status(root, context, completed_status)
+    reader = PortableReader(root)
+    result = AgentProposalVerifier(reader).verify(context)
+    report_root = root / "published"
+    report_root.mkdir()
+    artifacts = write_agent_generation_report(report_root, context, result)
+    publication = build_agent_generation_evidence_publication(
+        context,
+        result,
+        artifacts,
+    )
+    repository = _ReadModelRepository(publication, completed_status)
+    return repository, reader, publication, result
+
+
+def test_durable_read_model_rereads_and_rebuilds_all_evidence(tmp_path: Path) -> None:
+    repository, reader, publication, result = _published_terminal_read_model(tmp_path)
+
+    read_model = AgentGenerationEvidenceReadService(repository, reader).get(
+        publication.generation_run_id
+    )
+
+    assert read_model == build_agent_generation_read_model(result)
+    assert read_model.formal_readiness == "hold"
+    assert read_model.performance_conclusion == "not_measured"
+    assert read_model.formal_intake_allowed is False
+    assert read_model.automatic_release_allowed is False
+
+
+def test_durable_read_model_rejects_tampered_published_artifact(tmp_path: Path) -> None:
+    repository, reader, publication, _result = _published_terminal_read_model(tmp_path)
+    read_model_path = tmp_path / "published" / "read-model.json"
+    read_model_path.chmod(0o644)
+    read_model_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(AgentGenerationReadModelError) as raised:
+        AgentGenerationEvidenceReadService(repository, reader).get(
+            publication.generation_run_id
+        )
+
+    assert raised.value.code == "evidence_hash_mismatch"
+
+
+def test_durable_read_model_rejects_missing_published_artifact(tmp_path: Path) -> None:
+    repository, reader, publication, _result = _published_terminal_read_model(tmp_path)
+    report_path = tmp_path / "published" / "report.md"
+    report_path.chmod(0o644)
+    report_path.unlink()
+
+    with pytest.raises(AgentGenerationReadModelError) as raised:
+        AgentGenerationEvidenceReadService(repository, reader).get(
+            publication.generation_run_id
+        )
+
+    assert raised.value.code == "evidence_path_escape"
+
+
+def test_durable_read_model_rejects_nonterminal_or_drifted_authority(
+    tmp_path: Path,
+) -> None:
+    repository, reader, publication, _result = _published_terminal_read_model(tmp_path)
+    terminal = repository.status
+    pending_payload = terminal.run.model_dump(mode="json")
+    pending_payload.update(
+        {
+            "state": "awaiting_review",
+            "review_evidence_uri": None,
+            "review_evidence_hash": None,
+            "finished_at": None,
+            "version": terminal.run.version - 1,
+        }
+    )
+    repository.status = terminal.model_copy(
+        update={"run": GenerationRun.model_validate(pending_payload)}
+    )
+    service = AgentGenerationEvidenceReadService(repository, reader)
+
+    with pytest.raises(AgentGenerationReadModelError) as nonterminal:
+        service.get(publication.generation_run_id)
+    assert nonterminal.value.code == "agent_generation_not_terminal"
+
+    repository.status = terminal.model_copy(
+        update={"run": terminal.run.model_copy(update={"version": terminal.run.version + 1})}
+    )
+    with pytest.raises(AgentGenerationReadModelError) as drifted:
+        service.get(publication.generation_run_id)
+    assert drifted.value.code == "agent_generation_status_drift"
+
+
+def test_durable_read_model_rejects_verifier_or_manifest_drift(tmp_path: Path) -> None:
+    repository, reader, publication, _result = _published_terminal_read_model(tmp_path)
+    service = AgentGenerationEvidenceReadService(repository, reader)
+    repository.publication = publication.model_copy(
+        update={"verifier_version": "m2b-proposal-verifier-v0"}
+    )
+    with pytest.raises(AgentGenerationReadModelError) as version:
+        service.get(publication.generation_run_id)
+    assert version.value.code == "agent_verifier_version_drift"
+
+    manifest_path = tmp_path / "published" / "sha256sums.json"
+    manifest_path.chmod(0o644)
+    manifest_ref = _write(
+        manifest_path,
+        {
+            "schema_version": "m2b-generation-manifest-v1",
+            "files": {
+                "verification.json": {
+                    "uri": publication.verification.uri,
+                    "sha256": publication.verification.content_hash,
+                    "byte_count": publication.verification.byte_count,
+                }
+            },
+        },
+    )
+    repository.publication = publication.model_copy(
+        update={
+            "manifest": AgentPublishedEvidenceRef(
+                uri=manifest_ref["uri"],
+                content_hash=manifest_ref["content_hash"],
+                byte_count=manifest_path.stat().st_size,
+            )
+        }
+    )
+    with pytest.raises(AgentGenerationReadModelError) as manifest:
+        service.get(publication.generation_run_id)
+    assert manifest.value.code == "agent_evidence_schema_invalid"
 
 
 def test_attempt_order_does_not_change_verdict_or_digest(tmp_path: Path) -> None:

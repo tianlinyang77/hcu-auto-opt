@@ -61,6 +61,11 @@ from hcuopt.contracts.agent_verification_v1 import (
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.platform_v1 import AdapterProvenance, SourceSnapshot
 from hcuopt.domain.errors import Conflict
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    build_agent_generation_evidence_publication,
+)
+from hcuopt.evaluation.agent_proposal_reporting import write_agent_generation_report
 from hcuopt.evaluation.agent_proposal_verifier import (
     AgentProposalVerifier,
     build_agent_generation_read_model,
@@ -840,7 +845,43 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         result = AgentProposalVerifier(HashedEvidenceReader(self.evidence_root)).verify(context)
         read_model = build_agent_generation_read_model(result)
 
+        report_root = (
+            self.evidence_root
+            / "generation-read-models"
+            / str(started.generation_run_id)
+        )
+        report_root.mkdir(parents=True)
+        artifacts = write_agent_generation_report(report_root, context, result)
+        publication = build_agent_generation_evidence_publication(
+            context,
+            result,
+            artifacts,
+        )
+        stored_publication = (
+            self.repository.publish_agent_generation_evidence_publication(publication)
+        )
+        replayed_publication = (
+            self.repository.publish_agent_generation_evidence_publication(publication)
+        )
+        durable_read_model = AgentGenerationEvidenceReadService(
+            self.repository,
+            HashedEvidenceReader(self.evidence_root),
+        ).get(started.generation_run_id)
+
         self.assertEqual(result.status, "ready_for_review")
+        self.assertEqual(stored_publication, publication)
+        self.assertEqual(replayed_publication, publication)
+        self.assertEqual(durable_read_model, read_model)
+        assert psycopg is not None
+        with self.assertRaises(psycopg.errors.RaiseException):
+            with self.repository.connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE agent_generation_evidence_read_models
+                    SET input_digest = %s WHERE generation_run_id = %s
+                    """,
+                    (_hash("f"), started.generation_run_id),
+                )
         self.assertEqual(
             [item.status for item in result.attempts],
             ["timed_out", "succeeded", "succeeded"],
