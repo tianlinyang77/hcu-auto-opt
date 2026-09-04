@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -41,6 +42,7 @@ from hcuopt.contracts.m2_formal_signoff_v1 import (
     FormalRoundSignoffRequest,
     build_formal_round_signoff_intent,
 )
+from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentView
 from hcuopt.contracts.operator_v1 import (
     ManualOperatorHotspotRef,
     OperatorHotspotAuthorityView,
@@ -1264,6 +1266,287 @@ class PostgresRepository(AgentGenerationRepositoryMixin):
             ).fetchone()
         assert row is not None
         return self._operator_start_intent(row)
+
+    @staticmethod
+    def _formal_start_intent(row: Mapping[str, Any]) -> FormalStartIntentView:
+        return FormalStartIntentView.model_validate(
+            {
+                name: row[name]
+                for name in FormalStartIntentView.model_fields
+                if name != "schema_version"
+            }
+            | {"schema_version": "m2a-formal-start-intent-v1"}
+        )
+
+    def create_formal_start_intent(
+        self,
+        intent: FormalStartIntentView,
+    ) -> tuple[FormalStartIntentView, bool]:
+        if (
+            intent.state != "awaiting_authority"
+            or intent.synthetic
+            or intent.round_creation_allowed
+            or intent.hcu_accessed
+            or intent.automatic_release_allowed
+        ):
+            raise Conflict("new Formal StartIntent must be non-executing and awaiting Authority")
+        bindings = [item.model_dump(mode="json") for item in intent.candidate_bindings]
+        identity = intent.service_identity.model_dump(mode="json")
+        blockers = list(intent.blocker_codes)
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO formal_operator_start_intents (
+                    intent_id, preview_id, resolved_plan_hash,
+                    formal_authorization_hash, execution_authority_hash,
+                    evaluation_authority_hash, request_digest, actor_id,
+                    actor_assertion_hash, actor_signer_id, actor_signer_hash,
+                    idempotency_key, task_id, round_id,
+                    candidate_bindings, state, blocker_codes, service_identity,
+                    authority_reconcile_count, version, created_at, updated_at,
+                    authority_ready, round_creation_allowed, hcu_accessed,
+                    synthetic, automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, 'awaiting_authority', %s, %s, 0, 1, %s, %s,
+                    FALSE, FALSE, FALSE, FALSE, FALSE
+                )
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                (
+                    intent.intent_id,
+                    intent.preview_id,
+                    intent.resolved_plan_hash,
+                    intent.formal_authorization_hash,
+                    intent.execution_authority_hash,
+                    intent.evaluation_authority_hash,
+                    intent.request_digest,
+                    intent.actor_id,
+                    intent.actor_assertion_hash,
+                    intent.actor_signer_id,
+                    intent.actor_signer_hash,
+                    intent.idempotency_key,
+                    intent.task_id,
+                    intent.round_id,
+                    Jsonb(bindings),
+                    Jsonb(blockers),
+                    Jsonb(identity),
+                    intent.created_at,
+                    intent.updated_at,
+                ),
+            ).fetchone()
+            created = row is not None
+            if created:
+                connection.execute(
+                    """
+                    INSERT INTO formal_operator_start_intent_events (
+                        intent_id, sequence, event_type, state, blocker_codes,
+                        error_code, occurred_at
+                    ) VALUES (%s, 1, 'created', 'awaiting_authority', %s, NULL, %s)
+                    """,
+                    (intent.intent_id, Jsonb(blockers), intent.created_at),
+                )
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM formal_operator_start_intents
+                    WHERE intent_id = %s OR preview_id = %s OR idempotency_key = %s
+                    FOR UPDATE
+                    """,
+                    (intent.intent_id, intent.preview_id, intent.idempotency_key),
+                ).fetchall()
+                row = rows[0] if len(rows) == 1 else None
+            expected = {
+                "intent_id": intent.intent_id,
+                "preview_id": intent.preview_id,
+                "resolved_plan_hash": intent.resolved_plan_hash,
+                "formal_authorization_hash": intent.formal_authorization_hash,
+                "execution_authority_hash": intent.execution_authority_hash,
+                "evaluation_authority_hash": intent.evaluation_authority_hash,
+                "request_digest": intent.request_digest,
+                "actor_id": intent.actor_id,
+                "actor_assertion_hash": intent.actor_assertion_hash,
+                "actor_signer_id": intent.actor_signer_id,
+                "actor_signer_hash": intent.actor_signer_hash,
+                "idempotency_key": intent.idempotency_key,
+                "task_id": intent.task_id,
+                "round_id": intent.round_id,
+                "candidate_bindings": bindings,
+                "service_identity": identity,
+                "synthetic": False,
+                "round_creation_allowed": False,
+                "hcu_accessed": False,
+                "automatic_release_allowed": False,
+            }
+            if row is None or any(row[name] != value for name, value in expected.items()):
+                raise OperatorPlanHashMismatch(
+                    "Formal Start idempotency or Preview identity was reused"
+                )
+        return self._formal_start_intent(row), created
+
+    def get_formal_start_intent(self, intent_id: UUID) -> FormalStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM formal_operator_start_intents WHERE intent_id = %s",
+                (intent_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"Formal StartIntent not found: {intent_id}")
+        return self._formal_start_intent(row)
+
+    def get_formal_start_intent_by_idempotency(
+        self,
+        idempotency_key: str,
+    ) -> FormalStartIntentView | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM formal_operator_start_intents
+                WHERE idempotency_key = %s
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        return None if row is None else self._formal_start_intent(row)
+
+    def record_formal_start_reconciliation(
+        self,
+        intent_id: UUID,
+        *,
+        state: str,
+        blocker_codes: tuple[str, ...],
+        checked_at: datetime,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> FormalStartIntentView:
+        if state not in {"awaiting_authority", "ready_for_round_creation", "failed"}:
+            raise ValueError("invalid Formal Start reconciliation state")
+        if blocker_codes != tuple(sorted(set(blocker_codes))):
+            raise ValueError("Formal Start blocker codes must be canonical")
+        if state == "awaiting_authority" and not blocker_codes:
+            raise ValueError("awaiting Formal Start reconciliation requires blockers")
+        if state != "awaiting_authority" and blocker_codes:
+            raise ValueError("terminal/ready Formal Start reconciliation cannot carry blockers")
+        if (state == "failed") != (error_code is not None and error_message is not None):
+            raise ValueError("failed Formal Start reconciliation requires one safe error")
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM formal_operator_start_intents
+                WHERE intent_id = %s FOR UPDATE
+                """,
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Formal StartIntent not found: {intent_id}")
+            if row["state"] in {"cancelled", "failed"}:
+                return self._formal_start_intent(row)
+            row = connection.execute(
+                """
+                UPDATE formal_operator_start_intents
+                SET state = %s, blocker_codes = %s,
+                    error_code = %s, error_message = %s,
+                    authority_reconcile_count = authority_reconcile_count + 1,
+                    version = version + 1, updated_at = %s,
+                    last_reconciled_at = %s,
+                    ready_at = CASE
+                        WHEN %s = 'ready_for_round_creation' THEN %s
+                        ELSE NULL
+                    END,
+                    authority_ready = (%s = 'ready_for_round_creation')
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (
+                    state,
+                    Jsonb(list(blocker_codes)),
+                    error_code,
+                    error_message,
+                    checked_at,
+                    checked_at,
+                    state,
+                    checked_at,
+                    state,
+                    intent_id,
+                ),
+            ).fetchone()
+            assert row is not None
+            connection.execute(
+                """
+                INSERT INTO formal_operator_start_intent_events (
+                    intent_id, sequence, event_type, state, blocker_codes,
+                    error_code, occurred_at
+                ) VALUES (%s, %s, 'reconciled', %s, %s, %s, %s)
+                """,
+                (
+                    intent_id,
+                    row["version"],
+                    state,
+                    Jsonb(list(blocker_codes)),
+                    error_code,
+                    checked_at,
+                ),
+            )
+        return self._formal_start_intent(row)
+
+    def cancel_formal_start_intent(
+        self,
+        intent_id: UUID,
+        *,
+        cancelled_at: datetime,
+    ) -> FormalStartIntentView:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM formal_operator_start_intents
+                WHERE intent_id = %s FOR UPDATE
+                """,
+                (intent_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"Formal StartIntent not found: {intent_id}")
+            if row["state"] == "cancelled":
+                return self._formal_start_intent(row)
+            if row["state"] == "failed":
+                raise Conflict("failed Formal StartIntent cannot be cancelled")
+            row = connection.execute(
+                """
+                UPDATE formal_operator_start_intents
+                SET state = 'cancelled', blocker_codes = '[]'::jsonb,
+                    ready_at = NULL, authority_ready = FALSE,
+                    cancelled_at = %s, version = version + 1,
+                    updated_at = %s
+                WHERE intent_id = %s
+                RETURNING *
+                """,
+                (cancelled_at, cancelled_at, intent_id),
+            ).fetchone()
+            assert row is not None
+            connection.execute(
+                """
+                INSERT INTO formal_operator_start_intent_events (
+                    intent_id, sequence, event_type, state, blocker_codes,
+                    error_code, occurred_at
+                ) VALUES (%s, %s, 'cancelled', 'cancelled', '[]'::jsonb, NULL, %s)
+                """,
+                (intent_id, row["version"], cancelled_at),
+            )
+        return self._formal_start_intent(row)
+
+    def list_recoverable_formal_start_intent_ids(self, limit: int) -> tuple[UUID, ...]:
+        if limit < 1 or limit > 1000:
+            raise ValueError("Formal Start recovery limit must be between 1 and 1000")
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT intent_id FROM formal_operator_start_intents
+                WHERE state IN ('awaiting_authority', 'ready_for_round_creation')
+                ORDER BY updated_at, intent_id
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(row["intent_id"] for row in rows)
 
     def create_search_round(self, request: SearchRound) -> dict[str, Any]:
         """Create or replay one non-executable M2a Scripted Round authority."""

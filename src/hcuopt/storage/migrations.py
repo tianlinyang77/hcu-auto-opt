@@ -18,6 +18,7 @@ MIGRATIONS = {
     15: "0015_m2b_agent_generation_authority.sql",
     16: "0016_m2b_runner_execution_receipt.sql",
     17: "0017_m2b_agent_evidence_read_model.sql",
+    18: "0018_m2a_formal_start_intent.sql",
 }
 
 

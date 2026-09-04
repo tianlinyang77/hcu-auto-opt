@@ -17,6 +17,8 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | MeasurementSeries | B | D/A | 原始样本 URI/Hash、协议、环境指纹和 Adapter 来源完整 |
 | M1PerformanceEvidence | B | D | ADR-0006 唯一 Schema；独立进程/缓存/Event、Stage 0 预算和 Lease-bound 清理可重算 |
 | M2FormalPhaseExecutionRequest / Receipt | A/B runtime | A/D | Formal-only；分别绑定 Search/Holdout、A1 Authorization/Resolved Plan、Authority Context、三 Profile、Target Lock refresh、Host/HCU/CPU/NUMA、窗口、独占 Lease/续租/Fencing、Round Budget、原始 M1 Evidence 和清理结果；只记录执行事实，不写性能结论 |
+| FormalStartActorAssertion / FormalExecutionStartAuthority / FormalEvaluationStartAuthority | operator / B / D | A | 三份独立签名对象；共同绑定唯一 Intent/Preview/Task/Round 与 A1/A2a Hash，B 另绑定 Real Adapter、资源窗口、预算及 Lease/Fencing/Cleanup policy，D 另绑定 Search/Holdout、FWER 规则、生产 Evidence Root 与独立 Verifier |
+| FormalStartIntent | A | A/B/D/受保护只读端 | 独立于 Scripted StartIntent；从部署 Store 重读并验签，幂等、可取消和可恢复；本切片最多到 `ready_for_round_creation`，仍固定禁止 Round 创建、HCU 访问和自动发布 |
 | M1CorrectnessResult | D | A/D | 同时绑定原始数值证据与 Verification Artifact URI/Hash |
 | EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
@@ -87,6 +89,12 @@ cleanup 失败都使用 settle；同步 Harness 的计划上限和实际执行�
 baseline sample、process identity 与 cache namespace。终态回执通过 no-follow 受保护根原子发布，
 Receipt ID 不可改绑，并固定
 `performance_conclusion=not_measured`，统计裁决仍只属于 D。
+
+M2a Formal StartIntent 使用独立 `m2a-formal-start-intent-v1` Contract 和 PostgreSQL 表，不能复用
+Scripted `operator_start_intents`。调用方只能提交 Preview、Resolved Plan、owner window、B/D
+Authority 的内容 Hash；A 从部署 Store 重读全部对象并验证 operator/B/D 的独立签名。B 与 D 的
+Authority 必须同时绑定由幂等键确定的唯一 `intent_id`、`task_id`、`round_id` 和 `preview_id`，避免
+一个窗口授权被复用为第二个 Round。详情见 [M2a Formal StartIntent](m2a-formal-start-intent.md)。
 
 错误使用稳定结构：
 

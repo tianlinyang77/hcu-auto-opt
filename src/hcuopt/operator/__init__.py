@@ -8,6 +8,12 @@ from hcuopt.operator.formal_profiles import (
     DeploymentFormalProfileGrantVerifier,
     build_formal_operator_profile_catalog,
 )
+from hcuopt.operator.formal_start import (
+    DeploymentFormalStartSignatureVerifier,
+    FormalStartCoordinator,
+    FormalStartObjectStore,
+    FormalStartRepository,
+)
 from hcuopt.operator.plans import (
     OperatorPlanCompiler,
     operator_preview_request_digest,
@@ -37,6 +43,10 @@ __all__ = [
     "HmacScriptedPlanAuthority",
     "DeploymentFormalProfileGrantVerifier",
     "FormalOperatorPlanCompiler",
+    "DeploymentFormalStartSignatureVerifier",
+    "FormalStartCoordinator",
+    "FormalStartObjectStore",
+    "FormalStartRepository",
     "build_operator_service_identity",
     "build_formal_operator_profile_catalog",
     "build_scripted_operator_profile_catalog",

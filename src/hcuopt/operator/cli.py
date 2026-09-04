@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentView
 from hcuopt.contracts.operator_v1 import (
     OperatorHotspotView,
     OperatorProfileDescriptor,
@@ -65,9 +66,10 @@ class OperatorHttpClient:
         path: str,
         *,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         try:
-            response = self.client.request(method, path, json=payload)
+            response = self.client.request(method, path, json=payload, headers=headers)
         except httpx.HTTPError as error:
             raise OperatorCliError(f"Operator API is unavailable: {error}") from error
         if response.is_error:
@@ -317,6 +319,25 @@ class OperatorHttpClient:
             )
         )
 
+    def formal_start_status(
+        self,
+        intent_id: UUID,
+        *,
+        read_token: str | None,
+    ) -> FormalStartIntentView:
+        headers = (
+            {"Authorization": f"Bearer {read_token}"}
+            if read_token is not None
+            else None
+        )
+        return FormalStartIntentView.model_validate(
+            self._request(
+                "GET",
+                f"/v1/operator/formal-start-intents/{intent_id}",
+                headers=headers,
+            )
+        )
+
 
 def _profile_ref(profile: OperatorProfileDescriptor) -> OperatorProfileRef:
     return OperatorProfileRef(
@@ -423,9 +444,35 @@ def configure_operator_parsers(
     run.add_argument("--json", action="store_true")
     run.add_argument("--api-url", default=default_api_url)
 
+    formal_start = subparsers.add_parser(
+        "formal-start",
+        help="read a protected non-executing Formal StartIntent",
+    )
+    formal_start_sub = formal_start.add_subparsers(
+        dest="formal_start_command", required=True
+    )
+    formal_status = formal_start_sub.add_parser(
+        "status", help="read one Formal StartIntent; no write action is exposed"
+    )
+    formal_status.add_argument("intent_id", type=UUID)
+    formal_status.add_argument(
+        "--read-token-env",
+        default="HCUOPT_FORMAL_START_READ_TOKEN",
+        help="environment variable containing the deployment-issued read token",
+    )
+    formal_status.add_argument("--output", type=Path)
+    formal_status.add_argument("--json", action="store_true")
+    formal_status.add_argument("--api-url", default=default_api_url)
+
 
 def run_operator_command(args: argparse.Namespace) -> int | None:
-    if args.command not in {"profile", "workload", "hotspot", "round"}:
+    if args.command not in {
+        "profile",
+        "workload",
+        "hotspot",
+        "round",
+        "formal-start",
+    }:
         return None
     try:
         with OperatorHttpClient(args.api_url) as client:
@@ -485,6 +532,19 @@ def run_operator_command(args: argparse.Namespace) -> int | None:
                         json_stdout=args.json,
                         human=_hotspot_text(selected, args.index),
                     )
+                return 0
+            if args.command == "formal-start":
+                token = os.getenv(args.read_token_env)
+                intent = client.formal_start_status(
+                    args.intent_id,
+                    read_token=token,
+                )
+                _emit(
+                    intent.model_dump(mode="json"),
+                    args.output,
+                    json_stdout=args.json,
+                    human=_formal_start_text(intent),
+                )
                 return 0
             if args.round_command == "draft":
                 spec = client.draft(
@@ -844,6 +904,18 @@ def _start_text(started: OperatorStartView) -> str:
         f"replayed={str(started.replayed).lower()}\n"
         f"Executable by next control-plane stage: {str(started.executable).lower()}\n"
         "Mode: synthetic Scripted; automatic release: false"
+    )
+
+
+def _formal_start_text(intent: FormalStartIntentView) -> str:
+    blockers = ", ".join(intent.blocker_codes)
+    return (
+        f"Formal StartIntent: {intent.intent_id}\n"
+        f"State: {intent.state}; authority ready: "
+        f"{str(intent.authority_ready).lower()}\n"
+        f"Blocks: {blockers or 'none'}; error: {intent.error_code or 'none'}\n"
+        "Round creation in this slice: false; HCU accessed: false; "
+        "automatic release: false"
     )
 
 

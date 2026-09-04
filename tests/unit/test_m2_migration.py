@@ -14,7 +14,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[15] == "0015_m2b_agent_generation_authority.sql"
     assert MIGRATIONS[16] == "0016_m2b_runner_execution_receipt.sql"
     assert MIGRATIONS[17] == "0017_m2b_agent_evidence_read_model.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 18))
+    assert MIGRATIONS[18] == "0018_m2a_formal_start_intent.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 19))
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:
@@ -88,6 +89,21 @@ def test_operator_start_migration_is_durable_and_scripted_safe() -> None:
     assert "operator_start_family_matches_state" in sql
     assert "operator_start_never_auto_releases" in sql
     assert "VALUES (11, 'operator_start_intent')" in sql
+
+
+def test_formal_start_migration_is_separate_nonexecuting_and_audited() -> None:
+    sql = migration_sql(18)
+
+    assert "CREATE TABLE formal_operator_start_intents" in sql
+    assert "CREATE TABLE formal_operator_start_intent_events" in sql
+    assert "formal_start_nonexecuting_slice" in sql
+    assert "round_creation_allowed = FALSE" in sql
+    assert "hcu_accessed = FALSE" in sql
+    assert "synthetic = FALSE" in sql
+    assert "formal_start_events_append_only" in sql
+    assert "formal_start_event_type_valid" in sql
+    assert "formal_start_event_error_state" in sql
+    assert "VALUES (18, 'm2a_formal_start_intent')" in sql
 
 
 def test_m2_formal_authority_migration_is_separate_append_only_and_fail_closed() -> None:
