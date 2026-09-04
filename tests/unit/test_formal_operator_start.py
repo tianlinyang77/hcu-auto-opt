@@ -274,7 +274,7 @@ def _authorities(
             lease_policy_hash=_hash("lease-policy"),
             fencing_policy_hash=_hash("fencing-policy"),
             cleanup_policy_hash=_hash("cleanup-policy"),
-            issued_at=fixture.authorization.issued_at,
+            issued_at=NOW,
             expires_at=fixture.authorization.window_expires_at,
             signer=B_SIGNER,
         ),
@@ -299,7 +299,7 @@ def _authorities(
             family_alpha=0.05,
             evidence_root=root,
             independent_verifier=independent_verifier,
-            issued_at=fixture.authorization.issued_at,
+            issued_at=NOW,
             expires_at=fixture.authorization.window_expires_at,
             signer=D_SIGNER,
         ),
@@ -448,6 +448,39 @@ def test_formal_start_authority_drift_becomes_terminal_safe_failure(
     assert failed.error_code == "formal_start_authority_invalid"
     assert failed.error_message == "Formal Start Authority verification failed closed."
     assert failed.round_creation_allowed is False
+
+
+def test_formal_execution_authority_is_issued_after_preview_and_not_from_future(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path / "packages")
+    preview = fixture.compiler.compile(fixture.request, fixture.repository)
+    execution, evaluation = _authorities(fixture, preview, tmp_path)
+
+    assert execution.schema_version == "m2a-formal-execution-start-authority-v2"
+    early = execution.model_dump(mode="json", exclude={"authority_hash", "signature"})
+    early["issued_at"] = (fixture.authorization.window_starts_at - timedelta(seconds=1)).isoformat()
+    with pytest.raises(ValidationError, match="window is invalid"):
+        FormalExecutionStartAuthorityContent.model_validate(early)
+
+    future_content = FormalExecutionStartAuthorityContent.model_validate(
+        execution.model_dump(mode="json", exclude={"authority_hash", "signature"})
+        | {"issued_at": (NOW + timedelta(minutes=1)).isoformat()}
+    )
+    future = publish_formal_execution_start_authority(
+        future_content,
+        signature="future-execution-signature",
+    )
+    failed = _coordinator(
+        fixture,
+        _ObjectStore(preview, future, evaluation),
+    ).create(
+        _request(fixture, preview, future.authority_hash, evaluation.authority_hash),
+        _Repository(fixture.repository),
+    )
+
+    assert failed.state == "failed"
+    assert failed.error_code == "formal_start_authority_invalid"
 
 
 def test_formal_start_is_idempotent_and_rejects_ref_substitution(tmp_path: Path) -> None:

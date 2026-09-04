@@ -11,6 +11,10 @@ Formal Plan 生成以后，系统还不能马上创建 Round。A 必须在同一
 - 发起人、B、D、Holdout 和独立 Verifier 不是同一个身份；
 - 请求没有偷偷携带另一套 Candidate、Adapter、Plan 或 signoff 事实。
 
+B execution Start Authority 使用 `m2a-formal-execution-start-authority-v2`。它只能在授权窗口已经
+开始、A2a Preview/Plan Hash 已经存在以后签发，并且 A 会拒绝未来 `issued_at`；此前 v1 的
+“必须在窗口开始前签发”与 Preview 的生成顺序互相矛盾，且尚无生产 v1 Artifact，因此直接停止使用。
+
 实现位于：
 
 - `src/hcuopt/contracts/m2_formal_start_v1.py`：actor、B、D 与 StartIntent Contract；
