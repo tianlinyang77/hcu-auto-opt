@@ -171,7 +171,7 @@ gates:
     owner: A
     status: hold
     summary: An isolated non-executing Formal StartIntent now rereads and verifies exact A2a, B, and D authority Hashes, binds them to one Intent/Preview/Task/Round, and persists idempotent recovery plus append-only events without widening Scripted Start.
-    required_action: Keep this gate on hold until PostgreSQL 17 CI passes, B and D publish separately reviewed production signed Start Authorities, production authentication/verifier configuration is installed, and A/B/D complete the interface review; ready_for_round_creation remains non-executing.
+    required_action: Keep this gate on hold until B and D publish separately reviewed production signed Start Authorities, production authentication/verifier configuration is installed, and A/B/D complete the interface review; ready_for_round_creation remains non-executing.
     evidence:
       - path: src/hcuopt/contracts/m2_formal_start_v1.py
         sha256: sha256:765ab9f8c3d481b3bd3a7a4789b36d0f41dadc1b9cbe8f1a84ff5c62ef0fdeaf
@@ -265,7 +265,7 @@ gates:
 reviews:
   - owner: A
     decision: pending
-    reason: Formal Profile, Plan, Signoff/Outbox, and non-executing StartIntent mechanisms exist, but PostgreSQL 17, production authentication/signing, Real Profiles, signed B/D Start Authorities, and the actual Round-creation slice remain open.
+    reason: Formal Profile, Plan, Signoff/Outbox, and non-executing StartIntent mechanisms exist, but production authentication/signing, Real Profiles, signed B/D Start Authorities, and the actual Round-creation slice remain open.
     evidence: null
   - owner: B
     decision: pending
