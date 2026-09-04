@@ -8,12 +8,16 @@ Formal Plan 生成以后，系统还不能马上创建 Round。A 必须在同一
 - B 已授权一个真实注册的执行 Adapter，并冻结 Lease、fencing、cleanup policy 和预算；
 - D 已冻结 Search/Holdout、HoldoutPlanAuthority、Evidence Root 与独立 Verifier；
 - B/D Authority 同时绑定本次唯一的 Intent、Preview、Task 和 Round，不能换幂等键重复启动；
-- 发起人、B、D、Holdout 和独立 Verifier 不是同一个身份；
+- 发起人、owner window verifier、B、D、Holdout 和独立 Verifier 不是同一个身份；
 - 请求没有偷偷携带另一套 Candidate、Adapter、Plan 或 signoff 事实。
 
 B execution Start Authority 使用 `m2a-formal-execution-start-authority-v2`。它只能在授权窗口已经
 开始、A2a Preview/Plan Hash 已经存在以后签发，并且 A 会拒绝未来 `issued_at`；此前 v1 的
 “必须在窗口开始前签发”与 Preview 的生成顺序互相矛盾，且尚无生产 v1 Artifact，因此直接停止使用。
+
+D evaluation Start Authority 只能由部署侧 issuer 从已注册的 Search/Holdout commitment、Evidence
+Root 和 Verifier identity 形成。普通请求不能传入 Holdout 明文、Evidence URI 或统计规则；D
+Authority 也不能替代 Round 结束后的递归 EvidenceBundle/Barrier/FWER 验真。
 
 实现位于：
 

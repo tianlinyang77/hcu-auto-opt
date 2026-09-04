@@ -17,7 +17,7 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | MeasurementSeries | B | D/A | 原始样本 URI/Hash、协议、环境指纹和 Adapter 来源完整 |
 | M1PerformanceEvidence | B | D | ADR-0006 唯一 Schema；独立进程/缓存/Event、Stage 0 预算和 Lease-bound 清理可重算 |
 | M2FormalPhaseExecutionRequest / Receipt | A/B runtime | A/D | Formal-only；分别绑定 Search/Holdout、A1 Authorization/Resolved Plan、Authority Context、三 Profile、Target Lock refresh、Host/HCU/CPU/NUMA、窗口、独占 Lease/续租/Fencing、Round Budget、原始 M1 Evidence 和清理结果；只记录执行事实，不写性能结论 |
-| FormalStartActorAssertion / FormalExecutionStartAuthority / FormalEvaluationStartAuthority | operator / B / D | A | 三份独立签名对象；共同绑定唯一 Intent/Preview/Task/Round 与 A1/A2a Hash；B v2 Authority 只能在 Preview 形成后的授权窗口内签发，并从部署注册表绑定 Real Adapter、资源窗口、预算及 Lease/Fencing/Cleanup policy；D 另绑定 Search/Holdout、FWER 规则、生产 Evidence Root 与独立 Verifier |
+| FormalStartActorAssertion / FormalExecutionStartAuthority / FormalEvaluationStartAuthority | operator / B / D | A | 三份独立签名对象；共同绑定唯一 Intent/Preview/Task/Round 与 A1/A2a Hash；B v2 Authority 只能在 Preview 形成后的授权窗口内签发，并从部署注册表绑定 Real Adapter、资源窗口、预算及 Lease/Fencing/Cleanup policy；D 从独立部署注册表绑定 Search Plan、密封 Holdout commitment、FWER 规则、生产 Evidence Root 与独立 Verifier；A 复验包含 owner verifier 的六方角色隔离 |
 | FormalStartIntent | A | A/B/D/受保护只读端 | 独立于 Scripted StartIntent；从部署 Store 重读并验签，幂等、可取消和可恢复；本切片最多到 `ready_for_round_creation`，仍固定禁止 Round 创建、HCU 访问和自动发布 |
 | M1CorrectnessResult | D | A/D | 同时绑定原始数值证据与 Verification Artifact URI/Hash |
 | EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
@@ -96,7 +96,8 @@ Authority 的内容 Hash；A 从部署 Store 重读全部对象并验证 operato
 Authority 必须同时绑定由幂等键确定的唯一 `intent_id`、`task_id`、`round_id` 和 `preview_id`，避免
 一个窗口授权被复用为第二个 Round。B 的 `M2FormalExecutionStartAuthorityIssuer` 只接收 Preview ID
 和幂等键，从部署 Store/Registry 重读并签发 v2 Authority；详情见
-[M2a B execution Start Authority](m2a-formal-execution-start-authority.md) 和
+[M2a B execution Start Authority](m2a-formal-execution-start-authority.md)、
+[M2a D evaluation Start Authority](m2a-formal-evaluation-start-authority.md) 和
 [M2a Formal StartIntent](m2a-formal-start-intent.md)。
 
 错误使用稳定结构：

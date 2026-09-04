@@ -297,7 +297,10 @@ class FormalStartCoordinator:
             self._verify_execution_authority(intent, preview, execution, now=now)
             self._verify_evaluation_authority(intent, preview, evaluation, now=now)
             self._require_authority_role_separation(
-                intent, execution, evaluation
+                intent,
+                execution,
+                evaluation,
+                preview,
             )
         except (OperatorFormalAuthorizationNotActive, OperatorProfileNotFound):
             return repository.record_formal_start_reconciliation(
@@ -703,6 +706,7 @@ class FormalStartCoordinator:
         intent: FormalStartIntentView,
         execution: FormalExecutionStartAuthority,
         evaluation: FormalEvaluationStartAuthority,
+        preview: FormalRoundPlanPreviewView,
     ) -> None:
         ids = {
             intent.actor_signer_id,
@@ -710,6 +714,7 @@ class FormalStartCoordinator:
             evaluation.signer.signer_id,
             evaluation.holdout_plan_authority_id,
             evaluation.independent_verifier.verifier_id,
+            preview.formal_authorization.verifier.verifier_id,
         }
         hashes = {
             intent.actor_signer_hash,
@@ -717,10 +722,11 @@ class FormalStartCoordinator:
             evaluation.signer.signer_hash,
             evaluation.holdout_plan_authority_hash,
             evaluation.independent_verifier.identity_hash,
+            preview.formal_authorization.verifier.verifier_hash,
         }
-        if len(ids) != 5 or len(hashes) != 5:
+        if len(ids) != 6 or len(hashes) != 6:
             raise OperatorFormalStartAuthorityInvalid(
-                "Formal Start actor, B, Holdout, D signer, and verifier must be separate"
+                "Formal Start actor, owner, B, Holdout, D signer, and verifier must be separate"
             )
 
     @staticmethod

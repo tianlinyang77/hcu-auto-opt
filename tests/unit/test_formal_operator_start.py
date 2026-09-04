@@ -483,6 +483,45 @@ def test_formal_execution_authority_is_issued_after_preview_and_not_from_future(
     assert failed.error_code == "formal_start_authority_invalid"
 
 
+def test_formal_start_rejects_owner_verifier_role_reuse(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path / "packages")
+    preview = fixture.compiler.compile(fixture.request, fixture.repository)
+    execution, evaluation = _authorities(fixture, preview, tmp_path)
+    owner = fixture.authorization.verifier
+    reused = FormalStartSignerRef(
+        signer_id=owner.verifier_id,
+        signer_version=owner.verifier_version,
+        signer_hash=owner.verifier_hash,
+        signature_scheme=owner.signature_scheme,
+        key_id=owner.key_id,
+    )
+    content = FormalEvaluationStartAuthorityContent.model_validate(
+        evaluation.model_dump(mode="json", exclude={"authority_hash", "signature"})
+        | {"signer": reused.model_dump(mode="json")}
+    )
+    reused_evaluation = publish_formal_evaluation_start_authority(
+        content,
+        signature="owner-reused-evaluation-signature",
+    )
+
+    failed = _coordinator(
+        fixture,
+        _ObjectStore(preview, execution, reused_evaluation),
+        evaluation_verifier=_Verifier(reused),
+    ).create(
+        _request(
+            fixture,
+            preview,
+            execution.authority_hash,
+            reused_evaluation.authority_hash,
+        ),
+        _Repository(fixture.repository),
+    )
+
+    assert failed.state == "failed"
+    assert failed.error_code == "formal_start_authority_invalid"
+
+
 def test_formal_start_is_idempotent_and_rejects_ref_substitution(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path / "packages")
     preview = fixture.compiler.compile(fixture.request, fixture.repository)

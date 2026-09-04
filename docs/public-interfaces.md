@@ -141,6 +141,12 @@ B 通过进程内 `M2FormalExecutionStartAuthorityIssuer.issue(preview_id, idemp
 精确注册的 Adapter Profile/policy，并独立复验 owner window Hash 与签名；普通请求不能覆盖这些
 字段。该接口只产出待写入内容寻址 Store 的签名 Authority，不创建 Round、Lease 或 HCU Job。
 
+D 通过进程内 `M2FormalEvaluationStartAuthorityIssuer.issue(preview_id, idempotency_key)` 形成
+`m2a-formal-evaluation-start-authority-v1`。issuer 从部署 Store/Registry 重读 Search Plan Hash、
+密封 Holdout commitment、HoldoutPlanAuthority、selection rule、family alpha、production Evidence
+Root 和独立 Verifier，并复验 Preview/Plan/owner window。该接口不读取 Holdout 明文或终态
+Evidence，不创建 Round、Lease 或 HCU Job。
+
 该切片没有 Web 写入口。部署管理进程只能在配置 production Verifier 后进程内调用
 `create/reconcile/cancel/recover`。Web/CLI 仅提供受保护的状态读取：
 
