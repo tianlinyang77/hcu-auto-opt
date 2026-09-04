@@ -147,6 +147,11 @@ D 通过进程内 `M2FormalEvaluationStartAuthorityIssuer.issue(preview_id, idem
 Root 和独立 Verifier，并复验 Preview/Plan/owner window。该接口不读取 Holdout 明文或终态
 Evidence，不创建 Round、Lease 或 HCU Job。
 
+B/D issuer 输出由部署管理进程调用 `DeploymentFormalStartAuthorityStore` 的
+`publish_execution_authority` / `publish_evaluation_authority` 写入同一个内容寻址命名空间。Store
+执行原子 publish-once、类型隔离、大小/路径/链接检查，并在读取时重新校验 embedded Authority
+Hash；Preview 读取继续委托现有 A2a Store。Authority Store 不开放 Web 写 API，也不承担签名验证。
+
 该切片没有 Web 写入口。部署管理进程只能在配置 production Verifier 后进程内调用
 `create/reconcile/cancel/recover`。Web/CLI 仅提供受保护的状态读取：
 

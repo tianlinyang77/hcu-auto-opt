@@ -23,8 +23,10 @@ Authority 也不能替代 Round 结束后的递归 EvidenceBundle/Barrier/FWER �
 
 - `src/hcuopt/contracts/m2_formal_start_v1.py`：actor、B、D 与 StartIntent Contract；
 - `src/hcuopt/operator/formal_start.py`：重读、验签、幂等、reconcile、cancel 和恢复；
+- `src/hcuopt/operator/formal_start_store.py`：B/D Authority 内容寻址、原子发布与安全重读；
 - `src/hcuopt/storage/sql/0018_m2a_formal_start_intent.sql`：独立快照表与 append-only event；
 - `tests/unit/test_formal_operator_start.py`：权限、漂移、恢复、只读 API 负向测试；
+- `tests/unit/test_formal_start_authority_store.py`：真实 B/D issuer 到 A coordinator 的无 HCU 联合链路；
 - `tests/integration/test_formal_start_intent_postgres.py`：PostgreSQL 并发与审计约束。
 
 ## 状态机
@@ -71,8 +73,15 @@ hcuopt formal-start status <intent-id> --json
 
 CLI 不提供 Formal start/reconcile/cancel，避免把普通用户入口变成生产执行入口。
 
+部署 Store 的装配顺序为：复用既有 A2a Preview Store → B/D issuer 各自重读部署注册并签发 →
+`publish_execution_authority` / `publish_evaluation_authority` 原子发布 → A 只按请求中的 Hash 重读。
+Authority 文件共用一个 Hash 命名空间，跨 execution/evaluation 类型读取会被拒绝；Store 不校验签名，
+签名始终由 A 注入的独立 production Verifier 校验。Store 不是普通 Web 上传目录，也不接收未带
+embedded Hash 与签名的半成品内容。
+
 ## 当前实际状态
 
-本切片不提交 production key、Real Adapter registration、B/D signed Authority 或 owner window。
-因此当前项目仍是 `HOLD`，不会创建真实 Formal Round。B #126、D #127 完成后，可以向部署对象
-Store 放入它们各自签名且内容寻址的 Authority，再由同一 Intent 恢复核验。
+本切片已证明 test-only B/D issuer、Authority Store、actor assertion 与 A coordinator 可以到达
+`ready_for_round_creation`，同时三个禁止字段仍为 false。仓库仍不提交 production key、Real
+Adapter registration、production Evidence Root、Holdout nonce 或真实 signed Authority。因此项目
+仍是 `HOLD`，不会创建真实 Formal Round；#126/#127 继续开放，等待部署真实注册与独立复核。
