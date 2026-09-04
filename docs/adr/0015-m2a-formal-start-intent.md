@@ -26,7 +26,8 @@ A2a 已能从部署侧 Store 与 PostgreSQL 重读并冻结 Formal Plan，但它
    两者还必须绑定由启动幂等键确定的唯一 `intent_id/preview_id/task_id/round_id`，同一份授权不得
    被另一个 StartIntent 复用成第二个 Round。B Authority 使用 v2：必须在 Preview 形成后的授权
    窗口内签发，A 在消费时拒绝尚未到 `issued_at` 的未来 Authority；没有生产 v1 Artifact 需要迁移。
-4. operator、B signer、D signer、HoldoutPlanAuthority 与独立 D Verifier 必须身份和 Hash 分离。
+4. operator、owner window verifier、B signer、D signer、HoldoutPlanAuthority 与独立 D Verifier
+   必须身份和 Hash 分离。
 5. Intent 使用确定性 `intent_id/task_id/round_id/member_id`、幂等创建、可重入 reconcile、Cancel
    和启动恢复；人工 reconcile/Cancel 必须由创建 Intent 的同一签名 actor 发起，内部启动恢复仍由部署
    管理进程执行；状态变化与 append-only event 在同一 PostgreSQL 事务提交。
