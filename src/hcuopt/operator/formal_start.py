@@ -394,6 +394,7 @@ class FormalStartCoordinator:
         if (
             authority.decision != "authorized"
             or expected != actual
+            or now < authority.issued_at
             or not authority.window_starts_at <= now < authority.window_expires_at
             or now >= authority.expires_at
         ):

@@ -174,11 +174,11 @@ gates:
     required_action: Keep this gate on hold until B and D publish separately reviewed production signed Start Authorities, production authentication/verifier configuration is installed, and A/B/D complete the interface review; ready_for_round_creation remains non-executing.
     evidence:
       - path: src/hcuopt/contracts/m2_formal_start_v1.py
-        sha256: sha256:765ab9f8c3d481b3bd3a7a4789b36d0f41dadc1b9cbe8f1a84ff5c62ef0fdeaf
+        sha256: sha256:bff77214c6f0b58618bc4723ef2083f967e492598a21d008002124e58161264e
         digest_mode: text_lf
         evidence_type: isolated_formal_start_contract
       - path: src/hcuopt/operator/formal_start.py
-        sha256: sha256:5f6fa0dd33269a344c87a5ba65acccbbc549bfd89b4c65a13eb2a27ca88daa72
+        sha256: sha256:d4fd4567714348d1f00ab887955880e7d97c8fd65f736796e250d9c5177c00f2
         digest_mode: text_lf
         evidence_type: authority_reread_and_nonexecuting_coordinator
       - path: src/hcuopt/storage/sql/0018_m2a_formal_start_intent.sql

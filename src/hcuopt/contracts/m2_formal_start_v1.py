@@ -75,8 +75,8 @@ class FormalStartActorAssertion(FormalStartActorAssertionContent):
 class FormalExecutionStartAuthorityContent(FrozenFormalStartModel):
     """B-owned permission to use one registered execution profile in one window."""
 
-    schema_version: Literal["m2a-formal-execution-start-authority-v1"] = (
-        "m2a-formal-execution-start-authority-v1"
+    schema_version: Literal["m2a-formal-execution-start-authority-v2"] = (
+        "m2a-formal-execution-start-authority-v2"
     )
     authority_id: UUID
     intent_id: UUID
@@ -119,9 +119,7 @@ class FormalExecutionStartAuthorityContent(FrozenFormalStartModel):
         if any(value.tzinfo is None or value.utcoffset() is None for value in values):
             raise ValueError("Formal execution Start Authority times must be timezone-aware")
         if not (
-            self.issued_at <= self.window_starts_at
-            < self.window_expires_at
-            <= self.expires_at
+            self.window_starts_at <= self.issued_at < self.window_expires_at <= self.expires_at
         ):
             raise ValueError("Formal execution Start Authority window is invalid")
         return self

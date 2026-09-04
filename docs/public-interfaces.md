@@ -136,6 +136,11 @@ Store 重读 A2a Preview、B execution Start Authority 和 D evaluation Start Au
 暂缺对象保持 `awaiting_authority`，Profile 暂时不可读可恢复；窗口漂移、Profile 撤销、畸形
 Contract、签名拒绝或角色复用进入安全的 terminal `failed`。
 
+B 通过进程内 `M2FormalExecutionStartAuthorityIssuer.issue(preview_id, idempotency_key)` 形成
+`m2a-formal-execution-start-authority-v2`。issuer 从部署 Store 重读 Preview、从部署 Registry 读取
+精确注册的 Adapter Profile/policy，并独立复验 owner window Hash 与签名；普通请求不能覆盖这些
+字段。该接口只产出待写入内容寻址 Store 的签名 Authority，不创建 Round、Lease 或 HCU Job。
+
 该切片没有 Web 写入口。部署管理进程只能在配置 production Verifier 后进程内调用
 `create/reconcile/cancel/recover`。Web/CLI 仅提供受保护的状态读取：
 
