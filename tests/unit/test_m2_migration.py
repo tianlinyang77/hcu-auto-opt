@@ -15,7 +15,18 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[16] == "0016_m2b_runner_execution_receipt.sql"
     assert MIGRATIONS[17] == "0017_m2b_agent_evidence_read_model.sql"
     assert MIGRATIONS[18] == "0018_m2a_formal_start_intent.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 19))
+    assert MIGRATIONS[19] == "0019_m2b_terminal_runner_receipt_binding.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 20))
+
+
+def test_terminal_runner_receipt_binding_migration_freezes_settlement_evidence() -> None:
+    sql = migration_sql(19)
+
+    assert "agent_generator_attempt_runner_receipt_state_binding" in sql
+    assert "Runner Receipt can only bind at settlement" in sql
+    assert "Runner Receipt binding cannot change" in sql
+    assert "terminal evidence cannot change" in sql
+    assert "VALUES (19, 'm2b_terminal_runner_receipt_binding')" in sql
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:

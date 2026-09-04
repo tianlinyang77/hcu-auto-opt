@@ -284,6 +284,9 @@ Candidate、Package、HCU、Measurement、Holdout 或发布权限。
 不可变 `RunnerExecutionReceipt`，返回 `RunnerExecutionReceiptRef`。失败 Receipt 不暴露 Proposal
 bytes。A 的 `settle_generation_attempt()` 必须通过 Store 重读 Receipt，再校验冻结 Plan 中的
 `generator_artifact_hash`、Request/Attempt 身份、预算、cleanup 及 C Batch 的同一 raw output，
-然后才可原子写 Attempt、Proposal Ref 和独立 Generation Budget Ledger。D 从
+并复算 Receipt 内容 Hash、逐项匹配 Ref 身份，然后才可原子写 Attempt、Proposal Ref 和独立
+Generation Budget Ledger。终态 Attempt 的 Receipt/Batch/usage/raw output/provenance 只允许首次
+结算写入，完全相同的重放幂等返回，任一 ID、URI、Hash、Schema 或 provenance 漂移均失败关闭；
+租约过期的无 Receipt 失败记录不能事后补绑。D 从
 `GenerationRunStatusView` 重读 Receipt/Batch/Patch，复算 Hash、usage、barrier 和去重；调用方不能
 再提交第二套临时 Attempt Evidence。

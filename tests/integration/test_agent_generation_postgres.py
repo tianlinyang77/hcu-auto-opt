@@ -61,7 +61,7 @@ from hcuopt.contracts.agent_verification_v1 import (
 )
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.platform_v1 import AdapterProvenance, SourceSnapshot
-from hcuopt.domain.errors import Conflict
+from hcuopt.domain.errors import Conflict, StaleClaimToken
 from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationEvidenceReadService,
     build_agent_generation_evidence_publication,
@@ -1033,9 +1033,288 @@ class AgentGenerationPostgresTests(unittest.TestCase):
                 now=NOW + timedelta(seconds=1),
             )
 
+        other_claim = self.repository.claim_generation_attempt(
+            "worker-b",
+            lease_seconds=10,
+            now=NOW,
+        )
+        assert other_claim is not None
+        _, (other_reference, _) = self._settlement(
+            other_claim,
+            normalized_patch_hash=_hash("d"),
+        )
+        other_receipt = self.receipt_store.load(other_reference)
+
+        class MismatchedReceiptReader:
+            def load(self, _reference: RunnerExecutionReceiptRef) -> RunnerExecutionReceipt:
+                return other_receipt
+
+        with self.assertRaises(Conflict):
+            self.repository.settle_generation_attempt(
+                claim.attempt.attempt_id,
+                claim.attempt.claim_token,
+                batch,
+                reference,
+                runner_receipt_reader=MismatchedReceiptReader(),
+                batch_uri=batch_uri,
+                now=NOW + timedelta(seconds=1),
+            )
+
         status = self.repository.generation_run_status(start.generation_run_id)
         self.assertEqual(status.attempts[0].state, "running")
         self.assertEqual(status.proposals, ())
+
+    def test_terminal_settlement_replay_requires_complete_receipt_and_batch_binding(self) -> None:
+        self.coordinator.start(
+            _start_request("agent-postgres-terminal-replay-v1"),
+            self.repository,
+        )
+        claim = self.repository.claim_generation_attempt("worker-a", lease_seconds=10, now=NOW)
+        assert claim is not None
+        batch, (reference, batch_uri) = self._settlement(
+            claim,
+            normalized_patch_hash=_hash("d"),
+        )
+        assert batch is not None and batch_uri is not None
+        terminal = self.repository.settle_generation_attempt(
+            claim.attempt.attempt_id,
+            claim.attempt.claim_token,
+            batch,
+            reference,
+            runner_receipt_reader=self.receipt_store,
+            batch_uri=batch_uri,
+            now=NOW + timedelta(seconds=1),
+        )
+        replay = self.repository.settle_generation_attempt(
+            claim.attempt.attempt_id,
+            claim.attempt.claim_token,
+            batch,
+            reference,
+            runner_receipt_reader=self.receipt_store,
+            batch_uri=batch_uri,
+            now=NOW + timedelta(seconds=2),
+        )
+        self.assertEqual(replay, terminal)
+
+        receipt = self.receipt_store.load(reference)
+
+        class StaticReceiptReader:
+            def load(self, _reference: RunnerExecutionReceiptRef) -> RunnerExecutionReceipt:
+                return receipt
+
+        drifted_references = (
+            reference.model_copy(update={"uri": reference.uri + "#different"}),
+            reference.model_copy(
+                update={"receipt_id": uuid5(reference.receipt_id, "different-receipt")}
+            ),
+            reference.model_copy(update={"content_hash": _hash("e")}),
+            reference.model_copy(update={"schema_version": "m2b-runner-receipt-ref-v2"}),
+        )
+        for drifted_reference in drifted_references:
+            with self.subTest(reference=drifted_reference.model_dump(mode="json")):
+                with self.assertRaises((Conflict, StaleClaimToken)):
+                    self.repository.settle_generation_attempt(
+                        claim.attempt.attempt_id,
+                        claim.attempt.claim_token,
+                        batch,
+                        drifted_reference,
+                        runner_receipt_reader=StaticReceiptReader(),
+                        batch_uri=batch_uri,
+                        now=NOW + timedelta(seconds=2),
+                    )
+
+        with self.assertRaises(StaleClaimToken):
+            self.repository.settle_generation_attempt(
+                claim.attempt.attempt_id,
+                claim.attempt.claim_token,
+                batch,
+                reference,
+                runner_receipt_reader=self.receipt_store,
+                batch_uri=batch_uri + "#different",
+                now=NOW + timedelta(seconds=2),
+            )
+
+    def test_concurrent_identical_settlement_keeps_one_terminal_binding(self) -> None:
+        self.coordinator.start(
+            _start_request("agent-postgres-terminal-concurrency-v1"),
+            self.repository,
+        )
+        claim = self.repository.claim_generation_attempt("worker-a", lease_seconds=10, now=NOW)
+        assert claim is not None
+        batch, (reference, batch_uri) = self._settlement(
+            claim,
+            normalized_patch_hash=_hash("3"),
+        )
+        assert batch is not None and batch_uri is not None
+        barrier = Barrier(2)
+
+        def settle(_ordinal: int) -> GeneratorAttempt:
+            barrier.wait(timeout=5)
+            return self.repository.settle_generation_attempt(
+                claim.attempt.attempt_id,
+                claim.attempt.claim_token,
+                batch,
+                reference,
+                runner_receipt_reader=self.receipt_store,
+                batch_uri=batch_uri,
+                now=NOW + timedelta(seconds=1),
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            terminal = list(pool.map(settle, range(2)))
+
+        self.assertEqual(terminal[0], terminal[1])
+        self.assertEqual(terminal[0].runner_receipt_id, reference.receipt_id)
+        with self.connection.cursor() as cursor:
+            count = cursor.execute(
+                """
+                SELECT count(*) FROM agent_generation_budget_ledger
+                WHERE attempt_id = %s AND entry_type = 'settle'
+                """,
+                (claim.attempt.attempt_id,),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_terminal_attempt_evidence_is_immutable_in_postgres(self) -> None:
+        start = self.coordinator.start(
+            _start_request("agent-postgres-terminal-sql-v1"),
+            self.repository,
+        )
+        claim = self.repository.claim_generation_attempt("worker-a", lease_seconds=10, now=NOW)
+        assert claim is not None
+        batch, (reference, batch_uri) = self._settlement(
+            claim,
+            normalized_patch_hash=_hash("f"),
+        )
+        assert batch is not None and batch_uri is not None
+        terminal = self.repository.settle_generation_attempt(
+            claim.attempt.attempt_id,
+            claim.attempt.claim_token,
+            batch,
+            reference,
+            runner_receipt_reader=self.receipt_store,
+            batch_uri=batch_uri,
+            now=NOW + timedelta(seconds=1),
+        )
+
+        updates = (
+            (
+                "UPDATE agent_generator_attempts "
+                "SET runner_receipt_uri = runner_receipt_uri || '#different' "
+                "WHERE attempt_id = %s",
+                (terminal.attempt_id,),
+            ),
+            (
+                "UPDATE agent_generator_attempts SET runner_receipt_hash = %s "
+                "WHERE attempt_id = %s",
+                (_hash("0"), terminal.attempt_id),
+            ),
+            (
+                "UPDATE agent_generator_attempts SET runner_receipt_id = %s "
+                "WHERE attempt_id = %s",
+                (UUID("51000000-0000-0000-0000-000000000099"), terminal.attempt_id),
+            ),
+            (
+                "UPDATE agent_generator_attempts "
+                "SET runner_provenance = runner_provenance || "
+                "'{\"adapter_version\": \"9.9.9\"}'::jsonb WHERE attempt_id = %s",
+                (terminal.attempt_id,),
+            ),
+            (
+                "UPDATE agent_generator_attempts "
+                "SET actual = actual || '{\"tokens\": 1}'::jsonb WHERE attempt_id = %s",
+                (terminal.attempt_id,),
+            ),
+            (
+                "UPDATE agent_generator_attempts SET raw_output_hash = %s "
+                "WHERE attempt_id = %s",
+                (_hash("1"), terminal.attempt_id),
+            ),
+            (
+                "UPDATE agent_generator_attempts "
+                "SET finished_at = finished_at + interval '1 second' WHERE attempt_id = %s",
+                (terminal.attempt_id,),
+            ),
+            (
+                "UPDATE agent_generator_attempts SET "
+                "runner_receipt_id = NULL, runner_receipt_uri = NULL, "
+                "runner_receipt_hash = NULL, runner_receipt_schema_version = NULL, "
+                "runner_provenance = NULL WHERE attempt_id = %s",
+                (terminal.attempt_id,),
+            ),
+        )
+        for statement, parameters in updates:
+            with self.subTest(statement=statement):
+                with self.assertRaises(psycopg.Error):
+                    with self.connection.cursor() as cursor:
+                        cursor.execute(statement, parameters)
+                    self.connection.commit()
+                self.connection.rollback()
+
+        stored = self.repository.list_generation_attempts(start.generation_run_id)[0]
+        self.assertEqual(stored, terminal)
+
+    def test_running_and_expired_attempts_cannot_bind_receipt_outside_settlement(self) -> None:
+        start = self.coordinator.start(
+            _start_request("agent-postgres-receipt-state-v1"),
+            self.repository,
+        )
+        claim = self.repository.claim_generation_attempt("worker-a", lease_seconds=10, now=NOW)
+        assert claim is not None
+        _, (reference, _) = self._settlement(
+            claim,
+            normalized_patch_hash=_hash("2"),
+            runner_status="timed_out",
+        )
+        receipt = self.receipt_store.load(reference)
+        provenance = AdapterProvenance(
+            profile=receipt.execution.runner_provenance.profile,
+            capability=receipt.execution.runner_provenance.capability,
+            adapter_name=receipt.execution.runner_provenance.adapter_name,
+            adapter_version=receipt.execution.runner_provenance.adapter_version,
+            implementation_kind=receipt.execution.runner_provenance.implementation_kind,
+            source_commit=receipt.execution.runner_provenance.source_commit,
+        )
+
+        def bind_receipt_directly() -> None:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE agent_generator_attempts
+                    SET runner_receipt_id = %s, runner_receipt_uri = %s,
+                        runner_receipt_hash = %s, runner_receipt_schema_version = %s,
+                        runner_provenance = %s::jsonb
+                    WHERE attempt_id = %s
+                    """,
+                    (
+                        reference.receipt_id,
+                        reference.uri,
+                        reference.content_hash,
+                        receipt.schema_version,
+                        provenance.model_dump_json(),
+                        claim.attempt.attempt_id,
+                    ),
+                )
+            self.connection.commit()
+
+        with self.assertRaises(psycopg.Error):
+            bind_receipt_directly()
+        self.connection.rollback()
+
+        self.repository.reconcile_generation_run(
+            start.generation_run_id,
+            now=NOW + timedelta(seconds=11),
+        )
+        expired = next(
+            attempt
+            for attempt in self.repository.list_generation_attempts(start.generation_run_id)
+            if attempt.attempt_id == claim.attempt.attempt_id
+        )
+        self.assertEqual(expired.state, "failed")
+        self.assertIsNone(expired.runner_receipt_id)
+        with self.assertRaises(psycopg.Error):
+            bind_receipt_directly()
+        self.connection.rollback()
 
     def test_request_hash_drift_fails_closed_before_proposal_persistence(self) -> None:
         drift_cases: tuple[tuple[str, str | UUID], ...] = (
