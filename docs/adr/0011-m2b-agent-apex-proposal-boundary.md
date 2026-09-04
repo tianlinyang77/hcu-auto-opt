@@ -98,6 +98,13 @@ A 的 settle 必须先通过 Ref 从部署侧 Store 重读 Receipt，再校验�
 provenance 和 Budget Ledger；失败或超预算时不写入可审 Proposal。C 的 Batch 保留自己的 Generator
 provenance，不能复制或替代 Runner provenance。
 
+终态 Attempt 的 Receipt Ref 采用一次性绑定：Repository 必须复算 Receipt 内容 Hash，并逐项校验
+Ref 的 Receipt/Attempt/Run/Request 身份后才允许首次结算；幂等重放还必须与已存 Receipt ID、URI、
+Hash、Schema、Runner provenance 以及 Batch ID/URI/Hash/raw output/provenance 完全一致。PostgreSQL
+只允许 `running → succeeded/failed` 时首次绑定；一旦 Attempt 终态，Receipt、Batch、实际 usage、
+raw output、错误和时间等结算证据均不可改写。租约过期产生的无 Receipt `failed` Attempt 继续合法，
+但禁止事后补绑 Receipt。
+
 D 不接受调用方另造 Attempt Evidence。D 从 A 的 `GenerationRunStatusView + budget_ledger` 开始，
 独立重读 B Receipt、C Batch/Patch，复算 Receipt/Batch/Proposal Hash、实际 usage、barrier、A 的
 retained/duplicate 关系及 D 自己的淘汰原因。三层任一字段不一致均 fail closed。

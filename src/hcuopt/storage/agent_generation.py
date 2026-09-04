@@ -26,6 +26,7 @@ from hcuopt.contracts.agent_read_model_v1 import AgentGenerationEvidencePublicat
 from hcuopt.contracts.agent_runner_v1 import (
     RunnerExecutionReceipt,
     RunnerExecutionReceiptRef,
+    runner_execution_receipt_hash,
 )
 from hcuopt.contracts.agent_v1 import (
     CandidateProposalBatch,
@@ -799,9 +800,26 @@ class AgentGenerationRepositoryMixin:
     ) -> GeneratorAttempt:
         effective_now = now or datetime.now(timezone.utc)
         try:
-            runner_receipt = runner_receipt_reader.load(runner_receipt_ref)
+            receipt_ref = RunnerExecutionReceiptRef.model_validate(
+                runner_receipt_ref.model_dump(mode="json")
+            )
+            runner_receipt = runner_receipt_reader.load(receipt_ref)
+            runner_receipt = RunnerExecutionReceipt.model_validate(
+                runner_receipt.model_dump(mode="json")
+            )
         except Exception as error:
             raise Conflict("Agent Runner Receipt could not be independently reread") from error
+        execution = runner_receipt.execution
+        if (
+            runner_execution_receipt_hash(runner_receipt) != receipt_ref.content_hash
+            or runner_receipt.receipt_id != receipt_ref.receipt_id
+            or execution.attempt_id != receipt_ref.attempt_id
+            or execution.generation_run_id != receipt_ref.generation_run_id
+            or execution.request_id != receipt_ref.request_id
+            or execution.request_hash != receipt_ref.request_hash
+            or receipt_ref.attempt_id != attempt_id
+        ):
+            raise Conflict("Agent Runner Receipt Ref differs from independently reread content")
         batch_hash = candidate_proposal_batch_hash(batch) if batch is not None else None
         if (batch is None) != (batch_uri is None):
             raise Conflict("Agent Proposal Batch and its immutable URI must be atomic")
@@ -829,11 +847,46 @@ class AgentGenerationRepositoryMixin:
             assert attempt_row is not None
             attempt = self._generator_attempt(attempt_row)
             run = self._generation_run(run_row)
+            generator = run.plan.generators[attempt.generator_ordinal]
+            try:
+                validate_runner_receipt(
+                    run,
+                    attempt,
+                    generator,
+                    runner_receipt,
+                    batch,
+                )
+            except AgentAuthorityError as error:
+                raise Conflict(
+                    "Agent Generation settlement rejected unbound Runner evidence"
+                ) from error
+            runner_provenance = AdapterProvenance(
+                profile=execution.runner_provenance.profile,
+                capability=execution.runner_provenance.capability,
+                adapter_name=execution.runner_provenance.adapter_name,
+                adapter_version=execution.runner_provenance.adapter_version,
+                implementation_kind=execution.runner_provenance.implementation_kind,
+                source_commit=execution.runner_provenance.source_commit,
+            )
             if attempt.state in {"succeeded", "failed"}:
                 if (
                     attempt.claim_token == claim_token
+                    and attempt.batch_id == (batch.batch_id if batch is not None else None)
+                    and attempt.batch_uri == batch_uri
                     and attempt.batch_hash == batch_hash
-                    and attempt.runner_receipt_hash == runner_receipt_ref.content_hash
+                    and attempt.batch_status
+                    == (batch.status if batch is not None else None)
+                    and attempt.raw_output_uri
+                    == (batch.raw_output_uri if batch is not None else None)
+                    and attempt.raw_output_hash
+                    == (batch.raw_output_hash if batch is not None else None)
+                    and attempt.adapter_provenance
+                    == (batch.adapter_provenance if batch is not None else None)
+                    and attempt.runner_receipt_id == receipt_ref.receipt_id
+                    and attempt.runner_receipt_uri == receipt_ref.uri
+                    and attempt.runner_receipt_hash == receipt_ref.content_hash
+                    and attempt.runner_receipt_schema_version == runner_receipt.schema_version
+                    and attempt.runner_provenance == runner_provenance
                 ):
                     return attempt
                 raise StaleClaimToken("Agent generator settlement replay is stale")
@@ -847,15 +900,7 @@ class AgentGenerationRepositoryMixin:
                     self._reconcile_generation_run_locked(connection, run_row, effective_now)
                 stale = True
             else:
-                generator = run.plan.generators[attempt.generator_ordinal]
                 try:
-                    validate_runner_receipt(
-                        run,
-                        attempt,
-                        generator,
-                        runner_receipt,
-                        batch,
-                    )
                     refs = (
                         proposal_refs_for_batch(run, attempt, generator, batch)
                         if batch is not None
@@ -865,7 +910,6 @@ class AgentGenerationRepositoryMixin:
                     raise Conflict(
                         "Agent Generation settlement rejected unbound Runner evidence"
                     ) from error
-                execution = runner_receipt.execution
                 if batch is None:
                     actual = conservative_failure_usage(attempt.reserved)
                     state = "failed"
@@ -905,14 +949,6 @@ class AgentGenerationRepositoryMixin:
                     if batch is not None
                     else None
                 )
-                runner_provenance = AdapterProvenance(
-                    profile=execution.runner_provenance.profile,
-                    capability=execution.runner_provenance.capability,
-                    adapter_name=execution.runner_provenance.adapter_name,
-                    adapter_version=execution.runner_provenance.adapter_version,
-                    implementation_kind=execution.runner_provenance.implementation_kind,
-                    source_commit=execution.runner_provenance.source_commit,
-                )
                 row = connection.execute(
                     """
                     UPDATE agent_generator_attempts
@@ -937,9 +973,9 @@ class AgentGenerationRepositoryMixin:
                         batch.raw_output_uri if batch is not None else None,
                         batch.raw_output_hash if batch is not None else None,
                         Jsonb(provenance) if provenance is not None else None,
-                        runner_receipt.receipt_id,
-                        runner_receipt_ref.uri,
-                        runner_receipt_ref.content_hash,
+                        receipt_ref.receipt_id,
+                        receipt_ref.uri,
+                        receipt_ref.content_hash,
                         runner_receipt.schema_version,
                         Jsonb(runner_provenance.model_dump(mode="json")),
                         error_code,
