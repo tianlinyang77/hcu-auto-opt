@@ -4,13 +4,14 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from fastapi import FastAPI, Query, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
@@ -30,6 +31,7 @@ from hcuopt.contracts.m2 import (
     SearchRoundSummary,
     SearchRoundView,
 )
+from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentView
 from hcuopt.contracts.operator_v1 import (
     OperatorCandidateEvidenceWorkspace,
     OperatorEvaluationEvidenceWorkspace,
@@ -218,6 +220,7 @@ def create_app(
     operator_read_models: OperatorReadModelService | None = None,
     operator_discovery: OperatorDiscoveryService | None = None,
     agent_evidence_read_models: AgentGenerationEvidenceReadService | None = None,
+    formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -543,6 +546,33 @@ def create_app(
         request: Request,
     ) -> OperatorStartIntentView:
         return start_coordinator.reconcile(intent_id, repo(request))
+
+    @application.get(
+        "/v1/operator/formal-start-intents/{intent_id}",
+        response_model=FormalStartIntentView,
+    )
+    def get_formal_start_intent(
+        intent_id: UUID,
+        request: Request,
+    ) -> FormalStartIntentView:
+        if formal_start_read_authorizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Formal Start read authentication is not configured",
+            )
+        try:
+            authorized = formal_start_read_authorizer(request, intent_id)
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Formal Start read authentication failed closed",
+            ) from error
+        if authorized is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Formal Start read access was rejected",
+            )
+        return repo(request).get_formal_start_intent(intent_id)
 
     @application.get(
         "/v1/operator/search-rounds",

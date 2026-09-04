@@ -1,7 +1,7 @@
 schema_version: m2a-formal-readiness-v1
-audit_id: nmz36-m2a-formal-readiness-20260902-v3
+audit_id: nmz36-m2a-formal-readiness-20260904-v4
 audit_base_commit: 916431356bc845a9cdd2a12792106ad719052d11
-observed_at: 2026-09-02T10:30:00+08:00
+observed_at: 2026-09-04T18:00:00+08:00
 
 profile_draft:
   profile_version: 1
@@ -106,7 +106,7 @@ gates:
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py
-        sha256: sha256:8b288c32e19adc3d644b83e38f7d3f7f46a0c815ba92c2835a221c6ff26fae73
+        sha256: sha256:0e392ef50eeda259655530e3b41f5e132c63f67d4679e1ff6bdbf9ee43ef8699
         digest_mode: text_lf
         evidence_type: formal_repository_terminal_transactions
       - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql
@@ -169,14 +169,26 @@ gates:
         evidence_type: formal_plan_compiler_negative_tests
   - code: formal_start_intent
     owner: A
-    status: block
-    summary: Operator StartIntent always creates run_mode=scripted and candidate_kind=fixture.
-    required_action: Implement and crash-test a Formal StartIntent path without allowing the client to choose protected Authority, plans, Candidate kind, or Adapter configuration.
+    status: hold
+    summary: An isolated non-executing Formal StartIntent now rereads and verifies exact A2a, B, and D authority Hashes, binds them to one Intent/Preview/Task/Round, and persists idempotent recovery plus append-only events without widening Scripted Start.
+    required_action: Keep this gate on hold until PostgreSQL 17 CI passes, B and D publish separately reviewed production signed Start Authorities, production authentication/verifier configuration is installed, and A/B/D complete the interface review; ready_for_round_creation remains non-executing.
     evidence:
-      - path: src/hcuopt/operator/start.py
-        sha256: sha256:41e42c0c4f83a210923d7651efd2e9ad4f3d77c22f95af450e8e3894269fced8
+      - path: src/hcuopt/contracts/m2_formal_start_v1.py
+        sha256: sha256:765ab9f8c3d481b3bd3a7a4789b36d0f41dadc1b9cbe8f1a84ff5c62ef0fdeaf
         digest_mode: text_lf
-        evidence_type: scripted_only_start_intent
+        evidence_type: isolated_formal_start_contract
+      - path: src/hcuopt/operator/formal_start.py
+        sha256: sha256:9d2824cf822a079f3bdaf9f7400e7e84c628cf5e1528c78434a42119fe365ced
+        digest_mode: text_lf
+        evidence_type: authority_reread_and_nonexecuting_coordinator
+      - path: src/hcuopt/storage/sql/0018_m2a_formal_start_intent.sql
+        sha256: sha256:1cfc16e8c757ac86fde55efa3bb6c637a00ab1557582745c955ca4db24ae59d2
+        digest_mode: text_lf
+        evidence_type: durable_start_intent_and_append_only_events
+      - path: tests/integration/test_formal_start_intent_postgres.py
+        sha256: sha256:87b4878c4876921f0270055569ca8de9d17b1c019257e40075037fb1e340c566
+        digest_mode: text_lf
+        evidence_type: postgres_concurrency_idempotency_and_recovery_tests
   - code: historical_single_candidate_provenance
     owner: C
     status: pass
@@ -253,7 +265,7 @@ gates:
 reviews:
   - owner: A
     decision: pending
-    reason: Formal Signoff/Outbox persistence exists, but PostgreSQL 17, production authentication and signing, Real Profiles, compiler, and StartIntent remain open.
+    reason: Formal Profile, Plan, Signoff/Outbox, and non-executing StartIntent mechanisms exist, but PostgreSQL 17, production authentication/signing, Real Profiles, signed B/D Start Authorities, and the actual Round-creation slice remain open.
     evidence: null
   - owner: B
     decision: pending

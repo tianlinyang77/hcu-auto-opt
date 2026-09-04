@@ -129,6 +129,23 @@ Receipt 与 budget evidence 使用 no-follow 受保护根和原子 publish-once�
 注入的 fenced recovery 完成，不由 Adapter 另建 Cleaner。无 HCU 测试只验证 Contract 和失败关闭，不获得 Formal Measurement 或
 `faster` 权限。
 
+M2a A3/A4 另提供独立 `FormalStartCoordinator`。它不复用 Scripted StartIntent，也不接受客户端
+提交 Candidate、Plan、Adapter、Holdout 或 Signoff 内容；请求只携带内容 Hash。协调器从部署
+Store 重读 A2a Preview、B execution Start Authority 和 D evaluation Start Authority，复算 Hash、
+验证 operator/B/D 独立签名，并要求 B/D Authority 绑定同一个唯一 Intent/Preview/Task/Round。
+暂缺对象保持 `awaiting_authority`，Profile 暂时不可读可恢复；窗口漂移、Profile 撤销、畸形
+Contract、签名拒绝或角色复用进入安全的 terminal `failed`。
+
+该切片没有 Web 写入口。部署管理进程只能在配置 production Verifier 后进程内调用
+`create/reconcile/cancel/recover`。Web/CLI 仅提供受保护的状态读取：
+
+- `GET /v1/operator/formal-start-intents/{intent_id}`；
+- `hcuopt formal-start status <intent-id>`。
+
+未注入读鉴权时 API 返回 503，鉴权拒绝返回 403。即使全部 Authority 已验证，当前状态也只到
+`ready_for_round_creation`，仍固定 `round_creation_allowed=false`、`hcu_accessed=false` 和
+`automatic_release_allowed=false`。完整边界见 [M2a Formal StartIntent](m2a-formal-start-intent.md)。
+
 OX-1 已提供 `m2-operator-v1` 的 synthetic Profile Registry 和持久化 Plan Preview。当前默认
 Catalog 只注册 Scripted Target/Workload/Measurement 三类不可变 Profile；公共接口包括
 `GET /v1/operator/identity`、Profile list/show，以及

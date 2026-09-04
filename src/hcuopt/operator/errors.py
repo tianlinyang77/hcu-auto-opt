@@ -58,6 +58,16 @@ class OperatorStartFailed(Conflict):
     retryable = True
 
 
+class OperatorFormalStartAuthenticationInvalid(Conflict):
+    code = "operator_formal_start_authentication_invalid"
+    retryable = False
+
+
+class OperatorFormalStartAuthorityInvalid(Conflict):
+    code = "operator_formal_start_authority_invalid"
+    retryable = False
+
+
 class OperatorReadModelUnavailable(Conflict):
     code = "operator_read_model_unavailable"
     retryable = True

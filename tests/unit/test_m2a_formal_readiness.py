@@ -53,7 +53,7 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
 
     assert report.decision == "hold"
     assert report.generated_at == FIXED_TIME
-    assert report.verified_evidence_count == 29
+    assert report.verified_evidence_count == 32
     assert len(report.gate_results) == 13
     assert set(report.blocker_codes) == {
         "formal_authority_persistence",
@@ -85,6 +85,11 @@ def test_repository_manifest_reports_a_machine_verifiable_hold() -> None:
     )
     assert formal_finalizer.declared_status == "hold"
     assert formal_finalizer.effective_status == "hold"
+    formal_start = next(
+        gate for gate in report.gate_results if gate.code == "formal_start_intent"
+    )
+    assert formal_start.declared_status == "hold"
+    assert formal_start.effective_status == "hold"
     assert report.profile_registration_allowed is False
     assert report.formal_round_creation_allowed is False
     assert report.window_authorization_required is True
