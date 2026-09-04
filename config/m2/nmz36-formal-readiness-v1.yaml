@@ -178,7 +178,7 @@ gates:
         digest_mode: text_lf
         evidence_type: isolated_formal_start_contract
       - path: src/hcuopt/operator/formal_start.py
-        sha256: sha256:9d2824cf822a079f3bdaf9f7400e7e84c628cf5e1528c78434a42119fe365ced
+        sha256: sha256:5f6fa0dd33269a344c87a5ba65acccbbc549bfd89b4c65a13eb2a27ca88daa72
         digest_mode: text_lf
         evidence_type: authority_reread_and_nonexecuting_coordinator
       - path: src/hcuopt/storage/sql/0018_m2a_formal_start_intent.sql

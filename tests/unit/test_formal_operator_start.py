@@ -603,6 +603,57 @@ def test_formal_start_cancel_requires_exact_authenticated_action(tmp_path: Path)
     assert cancelled.authority_ready is False
 
 
+@pytest.mark.parametrize("action", ["reconcile", "cancel"])
+def test_formal_start_actions_reject_another_authenticated_actor(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    fixture = _fixture(tmp_path / "packages")
+    preview = fixture.compiler.compile(fixture.request, fixture.repository)
+    execution, evaluation = _authorities(fixture, preview, tmp_path)
+    store = _ObjectStore(preview)
+    repository = _Repository(fixture.repository)
+    coordinator = _coordinator(fixture, store)
+    created = coordinator.create(
+        _request(fixture, preview, execution.authority_hash, evaluation.authority_hash),
+        repository,
+    )
+    assertion = publish_formal_start_actor_assertion(
+        FormalStartActorAssertionContent(
+            assertion_id=uuid4(),
+            actor_id="another-formal-operator",
+            action=action,
+            subject_digest=formal_start_action_subject_digest(
+                action=action,
+                intent_id=created.intent_id,
+            ),
+            issued_at=NOW - timedelta(minutes=1),
+            expires_at=NOW + timedelta(minutes=10),
+            signer=ACTOR_SIGNER,
+        ),
+        signature="other-actor-signature",
+    )
+    request = FormalStartIntentActionRequest(
+        intent_id=created.intent_id,
+        action=action,
+        actor_assertion=assertion,
+    )
+
+    with pytest.raises(
+        OperatorFormalStartAuthenticationInvalid,
+        match="does not own this Intent",
+    ):
+        if action == "reconcile":
+            coordinator.reconcile(request, repository)
+        else:
+            coordinator.cancel(request, repository)
+
+    unchanged = repository.get_formal_start_intent(created.intent_id)
+    assert unchanged.model_dump(mode="json") == created.model_dump(
+        mode="json", exclude={"replayed"}
+    )
+
+
 def test_formal_start_request_forbids_client_owned_plan_or_adapter_fields(
     tmp_path: Path,
 ) -> None:

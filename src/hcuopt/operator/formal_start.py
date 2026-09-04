@@ -173,6 +173,9 @@ class FormalStartCoordinator:
             ),
             now=now,
         )
+        intent = repository.get_formal_start_intent(request.intent_id)
+        self._require_local_intent(intent)
+        self._require_intent_actor(intent, request.actor_assertion)
         return self._reconcile(request.intent_id, repository, now=now)
 
     def cancel(
@@ -196,6 +199,7 @@ class FormalStartCoordinator:
         )
         intent = repository.get_formal_start_intent(request.intent_id)
         self._require_local_intent(intent)
+        self._require_intent_actor(intent, request.actor_assertion)
         return repository.cancel_formal_start_intent(
             request.intent_id, cancelled_at=now
         )
@@ -677,6 +681,20 @@ class FormalStartCoordinator:
         if intent.service_identity != self.service_identity:
             raise OperatorServiceIdentityMismatch(
                 "Formal StartIntent belongs to another service deployment"
+            )
+
+    @staticmethod
+    def _require_intent_actor(
+        intent: FormalStartIntentView,
+        assertion: FormalStartActorAssertion,
+    ) -> None:
+        if (
+            assertion.actor_id != intent.actor_id
+            or assertion.signer.signer_id != intent.actor_signer_id
+            or assertion.signer.signer_hash != intent.actor_signer_hash
+        ):
+            raise OperatorFormalStartAuthenticationInvalid(
+                "Formal Start action actor does not own this Intent"
             )
 
     @staticmethod

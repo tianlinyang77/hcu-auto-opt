@@ -27,7 +27,8 @@ A2a 已能从部署侧 Store 与 PostgreSQL 重读并冻结 Formal Plan，但它
    被另一个 StartIntent 复用成第二个 Round。
 4. operator、B signer、D signer、HoldoutPlanAuthority 与独立 D Verifier 必须身份和 Hash 分离。
 5. Intent 使用确定性 `intent_id/task_id/round_id/member_id`、幂等创建、可重入 reconcile、Cancel
-   和启动恢复；状态变化与 append-only event 在同一 PostgreSQL 事务提交。
+   和启动恢复；人工 reconcile/Cancel 必须由创建 Intent 的同一签名 actor 发起，内部启动恢复仍由部署
+   管理进程执行；状态变化与 append-only event 在同一 PostgreSQL 事务提交。
 6. 这一切片即使 Authority 完整，也只到 `ready_for_round_creation`。Contract 和数据库仍固定
    `round_creation_allowed=false`、`hcu_accessed=false`、`automatic_release_allowed=false`。
 7. Web 只提供注入部署鉴权后的 GET；未配置鉴权返回 503，鉴权拒绝返回 403。Web 不提供 Formal

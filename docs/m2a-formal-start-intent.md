@@ -44,7 +44,8 @@ automatic_release_allowed = false
 
 Formal 写操作不暴露为 Web API。部署管理进程必须显式构造三个 production Verifier 和部署对象
 Store，然后进程内调用 `FormalStartCoordinator.create/reconcile/cancel/recover`；缺少任一个 Verifier
-会在写入数据库前失败。
+会在写入数据库前失败。人工 `reconcile/cancel` 的签名 assertion 必须属于创建该 Intent 的同一
+actor；`recover` 是部署管理进程使用的内部崩溃恢复入口，不接收用户 assertion。
 
 Web 只提供受保护的只读状态：
 
