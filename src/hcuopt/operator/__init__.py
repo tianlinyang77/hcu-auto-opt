@@ -14,6 +14,10 @@ from hcuopt.operator.formal_start import (
     FormalStartObjectStore,
     FormalStartRepository,
 )
+from hcuopt.operator.formal_start_store import (
+    DeploymentFormalStartAuthorityStore,
+    DeploymentFormalStartPreviewStore,
+)
 from hcuopt.operator.plans import (
     OperatorPlanCompiler,
     operator_preview_request_digest,
@@ -44,6 +48,8 @@ __all__ = [
     "DeploymentFormalProfileGrantVerifier",
     "FormalOperatorPlanCompiler",
     "DeploymentFormalStartSignatureVerifier",
+    "DeploymentFormalStartAuthorityStore",
+    "DeploymentFormalStartPreviewStore",
     "FormalStartCoordinator",
     "FormalStartObjectStore",
     "FormalStartRepository",
