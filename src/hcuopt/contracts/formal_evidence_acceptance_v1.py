@@ -16,7 +16,7 @@ from hcuopt.measurement.evidence import canonical_json_bytes
 
 PRODUCTION_EVIDENCE_ROOT_SCHEMA_VERSION = "m2a-production-evidence-root-v1"
 FORMAL_EVIDENCE_VERIFIER_SCHEMA_VERSION = "m2a-formal-evidence-verifier-v1"
-FORMAL_EVIDENCE_ACCEPTANCE_REVIEW_SCHEMA_VERSION = "m2a-formal-evidence-acceptance-review-v1"
+FORMAL_EVIDENCE_ACCEPTANCE_REVIEW_SCHEMA_VERSION = "m2a-formal-evidence-acceptance-review-v2"
 
 FormalEvidenceProducerRole = Literal[
     "control_plane",
@@ -28,6 +28,7 @@ FormalEvidenceProducerRole = Literal[
 ]
 FormalEvidenceClass = Literal[
     "authority_context",
+    "round_authority",
     "search_plan",
     "search_measurement",
     "search_cleanup",
@@ -212,7 +213,7 @@ class ProductionFormalEvidenceRef(_FrozenAcceptanceModel):
 class FormalEvidenceAcceptanceReviewContent(_FrozenAcceptanceModel):
     """D-owned review of one exact Formal evidence terminal path."""
 
-    schema_version: Literal["m2a-formal-evidence-acceptance-review-v1"] = (
+    schema_version: Literal["m2a-formal-evidence-acceptance-review-v2"] = (
         FORMAL_EVIDENCE_ACCEPTANCE_REVIEW_SCHEMA_VERSION
     )
     review_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{7,299}$")
@@ -223,14 +224,21 @@ class FormalEvidenceAcceptanceReviewContent(_FrozenAcceptanceModel):
     readiness_audit_base_commit: str = Field(pattern=GIT_COMMIT_PATTERN)
     readiness_manifest_hash: str = Field(pattern=SHA256_PATTERN)
     readiness_report_hash: str = Field(pattern=SHA256_PATTERN)
+    round_id: UUID
     authority_context_id: UUID
     authority_context_hash: str = Field(pattern=SHA256_PATTERN)
     target_lock_hash: str = Field(pattern=SHA256_PATTERN)
     terminal_path: Literal["zero_promotion", "holdout_fwer"]
+    round_evidence_bundle_id: UUID
+    round_evidence_bundle_hash: str = Field(pattern=SHA256_PATTERN)
+    signoff_artifact_hash: str = Field(pattern=SHA256_PATTERN)
+    signoff_signer_identity_hash: str = Field(pattern=SHA256_PATTERN)
     evidence_root: ProductionEvidenceRootDescriptor
     verifier: FormalEvidenceVerifierIdentity
     verification_input_digest: str = Field(pattern=SHA256_PATTERN)
     verified_evidence_count: int = Field(ge=0)
+    recursive_semantic_verification: Literal["verified", "blocked"]
+    allowlisted_signature_verification: Literal["verified", "blocked"]
     verification_summary_uri: str = Field(min_length=1, max_length=4000)
     verification_summary_hash: str = Field(pattern=SHA256_PATTERN)
     reviewed_at: datetime
@@ -254,19 +262,32 @@ class FormalEvidenceAcceptanceReviewContent(_FrozenAcceptanceModel):
     def require_decision_evidence(self) -> FormalEvidenceAcceptanceReviewContent:
         if self.reviewed_at.tzinfo is None or self.reviewed_at.utcoffset() is None:
             raise ValueError("Formal acceptance review time must be timezone-aware")
-        if self.decision == "accepted_for_formal_window":
+        if self.decision == "accepted_for_formal_window" and (
+            self.blocker_codes
+            or self.recursive_semantic_verification != "verified"
+            or self.allowlisted_signature_verification != "verified"
+            or self.verified_evidence_count == 0
+        ):
             raise ValueError(
-                "accepted_for_formal_window is unavailable until recursive semantic "
-                "verification and allowlisted signature verification are bound"
+                "accepted_for_formal_window requires recursive semantics, an allowlisted "
+                "signature, verified evidence, and no blockers"
             )
-        elif not self.blocker_codes:
+        if self.decision == "blocked" and not self.blocker_codes:
             raise ValueError("blocked Formal evidence requires explicit blocker codes")
         return self
 
 
+class FormalEvidenceAcceptanceReviewSignature(_FrozenAcceptanceModel):
+    verifier_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,199}$")
+    verifier_key_id: str = Field(min_length=1, max_length=300)
+    verifier_identity_hash: str = Field(pattern=SHA256_PATTERN)
+    algorithm: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{1,63}$")
+    value: str = Field(pattern=r"^[A-Za-z0-9_-]{16,16384}$")
+
+
 class FormalEvidenceAcceptanceReview(FormalEvidenceAcceptanceReviewContent):
     review_hash: str = Field(pattern=SHA256_PATTERN)
-    signature: str = Field(min_length=1, max_length=16_384)
+    signature: FormalEvidenceAcceptanceReviewSignature
 
     @model_validator(mode="after")
     def verify_review_hash(self) -> FormalEvidenceAcceptanceReview:
@@ -275,6 +296,13 @@ class FormalEvidenceAcceptanceReview(FormalEvidenceAcceptanceReviewContent):
         )
         if formal_evidence_acceptance_review_hash(content) != self.review_hash:
             raise ValueError("Formal acceptance review does not match review_hash")
+        if (
+            self.signature.verifier_id != self.verifier.verifier_id
+            or self.signature.verifier_key_id != self.verifier.attestation_key_id
+            or self.signature.verifier_identity_hash != self.verifier.identity_hash
+            or self.signature.algorithm != self.verifier.attestation_scheme
+        ):
+            raise ValueError("Formal acceptance review signature identity drifted")
         return self
 
 
@@ -316,7 +344,7 @@ def formal_evidence_acceptance_review_hash(
 def publish_formal_evidence_acceptance_review(
     content: FormalEvidenceAcceptanceReviewContent,
     *,
-    signature: str,
+    signature: FormalEvidenceAcceptanceReviewSignature,
 ) -> FormalEvidenceAcceptanceReview:
     return FormalEvidenceAcceptanceReview.model_validate(
         {

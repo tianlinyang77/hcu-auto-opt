@@ -63,6 +63,7 @@ class VerifiedProductionEvidence(ContractModel):
 
 _EXPECTED_ROLE = {
     "authority_context": "control_plane",
+    "round_authority": "control_plane",
     "search_plan": "control_plane",
     "search_measurement": "measurement_producer",
     "search_cleanup": "measurement_producer",
