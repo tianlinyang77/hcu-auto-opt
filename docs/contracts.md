@@ -19,6 +19,7 @@ API/Worker 版本化模型位于 `src/hcuopt/contracts/v1.py`，跨模块平台�
 | M2FormalPhaseExecutionRequest / Receipt | A/B runtime | A/D | Formal-only；分别绑定 Search/Holdout、A1 Authorization/Resolved Plan、Authority Context、三 Profile、Target Lock refresh、Host/HCU/CPU/NUMA、窗口、独占 Lease/续租/Fencing、Round Budget、原始 M1 Evidence 和清理结果；只记录执行事实，不写性能结论 |
 | FormalStartActorAssertion / FormalExecutionStartAuthority / FormalEvaluationStartAuthority | operator / B / D | A | 三份独立签名对象；共同绑定唯一 Intent/Preview/Task/Round 与 A1/A2a Hash；B v2 Authority 只能在 Preview 形成后的授权窗口内签发，并从部署注册表绑定 Real Adapter、资源窗口、预算及 Lease/Fencing/Cleanup policy；D 从独立部署注册表绑定 Search Plan、密封 Holdout commitment、FWER 规则、生产 Evidence Root 与独立 Verifier；A 复验包含 owner verifier 的六方角色隔离 |
 | FormalStartIntent / DeploymentFormalStartAuthorityStore | A | A/B/D/受保护只读端 | 独立于 Scripted StartIntent；B/D signed Authority 在同一内容寻址命名空间原子 publish-once，Preview 委托既有 Store；A 重读时复算 embedded Hash 并独立验签，幂等、可取消和可恢复；本切片最多到 `ready_for_round_creation`，仍固定禁止 Round 创建、HCU 访问和自动发布 |
+| M2FormalExecutionProfileRegistration / Deployment Registry | B deployment | B issuer/A | Registration 内容寻址，registration ID 与 owner authorization Hash + Adapter Profile ID 双索引均 write-once；每次重读复算 Hash，仓库不携带实际窗口注册或密钥 |
 | M1CorrectnessResult | D | A/D | 同时绑定原始数值证据与 Verification Artifact URI/Hash |
 | EvaluationRun | D | A | 一次有意评测；指明 MeasurementSeries 和判定规则版本 |
 | ExecutionAttempt | B | A | 一次物理执行；重试不覆盖 EvaluationRun 或旧日志 |
