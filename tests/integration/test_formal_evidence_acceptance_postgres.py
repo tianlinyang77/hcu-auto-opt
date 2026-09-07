@@ -8,8 +8,12 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 import pytest
+from fastapi.testclient import TestClient
 
+from hcuopt.api.app import create_app
 from hcuopt.domain.errors import Conflict
+from hcuopt.evaluation.formal_evidence_reporting import FormalEvidenceAcceptanceReportService
+from hcuopt.storage.formal_evidence_acceptance import DeploymentFormalEvidenceAcceptanceRegistry
 from hcuopt.storage.repository import PostgresRepository
 from tests.unit.test_formal_evidence_acceptance import (
     _acceptance_fixture,
@@ -45,6 +49,80 @@ class FormalEvidenceAcceptancePostgresTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.connection.close()
+
+    def test_recursive_acceptance_survives_registry_and_api_restart(self) -> None:
+        for label, holdout, wrong_owner in (
+            ("zero", False, False),
+            ("holdout", True, False),
+            ("rejected", False, True),
+        ):
+            with self.subTest(terminal=label):
+                fixture = _acceptance_fixture(
+                    holdout=holdout, wrong_owner_identity=wrong_owner
+                )
+                snapshot = fixture.snapshot.model_copy(
+                    update={"readiness_audit_id": f"formal-roundtrip-{label}"}
+                )
+                verifier = _ReviewVerifier(snapshot.verifier)
+                registry = DeploymentFormalEvidenceAcceptanceRegistry(
+                    self.repository, signature_verifier=verifier
+                )
+                registry.register(snapshot)
+                # The real acceptance service must resolve the DB Snapshot itself.
+                fixture.service.snapshot_reader = registry
+                review = fixture.service.review(
+                    round_id=snapshot.round_id,
+                    readiness_audit_id=snapshot.readiness_audit_id,
+                )
+                stored, created = registry.publish_review(review)
+                self.assertTrue(created)
+                self.assertEqual(stored, review)
+
+                restarted = PostgresRepository(DATABASE_URL)
+                fresh_registry = DeploymentFormalEvidenceAcceptanceRegistry(
+                    restarted, signature_verifier=_ReviewVerifier(snapshot.verifier)
+                )
+                self.assertEqual(
+                    fresh_registry.read_review(
+                        round_id=snapshot.round_id,
+                        readiness_audit_id=snapshot.readiness_audit_id,
+                    ),
+                    review,
+                )
+                reports = FormalEvidenceAcceptanceReportService(
+                    restarted, _ReviewVerifier(snapshot.verifier)
+                )
+                application = create_app(
+                    repository=restarted,
+                    formal_evidence_reports=reports,
+                    formal_evidence_read_authorizer=lambda request, round_id, audit_id,
+                    expected=snapshot: (
+                        request.headers.get("Authorization") == "Bearer test-only-read"
+                        and round_id == expected.round_id
+                        and audit_id == expected.readiness_audit_id
+                    ),
+                )
+                url = f"/v1/operator/formal-rounds/{snapshot.round_id}/evidence-acceptance"
+                with TestClient(application) as client:
+                    denied = client.get(
+                        url, params={"readiness_audit_id": snapshot.readiness_audit_id}
+                    )
+                    response = client.get(
+                        url,
+                        params={"readiness_audit_id": snapshot.readiness_audit_id},
+                        headers={"Authorization": "Bearer test-only-read"},
+                    )
+                self.assertEqual(denied.status_code, 403)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["review"], review.model_dump(mode="json"))
+                self.assertEqual(
+                    review.decision,
+                    "blocked" if wrong_owner else "accepted_for_formal_window",
+                )
+                self.assertEqual(bool(review.blocker_codes), wrong_owner)
+                self.assertFalse(response.json()["hcu_accessed"])
+                self.assertFalse(response.json()["automatic_release_allowed"])
+                self.assertEqual(response.json()["owner_window_authorization"], "not_granted")
 
     def test_snapshot_and_signed_review_are_concurrent_idempotent_and_immutable(self) -> None:
         fixture = _acceptance_fixture()
