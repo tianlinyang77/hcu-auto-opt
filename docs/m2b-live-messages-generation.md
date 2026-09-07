@@ -135,11 +135,15 @@ Windows 不做兼容性降级。API 部署设置 `HCUOPT_AGENT_INSPECTION_ROOT=<
 未注入或鉴权器异常为 503，拒绝/非布尔真值为 403。认证发生在读取 Store/A 状态之前，
 每次 GET 重新调用，不因先前读成功而缓存权限。响应设 `Cache-Control: no-store`。
 
-这不是现成 SSO：仍需部署侧提供真正的身份校验与 Run ACL。不要使用恒真回调、直接信任
+这不是现成 SSO：完整控制面仍需部署侧提供真正的身份校验与 Run ACL。不要使用恒真回调、直接信任
 客户端身份请求头，或把模型 API Key 放到页面/URL/localStorage 充当登录凭据。普通
 `hcuopt api` 没有注入器，配置 root 后仍会拒绝 inspection；需用部署 app factory 接线。
 此变更只保护 inspection，旧 API 不自动获得同样的权限保证。内部反向代理只应开放明确
 获准的只读路径，不能把整个开发 API 暴露公网。不要公开源码 Store 或原始回复。
+
+第一版现已选定独立凭据方案，可使用不挂载控制面的
+[专用只读部署入口](agent-inspection-deployment.md)。它提供真实凭据摘要/Run/到期验证，
+不需要先建设企业 SSO；实际服务启动、端口开放和浏览器联验不由代码完成推定。
 
 ### 接线前检查顺序
 

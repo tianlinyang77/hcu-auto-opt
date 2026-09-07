@@ -66,7 +66,18 @@
 - [ ] B/C 接受 Wrapper、输入封装、凭据、Receipt 和失败 Batch 边界。
 - [ ] D 接受审核前检查外壳、独立复核和 UI 证据分类。
 
-## 回滚
+## 单用户只读部署补充（2026-09-07）
+
+项目所有者选择第一版使用独立访问凭据、限定 Run，不接企业 SSO。新增专用只读 app，只有
+healthz 与 inspection GET，不挂载控制面，也不执行迁移。配置通过用户私有文件保存密码
+摘要、Run allowlist 与到期时间，每次请求原生安全重读；凭据由排他创建命令随机生成，明文
+只交操作者，不进入模型/前端代码。HTTP Basic 仅允许 HTTPS 或本机通道，默认监听 loopback。
+它复用原 D inspection service，不实现新 Evidence/Review/签核语义；完整 API 的鉴权回调
+仍保留，以供将来的身份服务接入。本补充不等于跨模块接受或实际部署授权。
+
+操作、撤权和验收边界见 [单用户只读部署](../agent-inspection-deployment.md)。
+
+## 回滚方式
 
 停用新 CLI Worker、取消 inspection root 配置并移除页面直达入口即可停用此接线。
 在途 Attempt 仍按 A 的原 reconcile/结算规则处理，不删除证据或账本，不触碰 HCU/系统库。

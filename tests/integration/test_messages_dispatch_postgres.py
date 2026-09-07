@@ -139,7 +139,8 @@ def test_dispatch_settles_actual_receipt_and_replays_without_network(dispatch_ca
 
 @pytest.mark.skipif(os.name != "posix", reason="D requires POSIX openat/O_NOFOLLOW")
 @pytest.mark.parametrize("mode", ["valid", "bad_patch", "provider_failure"])
-def test_postgres_to_native_d_inspection(dispatch_case, mode):
+@pytest.mark.parametrize("api_kind", ["control_plane", "readonly"])
+def test_postgres_to_native_d_inspection(dispatch_case, mode, api_kind):
     case = dispatch_case
     if mode == "bad_patch":
         proposals = json.loads(case["response"]["reply"]["content"][0]["text"])["proposals"]
@@ -178,18 +179,46 @@ def test_postgres_to_native_d_inspection(dispatch_case, mode):
 
     from hcuopt.api.app import create_app
 
+    auth = None
+    if api_kind == "readonly":
+        from hcuopt.api.inspection_access import FileRunReadAccess, provision_run_read_access
+        from hcuopt.api.inspection_server import create_inspection_app
+
+        private = case["root"].parent / "private-access"
+        private.mkdir(mode=0o700)
+        access_file, credential_file = private / "access.json", private / "credential.txt"
+        provision_run_read_access(
+            access_file, credential_file, run_ids=(status.run.generation_run_id,)
+        )
+        password = credential_file.read_text().splitlines()[1].split(": ", 1)[1]
+        auth = ("operator", password)
+        app = create_inspection_app(
+            repository=case["repository"], evidence_root=case["root"],
+            access=FileRunReadAccess(access_file),
+        )
+    else:
+        app = create_app(
+            repository=case["repository"],
+            agent_inspection_read_authorizer=(
+                lambda _request, run_id: run_id == status.run.generation_run_id
+            ),
+        )
     with patch.dict(os.environ, HCUOPT_AGENT_INSPECTION_ROOT=str(case["root"]),
                     HCUOPT_AUTO_MIGRATE="false"), TestClient(
-                        create_app(
-                            repository=case["repository"],
-                            agent_inspection_read_authorizer=(
-                                lambda _request, run_id: run_id == status.run.generation_run_id
-                            ),
-                        )) as client:
+                        app, base_url="https://testserver") as client:
+        url = f"/v1/operator/agent-generations/{status.run.generation_run_id}/inspection"
+        if api_kind == "readonly":
+            assert client.get(url).status_code == 401
+            assert client.get(url, auth=("operator", "wrong")).status_code == 403
+            assert client.get(
+                f"/v1/operator/agent-generations/{uuid4()}/inspection", auth=auth
+            ).status_code == 403
+            client.auth = auth
         response = client.get(
             f"/v1/operator/agent-generations/{status.run.generation_run_id}/inspection"
         )
         assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "no-store"
         assert response.json() == inspection.model_dump(mode="json")
         # Every read revalidates D evidence; a corrupted artifact is not displayed.
         path = case["root"] / "attempts" / str(attempt.attempt_id) / "receipt-ref.json"
