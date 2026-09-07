@@ -50,6 +50,7 @@ jobs:
           tests/unit/test_m2_formal_execution.py
           tests/unit/test_formal_execution_profile_registry.py
           tests/unit/test_formal_evidence_acceptance_report_api.py
+          tests/unit/test_formal_evaluation_registry.py
           tests/unit/test_agent_proposal_verifier.py
           tests/unit/test_agent_generation_read_model_api.py
           tests/unit/test_agent_cli.py
