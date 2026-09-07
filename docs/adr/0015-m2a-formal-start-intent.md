@@ -39,6 +39,9 @@ A2a 已能从部署侧 Store 与 PostgreSQL 重读并冻结 Formal Plan，但它
    Authority 内容 Hash 寻址、原子 publish-once，并在每次读取时重新解析 Contract 和复算 embedded
    Hash；同字节重放幂等，不同字节占用同一身份、跨类型读取、畸形/超限对象、路径逃逸和链接全部
    fail closed。Preview 继续委托既有 A2a Preview Store，不复制第二份数据。
+9. B 的 `M2FormalExecutionProfileRegistration` 由独立部署 Registry 保存：Registration 内容 Hash、
+   `registration_id` 和 `(owner authorization Hash, Adapter Profile ID)` 三者均 write-once；B issuer
+   每次按窗口与 Profile 身份重读并复验。仓库不携带任何实际注册记录、Authorization 或生产密钥。
 
 ## 失败语义
 

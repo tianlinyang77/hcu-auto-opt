@@ -21,6 +21,12 @@ A3 的 `FormalStartCoordinator` 只能消费已经签名的 B Authority。测试
 客户端不能提交 Candidate Family、预算、Profile 版本/Hash、host/resource/window 或 policy Hash。
 这些值全部来自 Preview、owner Authorization 和注册表。
 
+部署实现 `DeploymentM2FormalExecutionProfileRegistry` 对 Registration 规范 JSON 做内容寻址，
+并同时冻结 `registration_id` 及 `(owner authorization Hash, Adapter Profile ID)` 两个 write-once
+索引。发布后每次读取都会重新解析 Contract、复算内容 Hash、比对两个索引；缺失、畸形、超限、
+路径逃逸、链接、并发占用、跨窗口或跨 Profile 改绑全部失败关闭。仓库只提供 Registry 实现，
+不提交实际 nmz36 Registration、owner Authorization 或生产密钥。
+
 ## 时间顺序与 v2
 
 Formal Preview 只能在 owner window 已开始后生成，因此绑定 Preview/Plan Hash 的 B Authority 也只能
@@ -35,7 +41,7 @@ A 消费时还会拒绝 `now < issued_at` 的未来 Authority。旧 v1 要求在
 
 ## 固定边界
 
-- 注册表是部署侧接口；仓库不提交真实 Profile 注册记录或密钥。
+- 注册表是部署侧受保护 Store；仓库不提交真实 Profile 注册记录、Authorization 或密钥。
 - owner verifier 与 B signer 的 identity/Hash 必须分离。
 - issuer 只生成授权对象，不创建 StartIntent、Task、Round、Lease 或执行 Job。
 - 输出固定 `synthetic=false`、`automatic_release_allowed=false`；没有性能结论。

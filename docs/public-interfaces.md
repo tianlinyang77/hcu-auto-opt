@@ -140,6 +140,9 @@ B 通过进程内 `M2FormalExecutionStartAuthorityIssuer.issue(preview_id, idemp
 `m2a-formal-execution-start-authority-v2`。issuer 从部署 Store 重读 Preview、从部署 Registry 读取
 精确注册的 Adapter Profile/policy，并独立复验 owner window Hash 与签名；普通请求不能覆盖这些
 字段。该接口只产出待写入内容寻址 Store 的签名 Authority，不创建 Round、Lease 或 HCU Job。
+部署实现 `DeploymentM2FormalExecutionProfileRegistry` 以 Registration 内容 Hash 保存对象，同时
+对 registration ID 和 `(owner authorization Hash, Adapter Profile ID)` 建立 write-once 绑定；读取时
+重算内容 Hash 并交叉校验两个绑定。仓库不附带实际窗口 Registration、Authorization 或生产密钥。
 
 D 通过进程内 `M2FormalEvaluationStartAuthorityIssuer.issue(preview_id, idempotency_key)` 形成
 `m2a-formal-evaluation-start-authority-v1`。issuer 从部署 Store/Registry 重读 Search Plan Hash、
