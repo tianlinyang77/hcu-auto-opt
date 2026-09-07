@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from hcuopt.contracts.formal_evidence_acceptance_v1 import (
     FormalEvidenceAcceptanceReviewContent,
+    FormalEvidenceAcceptanceReviewSignature,
     FormalEvidenceAuthoritySet,
     FormalEvidenceVerifierIdentityContent,
     FormalProducerIdentity,
@@ -138,6 +139,7 @@ def _fixture(root: Path):
     refs = []
     specs = (
         ("search_plan", "control_plane", authorities.control_plane),
+        ("round_authority", "control_plane", authorities.control_plane),
         ("search_measurement", "measurement_producer", authorities.measurement_producer),
         ("source_family", "source_artifact_producer", authorities.source_artifact_producer),
         ("barrier", "independent_verifier", verifier),
@@ -342,7 +344,7 @@ def test_context_and_verifier_identity_drift_fail_closed(tmp_path: Path) -> None
 
 
 def test_d_review_record_requires_verified_evidence_or_explicit_blockers(tmp_path: Path) -> None:
-    root, verifier_identity, _authorities, context, refs = _fixture(tmp_path / "evidence")
+    root, verifier_identity, authorities, context, refs = _fixture(tmp_path / "evidence")
     summary = refs[0]
     base = {
         "review_id": "m2a-d-review-0001",
@@ -356,24 +358,49 @@ def test_d_review_record_requires_verified_evidence_or_explicit_blockers(tmp_pat
         "readiness_audit_base_commit": "2" * 40,
         "readiness_manifest_hash": _fixed("3"),
         "readiness_report_hash": _fixed("4"),
+        "round_id": context.round_id,
         "authority_context_id": context.authority_context_id,
         "authority_context_hash": context.context_hash,
         "target_lock_hash": _fixed("5"),
         "terminal_path": "zero_promotion",
+        "round_evidence_bundle_id": UUID(int=8),
+        "round_evidence_bundle_hash": _fixed("6"),
+        "signoff_artifact_hash": _fixed("7"),
+        "signoff_signer_identity_hash": authorities.project_owner.producer_hash,
         "evidence_root": root,
         "verifier": verifier_identity,
-        "verification_input_digest": _fixed("6"),
+        "verification_input_digest": _fixed("8"),
         "verified_evidence_count": len(refs),
+        "recursive_semantic_verification": "blocked",
+        "allowlisted_signature_verification": "blocked",
         "verification_summary_uri": summary.uri,
         "verification_summary_hash": summary.sha256,
         "reviewed_at": NOW,
     }
     content = FormalEvidenceAcceptanceReviewContent(**base)
-    review = publish_formal_evidence_acceptance_review(content, signature="test-signature")
+    signature = FormalEvidenceAcceptanceReviewSignature(
+        verifier_id=verifier_identity.verifier_id,
+        verifier_key_id=verifier_identity.attestation_key_id,
+        verifier_identity_hash=verifier_identity.identity_hash,
+        algorithm=verifier_identity.attestation_scheme,
+        value="a" * 64,
+    )
+    review = publish_formal_evidence_acceptance_review(content, signature=signature)
     assert review.decision == "blocked"
     assert review.owner_window_authorization == "not_granted"
 
-    with pytest.raises(ValidationError, match="accepted_for_formal_window is unavailable"):
+    accepted = FormalEvidenceAcceptanceReviewContent.model_validate(
+        {
+            **base,
+            "decision": "accepted_for_formal_window",
+            "blocker_codes": (),
+            "recursive_semantic_verification": "verified",
+            "allowlisted_signature_verification": "verified",
+        }
+    )
+    assert accepted.decision == "accepted_for_formal_window"
+
+    with pytest.raises(ValidationError, match="requires recursive semantics"):
         FormalEvidenceAcceptanceReviewContent.model_validate(
             {
                 **base,

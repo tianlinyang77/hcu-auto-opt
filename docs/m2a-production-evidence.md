@@ -1,8 +1,9 @@
 # M2a production Evidence Root and D Verifier
 
-Issue: #127. This first no-HCU slice freezes the production read boundary used by
-the independent D verifier. It does not register a Real Profile, create a Round,
-authorize a window, sign off a result, or enable release.
+Issue: #127. The first no-HCU slice froze the production read boundary used by
+the independent D verifier. The recursive slice now connects that boundary to
+the existing Formal Round and Signoff finalizers. It does not register a Real
+Profile, create a Round, authorize a window, execute HCU work, or enable release.
 
 ## Protected root
 
@@ -39,19 +40,45 @@ IDs and identity Hashes must be unique across roles. Evidence with a substituted
 role or identity fails closed. One content Hash cannot be reused as evidence for
 different Formal stages.
 
-## D acceptance record
+## Recursive D acceptance service
 
-The versioned D review record reserves `accepted_for_formal_window` for the later
-recursive verifier, but this first slice can publish only `blocked` with explicit,
-stable blocker codes. Re-reading content-addressed objects and checking their
-declared producer roles does not prove that their embedded Round, Context, Family,
-Plan, Barrier, FWER and EvidenceBundle bindings agree. Acceptance remains disabled
-until those semantic checks and an allowlisted signature verifier are connected.
+The caller supplies only a Round ID and readiness audit ID. A deployment-owned
+Snapshot Reader resolves the frozen Evidence Root, Verifier, authorities and
+content-addressed references. It does not accept caller-provided terminal models,
+verification booleans or decisions.
 
-The blocked record still binds readiness, Target Lock, Formal Authority Context,
-terminal path, Evidence Root, D Verifier, verification input digest and summary
-object. Its signed Hash is evidence for the later readiness audit, not project-owner
-window authorization.
+The service performs these checks in order:
 
-`automatic_release_allowed=false` and `hcu_accessed=false` are permanent in this
-slice.
+1. reread the Authority Context and verify every top-level object's content,
+   size and Producer role;
+2. parse the protected Round authority, Barrier, optional Reveal/FWER and final
+   EvidenceBundle as canonical JSON;
+3. reuse `M2FormalRoundFinalizer` to rebuild the complete Evidence Index and
+   zero-promotion or Holdout/FWER terminal path;
+4. reconstruct the immutable project-owner Signoff Intent from its protected
+   Artifact, then reuse `M2FormalRoundSignoffFinalizer` for allowlisted signature
+   verification;
+5. bind Signoff back to the exact Round, Context, Bundle and Candidate/Artifact/
+   Holdout Families;
+6. publish and reread a verification summary before signing the D Review.
+
+Only a complete chain can produce `accepted_for_formal_window` with no blockers.
+Missing objects, non-canonical bytes, tampering, embedded cross-Round reuse,
+wrong signers and rejected Signoff produce a signed `blocked` Review. A missing
+or wrong-identity Snapshot, an unpublished summary or an invalid D signature
+produces no Review.
+
+Both accepted and blocked records bind readiness, Target Lock, Formal Authority
+Context, Round, EvidenceBundle, Signoff, terminal path, Evidence Root, D Verifier,
+verification input digest and summary object. The D signature is structured as
+Verifier ID, key ID, identity Hash, algorithm and value; consumers must recompute
+the Review Hash and use the deployment allowlist. The signed Review is evidence
+for the later readiness audit, not project-owner window authorization.
+
+These bindings and the structured signature are published as Review Schema v2.
+The reserved v1 Contract never emitted a production acceptance record, so there
+is no production v1 migration; readers must not reinterpret v1 bytes as v2.
+
+Repository tests use deterministic injected keys. Production registrations and
+keys remain deployment-owned and are never committed. `automatic_release_allowed=false`,
+`hcu_accessed=false` and `owner_window_authorization=not_granted` remain permanent.

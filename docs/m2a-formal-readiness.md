@@ -96,7 +96,7 @@ PYTHONPATH=src python -m hcuopt.cli formal-readiness \
 | A | Formal Authority、Finalizer 和 Signoff/Outbox 地基已实现；Real Profile、Formal Plan、StartIntent、生产身份认证与 Signer 尚不存在 | 先由 PostgreSQL 17 验证签核恢复链，再单独建设受保护的 Formal 启动和生产签核入口 |
 | B | Formal phase-aware Adapter、预算确认和当期 Target Lock 尚未完成 | 不访问 HCU 的 Adapter/计划验证；窗口批准后才刷新 HCU 现场 |
 | C | 业务 Family 合同、source family Hash 和 fail-closed Verifier 已实现；仍只有一个历史业务 Candidate | 同一 Baseline/Hotspot/replacement point 的第二个真实业务 Overlay 包、双成员 Manifest 和独立复核证据 |
-| D | Formal Barrier/Reveal/FWER/Evidence 表和 Finalizer 已实现；生产受保护 Evidence Root 与 D 的正式接受尚未完成 | 验证 PostgreSQL 17 结果，并对生产 Store、Verifier 身份和递归 Evidence 规则签署接受证据 |
+| D | production Root、递归 Finalizer、allowlisted Signoff 和结构化 D Review 实现已接通；尚无部署 Registration、生产 key 或真实 Review | 由部署侧注册 Store/Verifier/Snapshot，重放真实终态并签署 D 接受证据 |
 | 项目所有者 | 尚未授权精确资源窗口 | 前四方接受后，另行批准主机、HCU、时间、Family Hash 和预算 |
 
 因此当前不得注册 `nmz36-m2a-formal-v1`，不得把 Scripted 表的 `synthetic=true` 约束改成兼容
