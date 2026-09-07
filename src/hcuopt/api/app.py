@@ -99,6 +99,10 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.agent_generation_inspection import (
+    AgentGenerationInspection,
+    AgentGenerationInspectionService,
+)
 from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationEvidenceReadService,
     AgentGenerationReadModelError,
@@ -356,7 +360,9 @@ def create_app(
     async def agent_evidence_handler(
         _request: Request, exc: AgentGenerationReadModelError
     ) -> JSONResponse:
-        unavailable = exc.code == "agent_evidence_root_unavailable"
+        unavailable = exc.code in {
+            "agent_evidence_root_unavailable", "agent_inspection_unconfigured"
+        }
         return JSONResponse(
             status_code=503 if unavailable else 422,
             content={
@@ -661,6 +667,27 @@ def create_app(
         request: Request,
     ) -> AgentGenerationReadModel:
         return agent_evidence_service(request).get(generation_run_id)
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/inspection",
+        response_model=AgentGenerationInspection,
+    )
+    def get_operator_agent_generation_inspection(
+        generation_run_id: UUID, request: Request
+    ) -> AgentGenerationInspection:
+        root = os.getenv("HCUOPT_AGENT_INSPECTION_ROOT")
+        if not root:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unconfigured", "Agent inspection is not configured"
+            )
+        try:
+            service = AgentGenerationInspectionService(repo(request), Path(root))
+            return service.get(generation_run_id)
+        except (OSError, ValueError) as exc:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unavailable",
+                "Agent inspection could not be independently verified",
+            ) from exc
 
     @application.get(
         "/v1/operator/formal-rounds/{round_id}/evidence-acceptance",

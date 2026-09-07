@@ -553,6 +553,50 @@ def _build(
     return context, AgentProposalVerifier(PortableReader(root))
 
 
+def test_successful_runner_with_rejected_batch_is_failed_generation(tmp_path):
+    context, verifier = _build(tmp_path)
+    status = GenerationRunStatusView.model_validate_json((tmp_path / "status.json").read_bytes())
+    batch = CandidateProposalBatch.model_validate_json((tmp_path / "batch.json").read_bytes())
+    batch = batch.model_copy(update={"status": "failed", "proposals": (),
+                                     "error_code": "invalid_model_proposal",
+                                     "error_message": "patch context mismatch"})
+    batch_ref = _write(tmp_path / "batch.json", batch)
+    attempt = status.attempts[0].model_copy(update={
+        "state": "failed", "batch_status": "failed", "batch_hash": batch_ref["content_hash"],
+        "error_code": "invalid_model_proposal", "error_message": "patch context mismatch"})
+    actual = attempt.actual.model_copy(update={"proposals": 0})
+    attempt = attempt.model_copy(update={"actual": actual})
+    status = status.model_copy(update={
+        "attempts": (attempt,), "proposals": (),
+        "run": status.run.model_copy(update={
+            "state": "failed", "proposal_count": 0, "retained_proposal_count": 0,
+            "budget_consumed": actual, "finished_at": NOW,
+            "error_code": "no_retained_proposals", "error_message": "invalid patch"}),
+        "budget_ledger": tuple(item.model_copy(update={"actual": actual})
+                               if item.entry_type == "settle" else item
+                               for item in status.budget_ledger),
+    })
+    context = context.model_copy(update={
+        "generation_status": AgentEvidenceRef(**_write(tmp_path / "status.json", status))})
+    # One rejected Batch cannot satisfy a two-attempt generator barrier merely
+    # because its underlying process succeeded.
+    with pytest.raises(AgentProposalEvidenceError, match="terminal outcome"):
+        verifier.verify(context)
+    plan = status.run.plan.model_copy(update={
+        "generators": (status.run.plan.generators[0].model_copy(update={"max_attempts": 1}),)})
+    plan_ref = _write(tmp_path / "plan.json", plan)
+    status = status.model_copy(update={"run": status.run.model_copy(update={
+        "plan": plan, "plan_hash": apex_generation_plan_hash(plan)})})
+    context = AgentProposalVerificationContext.model_validate({
+        **context.model_dump(),
+        "plan": {**plan_ref, "identity_hash": apex_generation_plan_hash(plan)},
+        "generation_status": _write(tmp_path / "status.json", status)})
+    result = verifier.verify(context)
+    assert result.attempts[0].status == "failed"
+    assert result.attempts[0].output_tokens == 10
+    assert result.proposals == ()
+
+
 def _add_second_successful_generator(
     root: Path, context: AgentProposalVerificationContext
 ) -> AgentProposalVerificationContext:

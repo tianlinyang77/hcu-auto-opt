@@ -34,20 +34,29 @@ def test_agent_generation_cli_exposes_start_status_and_reconcile() -> None:
     assert parser.parse_args(["agent-generation-start", "request.json"]).command == (
         "agent-generation-start"
     )
-    assert parser.parse_args(
-        ["agent-generation-status", "61000000-0000-0000-0000-000000000001"]
-    ).command == "agent-generation-status"
-    assert parser.parse_args(
-        ["agent-generation-reconcile", "61000000-0000-0000-0000-000000000001"]
-    ).command == "agent-generation-reconcile"
-    assert parser.parse_args(
-        [
-            "agent-generation-evidence",
-            "61000000-0000-0000-0000-000000000001",
-            "--evidence-root",
-            ".",
-        ]
-    ).command == "agent-generation-evidence"
+    assert (
+        parser.parse_args(
+            ["agent-generation-status", "61000000-0000-0000-0000-000000000001"]
+        ).command
+        == "agent-generation-status"
+    )
+    assert (
+        parser.parse_args(
+            ["agent-generation-reconcile", "61000000-0000-0000-0000-000000000001"]
+        ).command
+        == "agent-generation-reconcile"
+    )
+    assert (
+        parser.parse_args(
+            [
+                "agent-generation-evidence",
+                "61000000-0000-0000-0000-000000000001",
+                "--evidence-root",
+                ".",
+            ]
+        ).command
+        == "agent-generation-evidence"
+    )
 
 
 def test_agent_generation_status_cli_is_read_only_and_reports_safety(
@@ -116,3 +125,57 @@ def test_agent_generation_evidence_cli_uses_the_shared_read_model_service(
         )
     ]
     assert capsys.readouterr().out.strip() == '{"automatic_release_allowed":false}'
+
+
+def test_messages_cli_recovery_needs_no_credential(tmp_path, monkeypatch, capsys):
+    from hcuopt.agent.messages_dispatch import MessagesDispatchService
+
+    run_id = UUID(int=300)
+    attempt_id = UUID(int=301)
+    args = build_parser().parse_args(
+        [
+            "agent-messages-recover",
+            str(run_id),
+            "--attempt-id",
+            str(attempt_id),
+            "--store-root",
+            str(tmp_path),
+        ]
+    )
+    monkeypatch.delenv("HCUOPT_MODEL_API_KEY", raising=False)
+    calls = []
+
+    def recover(self, actual_run, actual_attempt):
+        calls.append((actual_run, actual_attempt))
+        return _JsonResult()
+
+    monkeypatch.setattr(MessagesDispatchService, "recover", recover)
+    assert run_agent_generation_command(args, repository_factory=_StatusRepository) == 0
+    assert calls == [(run_id, attempt_id)]
+    assert "false" in capsys.readouterr().out
+
+
+def test_messages_cli_redacts_database_errors(tmp_path, capsys):
+    from psycopg import OperationalError
+
+    args = build_parser().parse_args(
+        [
+            "agent-messages-run-once",
+            str(UUID(int=300)),
+            "--input",
+            "missing.json",
+            "--worker-id",
+            "test",
+            "--store-root",
+            str(tmp_path),
+        ]
+    )
+    assert args.lease_seconds is None
+
+    def factory(_url):
+        raise OperationalError("credential-and-internal-address-must-not-appear")
+
+    assert run_agent_generation_command(args, repository_factory=factory) == 2
+    error = capsys.readouterr().err
+    assert "OperationalError" in error
+    assert "credential-and-internal" not in error

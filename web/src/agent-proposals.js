@@ -41,3 +41,20 @@ function ratio(value, limit) {
   if (!Number.isFinite(value) || !Number.isFinite(limit) || limit <= 0) return 0
   return Math.min(1, Math.max(0, value / limit))
 }
+
+export function inspectionReadModel(inspection, expectedRunId) {
+  const model = inspection?.read_model
+  if (inspection?.schema_version !== 'm2b-agent-inspection-v1'
+    || inspection.generation_run_id !== expectedRunId
+    || model?.generation_run_id !== expectedRunId
+    || inspection.inspection_kind !== 'pre_signoff_read_only'
+    || inspection.evidence_scope !== 'development_only_not_performance'
+    || inspection.formal_intake_allowed !== false
+    || inspection.automatic_release_allowed !== false
+    || model.formal_intake_allowed !== false
+    || model.automatic_release_allowed !== false
+    || model.performance_conclusion !== 'not_measured') {
+    throw new Error('invalid_agent_inspection: 检查快照的身份或权限边界不匹配')
+  }
+  return model
+}

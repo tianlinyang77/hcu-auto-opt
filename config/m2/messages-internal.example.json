@@ -1,0 +1,7 @@
+{
+  "base_url": "http://itokens.sourcefind.cn:10087",
+  "model": "mmm1-yx-claude-opus-4-7",
+  "max_output_tokens": 4096,
+  "timeout_seconds": 120,
+  "allow_http": true
+}

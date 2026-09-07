@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentProposalSummary } from '../src/agent-proposals.js'
+import { agentProposalSummary, inspectionReadModel } from '../src/agent-proposals.js'
 
 test('proposal read model copies D verdicts and never upgrades authority', () => {
   const summary = agentProposalSummary({
@@ -34,4 +34,26 @@ test('proposal read model copies D verdicts and never upgrades authority', () =>
   assert.equal(summary.budget.proposalsRatio, 0.5)
   assert.equal(summary.authority.formalIntakeAllowed, false)
   assert.equal(summary.authority.automaticReleaseAllowed, false)
+})
+
+test('zero proposals preserves failed attempts and consumed tokens', () => {
+  const summary = agentProposalSummary({proposals: [],
+    attempts: [{status: 'failed', reason_code: 'invalid_model_proposal'}],
+    failure_codes: ['invalid_model_proposal'], budget: {output_tokens: 100}})
+  assert.equal(summary.keptCount, 0)
+  assert.equal(summary.failedAttempts.length, 1)
+  assert.equal(summary.budget.usage.output_tokens, 100)
+  assert.deepEqual(summary.failureCodes, ['invalid_model_proposal'])
+})
+
+test('inspection rejects cross-run and upgraded authority without a demo fallback', () => {
+  const fixture = {schema_version: 'm2b-agent-inspection-v1', generation_run_id: 'run',
+    inspection_kind: 'pre_signoff_read_only', evidence_scope: 'development_only_not_performance',
+    formal_intake_allowed: false, automatic_release_allowed: false,
+    read_model: {generation_run_id: 'run', formal_intake_allowed: false,
+      automatic_release_allowed: false, performance_conclusion: 'not_measured'}}
+  assert.equal(inspectionReadModel(fixture, 'run'), fixture.read_model)
+  assert.throws(() => inspectionReadModel(fixture, 'other'))
+  assert.throws(() => inspectionReadModel({...fixture, automatic_release_allowed: true}, 'run'))
+  assert.throws(() => inspectionReadModel({...fixture, read_model: null}, 'run'))
 })

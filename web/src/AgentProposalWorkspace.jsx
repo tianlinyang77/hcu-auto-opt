@@ -23,8 +23,8 @@ import {
   X,
 } from "@phosphor-icons/react";
 
-import { loadOperatorAgentProposals } from "./api.js";
-import { agentProposalSummary } from "./agent-proposals.js";
+import { loadOperatorAgentInspection, loadOperatorAgentProposals } from "./api.js";
+import { agentProposalSummary, inspectionReadModel } from "./agent-proposals.js";
 import { loadDemoAgentProposals } from "./demo-data.js";
 
 function shortValue(value, length = 12) {
@@ -164,6 +164,8 @@ function AttemptsCard({ attempts }) {
                   <Fact label="Runner" value={attempt.runner_provenance?.adapter_name} />
                   <Fact label="Profile" value={attempt.runner_provenance?.profile} />
                   <Fact label="耗时" value={formatDuration(attempt.wall_seconds)} />
+                  <Fact label="Token 用量" value={attempt.output_tokens} />
+                  <Fact label="生成器" value={attempt.generator_adapter_profile} />
                   <Fact label="清理" value={attempt.cleanup_status} title={attempt.cleanup_summary} />
                 </dl>
                 <p className="agent-attempt-cleanup">
@@ -312,7 +314,7 @@ function ErrorState({ error, onRetry }) {
   return <section className="agent-workspace-empty danger"><WarningCircle size={42} /><span>Operator API error</span><h2>Agent/Apex 证据暂不可用</h2><p>{error}</p><button className="primary-button" type="button" onClick={onRetry}><ArrowClockwise size={18} />重新读取</button></section>;
 }
 
-export function AgentProposalWorkspace({ demoMode, generationRunId, onClose }) {
+export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false }) {
   const [workspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -329,7 +331,9 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose }) {
 
     async function readWorkspace() {
       try {
-        const value = demoMode
+        const value = inspectionMode
+          ? inspectionReadModel(await loadOperatorAgentInspection(generationRunId), generationRunId)
+          : demoMode
           ? await loadDemoAgentProposals()
           : await loadOperatorAgentProposals(generationRunId);
         if (cancelled) return;
@@ -351,7 +355,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose }) {
 
     void readWorkspace();
     return () => { cancelled = true; };
-  }, [demoMode, generationRunId, reloadNonce]);
+  }, [demoMode, generationRunId, reloadNonce, inspectionMode]);
 
   const retry = () => {
     setLoading(true);
@@ -386,19 +390,21 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose }) {
         </div>
 
         <div className="plan-workspace-body agent-workspace-body">
-          {loading ? <LoadingState /> : error ? <ErrorState error={error} onRetry={retry} /> : !workspace?.proposals?.length ? (
-            <section className="agent-workspace-empty"><Robot size={42} /><h2>当前 Generation Run 没有提案</h2><p>页面不会从 Round 或其他批次拼接一个不存在的 Agent 提案。</p></section>
-          ) : (
+          {loading ? <LoadingState /> : error ? <ErrorState error={error} onRetry={retry} /> : workspace && (
             <div className="agent-workspace-content">
+              {inspectionMode && <section className="agent-locked-note"><LockKey size={18} />审核前只读检查，不是人工签核或终态发布。沿用 D v1 开发证据分类；真实 Runner 不等于真实模型质量或性能已验证。</section>}
               <PlanCard workspace={workspace} summary={summary} />
               <AttemptsCard attempts={workspace.attempts || []} />
-              <div className="agent-proposal-grid">
+              {!!summary.failureCodes.length && <section className="agent-locked-note" role="status">未通过项：{summary.failureCodes.join("、")}</section>}
+              {!workspace.proposals?.length ? (
+                <section className="agent-workspace-empty"><Robot size={42} /><h2>当前 Generation Run 没有有效提案</h2><p>执行记录与用量仍保留在上方；不会自动补造候选或重新调用模型。</p></section>
+              ) : <div className="agent-proposal-grid">
                 <ProposalList proposals={workspace.proposals} selectedId={selectedProposal?.proposal_id} onSelect={setSelectedId} />
                 <div className="agent-proposal-detail">
                   <ProposalDetail proposal={selectedProposal} />
                   <LifecycleCard proposal={selectedProposal} summary={summary} />
                 </div>
-              </div>
+              </div>}
               <AuthorityBoundary workspace={workspace} />
             </div>
           )}

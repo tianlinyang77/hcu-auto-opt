@@ -67,6 +67,13 @@ export async function loadOperatorAgentProposals(generationRunId) {
   );
 }
 
+export async function loadOperatorAgentInspection(generationRunId) {
+  if (!generationRunId) throw new Error("missing_generation_run_id");
+  return request(
+    `/v1/operator/agent-generations/${encodeURIComponent(generationRunId)}/inspection`,
+  );
+}
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),
