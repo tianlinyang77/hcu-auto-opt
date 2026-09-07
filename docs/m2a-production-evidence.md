@@ -82,3 +82,31 @@ is no production v1 migration; readers must not reinterpret v1 bytes as v2.
 Repository tests use deterministic injected keys. Production registrations and
 keys remain deployment-owned and are never committed. `automatic_release_allowed=false`,
 `hcu_accessed=false` and `owner_window_authorization=not_granted` remain permanent.
+
+## Durable deployment registry and authenticated report
+
+Migration 20 adds a PostgreSQL deployment registry for the frozen acceptance
+Snapshot and the signed D Review. Each record stores canonical content plus its
+SHA-256 identity. The `(round_id, readiness_audit_id)` binding and content Hash
+are unique, identical retries are idempotent, conflicting bytes are rejected,
+and database triggers prohibit updates and deletes. Reads rebuild the Pydantic
+Contract and recompute the Snapshot Hash; Review reads also bind every readiness,
+Context, Bundle, Signoff, Root and Verifier field back to that Snapshot.
+
+`DeploymentFormalEvidenceAcceptanceRegistry.read()` is the concrete Snapshot
+Reader consumed by the recursive acceptance service. Its Review publication and
+read methods both execute the deployment allowlist signature verifier, so a
+database row cannot become trusted merely because it has the right shape.
+
+The API exposes only:
+
+```text
+GET /v1/operator/formal-rounds/{round_id}/evidence-acceptance
+    ?readiness_audit_id=<deployment audit id>
+```
+
+The application must inject both a report service and an authentication callback.
+Missing configuration fails with 503, denied access with 403, and changed stored
+evidence with 422. No public registration, signing, acceptance, HCU execution or
+release endpoint is added. The repository contains the migration and adapters,
+but no production Snapshot, Review, secret or key.

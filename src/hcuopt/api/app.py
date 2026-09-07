@@ -18,6 +18,7 @@ from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
+from hcuopt.contracts.formal_evidence_acceptance_v1 import FormalEvidenceAcceptanceReport
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
     RoundBudgetFinalizeRequest,
@@ -103,6 +104,10 @@ from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationReadModelError,
 )
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
+from hcuopt.evaluation.formal_evidence_reporting import (
+    FormalEvidenceAcceptanceReportError,
+    FormalEvidenceAcceptanceReportService,
+)
 from hcuopt.evaluation.m2_authority import HoldoutRevealResult
 from hcuopt.evaluation.m2_models import (
     MultipleComparisonResult,
@@ -221,6 +226,8 @@ def create_app(
     operator_discovery: OperatorDiscoveryService | None = None,
     agent_evidence_read_models: AgentGenerationEvidenceReadService | None = None,
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
+    formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
+    formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -359,6 +366,19 @@ def create_app(
             },
         )
 
+    @application.exception_handler(FormalEvidenceAcceptanceReportError)
+    async def formal_evidence_report_handler(
+        _request: Request, exc: FormalEvidenceAcceptanceReportError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": exc.code,
+                "message": str(exc),
+                "retryable": False,
+            },
+        )
+
     def repo(request: Request) -> PostgresRepository:
         return request.app.state.repository
 
@@ -382,6 +402,14 @@ def create_app(
                 "configured Agent evidence root is unavailable",
             ) from exc
         return AgentGenerationEvidenceReadService(repo(request), reader)
+
+    def formal_evidence_report_service() -> FormalEvidenceAcceptanceReportService:
+        if formal_evidence_reports is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Formal Evidence Acceptance Report service is not configured",
+            )
+        return formal_evidence_reports
 
     def framework_workflow(request: Request) -> FrameworkSmokeCoordinator:
         selected = workflow(request)
@@ -633,6 +661,43 @@ def create_app(
         request: Request,
     ) -> AgentGenerationReadModel:
         return agent_evidence_service(request).get(generation_run_id)
+
+    @application.get(
+        "/v1/operator/formal-rounds/{round_id}/evidence-acceptance",
+        response_model=FormalEvidenceAcceptanceReport,
+    )
+    def get_formal_evidence_acceptance_report(
+        round_id: UUID,
+        request: Request,
+        readiness_audit_id: str = Query(
+            min_length=3,
+            max_length=200,
+            pattern=r"^[a-z0-9][a-z0-9._-]{2,199}$",
+        ),
+    ) -> FormalEvidenceAcceptanceReport:
+        if formal_evidence_read_authorizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Formal Evidence Acceptance read authentication is not configured",
+            )
+        try:
+            authorized = formal_evidence_read_authorizer(
+                request, round_id, readiness_audit_id
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Formal Evidence Acceptance read authentication failed closed",
+            ) from error
+        if authorized is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Formal Evidence Acceptance read access was rejected",
+            )
+        return formal_evidence_report_service().get(
+            round_id=round_id,
+            readiness_audit_id=readiness_audit_id,
+        )
 
     @application.get("/v1/targets", response_model=list[TargetSpec])
     def list_targets() -> list[TargetSpec]:

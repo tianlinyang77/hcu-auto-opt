@@ -151,11 +151,15 @@ from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.operator.start import FrozenScriptedPlans
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.agent_generation import AgentGenerationRepositoryMixin
+from hcuopt.storage.formal_evidence_acceptance import FormalEvidenceAcceptanceRepositoryMixin
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
 
 
-class PostgresRepository(AgentGenerationRepositoryMixin):
+class PostgresRepository(
+    FormalEvidenceAcceptanceRepositoryMixin,
+    AgentGenerationRepositoryMixin,
+):
     """Synchronous PostgreSQL boundary shared by API and maintenance commands.
 
     Each public method owns one short transaction. Long-running work happens in
