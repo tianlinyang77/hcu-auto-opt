@@ -110,3 +110,22 @@ Missing configuration fails with 503, denied access with 403, and changed stored
 evidence with 422. No public registration, signing, acceptance, HCU execution or
 release endpoint is added. The repository contains the migration and adapters,
 but no production Snapshot, Review, secret or key.
+
+## D pre-start registration
+
+Migration 21 adds `formal_evaluation_start_registrations` for the pre-start issuer.
+This is separate from the post-terminal acceptance Snapshot Registry above.
+`DeploymentFormalEvaluationStartRegistry(repository.connection)` implements the
+issuer's existing `load_registration(preview_id, formal_authorization_hash,
+resolved_plan_hash)` interface. Deployment services publish a frozen
+`M2FormalEvaluationStartRegistration`; each Preview and registration ID can be
+bound only once. Identical retries are idempotent; conflicting content is rejected.
+Every read reconstructs the Contract and checks its canonical Hash and indexes.
+
+The table stores the Holdout commitment and authority identity, never the nonce
+or secret Holdout plan. SQL triggers reject UPDATE/DELETE. Deployment must give
+write access only to the D registration service and read access to its issuer;
+general Operator and Agent identities must not have table write permission.
+The issuer still validates the owner authorization, current window, Preview,
+Family and role separation before signing. A persisted row alone cannot grant
+window authorization. No public registration endpoint or production row is added.

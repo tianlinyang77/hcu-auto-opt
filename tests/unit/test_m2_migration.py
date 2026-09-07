@@ -17,7 +17,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[18] == "0018_m2a_formal_start_intent.sql"
     assert MIGRATIONS[19] == "0019_m2b_terminal_runner_receipt_binding.sql"
     assert MIGRATIONS[20] == "0020_m2a_formal_evidence_acceptance.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 21))
+    assert MIGRATIONS[21] == "0021_m2a_formal_evaluation_registration.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 22))
 
 
 def test_terminal_runner_receipt_binding_migration_freezes_settlement_evidence() -> None:
