@@ -37,14 +37,21 @@
    Runner 或模型是真实还是模拟；真实执行来源单独由 provenance 描述。外壳明确标注
    `development_only_not_performance`，Formal Intake 和自动发布始终为 false。
 9. UI 新增 inspection 直达入口，无 demo 回退；零提案仍展示 Attempt、用量和失败原因。
-   此入口不是公开部署的鉴权方案，只限受控本地/内部开发环境。生产访问鉴权和持久密钥
-   配置是后续部署条件，不能把设置证据根目录视为开放服务的许可。
+   `create_app` 必须注入部署所有的 `agent_inspection_read_authorizer(Request, RunID)`，
+   每次读取都先验证当前身份对确切 Run 的权限；仅显式 `True` 放行。缺失/异常返回 503，
+   拒绝或其他 truthy 值返回 403，均在读 Store/A 状态之前退出。鉴权错误不回显异常细节，
+   成功与拒绝响应均设 `Cache-Control: no-store`，不让共享 HTTP 缓存跳过下一次授权。
+   该注入点不是现成 SSO，身份校验/授权策略由部署侧已有服务提供；禁止恒真回调、相信
+   未验签的用户请求头或用模型 Key 充当浏览器凭据。只限受控本地/内部开发环境，不能把
+   配置证据根目录视为开放全站的许可。
 
 ## 兼容与失败语义
 
 - 原数据库 Schema、A/B/C 核心 Contract 和终态 `/evidence` 行为不变，无迁移。
 - 未配置 inspection root 返回 503；不可信引用/状态漂移返回 422；原生安全读取要求
   POSIX openat/O_NOFOLLOW，Windows 不降级为不安全读取。
+- 开发版升级后仅配置 root 不再可读；须显式接线部署鉴权。只保护新增 inspection 入口，
+  不宣称旧 API 已完成全站权限改造；反向代理应仅开放获准的只读路径。
 - CLI 返回状态且退出 0 不代表 Proposal 获准；人工 Review 后使用原终态证据链，不能覆盖
   原审核前快照冒充新状态。
 - Store 含源码、原始模型回复和 Claim token，必须部署独占，不进入公开站点或 Git。

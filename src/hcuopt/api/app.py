@@ -232,6 +232,7 @@ def create_app(
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
+    agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -365,6 +366,7 @@ def create_app(
         }
         return JSONResponse(
             status_code=503 if unavailable else 422,
+            headers={"Cache-Control": "no-store"},
             content={
                 "code": exc.code,
                 "message": str(exc),
@@ -673,8 +675,30 @@ def create_app(
         response_model=AgentGenerationInspection,
     )
     def get_operator_agent_generation_inspection(
-        generation_run_id: UUID, request: Request
+        generation_run_id: UUID, request: Request, response: Response
     ) -> AgentGenerationInspection:
+        # Authenticate each exact Run before looking at its Store or A state.
+        # The model credential is never a browser/read credential.
+        if agent_inspection_read_authorizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication is not configured",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            authorized = agent_inspection_read_authorizer(request, generation_run_id)
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication failed closed",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        if authorized is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Agent inspection read access was rejected",
+                headers={"Cache-Control": "no-store"},
+            )
         root = os.getenv("HCUOPT_AGENT_INSPECTION_ROOT")
         if not root:
             raise AgentGenerationReadModelError(
@@ -682,6 +706,7 @@ def create_app(
             )
         try:
             service = AgentGenerationInspectionService(repo(request), Path(root))
+            response.headers["Cache-Control"] = "no-store"
             return service.get(generation_run_id)
         except (OSError, ValueError) as exc:
             raise AgentGenerationReadModelError(

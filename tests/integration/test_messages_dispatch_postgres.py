@@ -180,7 +180,12 @@ def test_postgres_to_native_d_inspection(dispatch_case, mode):
 
     with patch.dict(os.environ, HCUOPT_AGENT_INSPECTION_ROOT=str(case["root"]),
                     HCUOPT_AUTO_MIGRATE="false"), TestClient(
-                        create_app(repository=case["repository"])) as client:
+                        create_app(
+                            repository=case["repository"],
+                            agent_inspection_read_authorizer=(
+                                lambda _request, run_id: run_id == status.run.generation_run_id
+                            ),
+                        )) as client:
         response = client.get(
             f"/v1/operator/agent-generations/{status.run.generation_run_id}/inspection"
         )

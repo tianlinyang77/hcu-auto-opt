@@ -130,8 +130,27 @@ Windows 不做兼容性降级。API 部署设置 `HCUOPT_AGENT_INSPECTION_ROOT=<
 接口为 `GET /v1/operator/agent-generations/<run-id>/inspection`。调用者只提供 Run ID，
 不接收任意文件路径、知识上下文或模型配置；根目录只由服务端指定。
 
-本接口尚未提供生产访问鉴权，只限受控本地/内部开发环境。不要将 API、源码 Store 或
-原始回复直接暴露到公网；配置 root 不等于获得公开部署许可。
+部署创建 API 时还须注入 `agent_inspection_read_authorizer(Request, generation_run_id)`，
+从既有、经过验证的会话身份检查对这个 Run 的读取权限。只有返回 Python `True` 才放行；
+未注入或鉴权器异常为 503，拒绝/非布尔真值为 403。认证发生在读取 Store/A 状态之前，
+每次 GET 重新调用，不因先前读成功而缓存权限。响应设 `Cache-Control: no-store`。
+
+这不是现成 SSO：仍需部署侧提供真正的身份校验与 Run ACL。不要使用恒真回调、直接信任
+客户端身份请求头，或把模型 API Key 放到页面/URL/localStorage 充当登录凭据。普通
+`hcuopt api` 没有注入器，配置 root 后仍会拒绝 inspection；需用部署 app factory 接线。
+此变更只保护 inspection，旧 API 不自动获得同样的权限保证。内部反向代理只应开放明确
+获准的只读路径，不能把整个开发 API 暴露公网。不要公开源码 Store 或原始回复。
+
+### 接线前检查顺序
+
+1. 确认 PR/ADR 跨模块审核、固定代码 Commit 和独立 Worker Store；不改动原基线和账本。
+2. 部署方提供已验身份 + Run ACL 的回调；关闭自动迁移，不向 API 进程注入模型 Key。
+3. 先验证无鉴权 503、无权限/跨 Run 403、鉴权异常 503，且没有 A 状态/文件读取。
+4. 用已授权测试身份读取审核前快照，再验证撤权后立即 403、证据漂移 422；不创建审核记录。
+5. 浏览器通过同源受控入口显示结果，密钥仍只归 Worker；模型调用和 HCU 验收独立授权。
+
+单元测试覆盖上述拒绝与 Run 绑定；真实 PostgreSQL + D/API 集成继续使用测试专用回调，
+不将它冒充真实身份服务接入验收。原 `c2ec651` CI 六项通过，后续鉴权补丁结果独立记录。
 
 每次 GET 均重读快照、Runner Receipt、Batch 和补丁，并重新运行 D Verifier；读取前后
 两次比较 A 的当前状态。身份、Hash、用量、去重或状态漂移即拒绝返回，不读取陈旧缓存。
