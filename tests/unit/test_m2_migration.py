@@ -16,7 +16,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[17] == "0017_m2b_agent_evidence_read_model.sql"
     assert MIGRATIONS[18] == "0018_m2a_formal_start_intent.sql"
     assert MIGRATIONS[19] == "0019_m2b_terminal_runner_receipt_binding.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 20))
+    assert MIGRATIONS[20] == "0020_m2a_formal_evidence_acceptance.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 21))
 
 
 def test_terminal_runner_receipt_binding_migration_freezes_settlement_evidence() -> None:
@@ -27,6 +28,20 @@ def test_terminal_runner_receipt_binding_migration_freezes_settlement_evidence()
     assert "Runner Receipt binding cannot change" in sql
     assert "terminal evidence cannot change" in sql
     assert "VALUES (19, 'm2b_terminal_runner_receipt_binding')" in sql
+
+
+def test_formal_acceptance_migration_is_content_addressed_and_append_only() -> None:
+    sql = migration_sql(20)
+
+    assert "CREATE TABLE formal_evidence_acceptance_snapshots" in sql
+    assert "CREATE TABLE formal_evidence_acceptance_reviews" in sql
+    assert "snapshot_hash TEXT NOT NULL UNIQUE" in sql
+    assert "review_hash TEXT NOT NULL UNIQUE" in sql
+    assert "formal_evidence_acceptance_snapshots_append_only" in sql
+    assert "formal_evidence_acceptance_reviews_append_only" in sql
+    assert "owner_window_authorization' = 'not_granted'" in sql
+    assert "automatic_release_allowed' = 'false'" in sql
+    assert "VALUES (20, 'm2a_formal_evidence_acceptance')" in sql
 
 
 def test_m2_search_round_migration_contains_a_line_authorities() -> None:

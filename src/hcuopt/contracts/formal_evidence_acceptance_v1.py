@@ -17,6 +17,7 @@ from hcuopt.measurement.evidence import canonical_json_bytes
 PRODUCTION_EVIDENCE_ROOT_SCHEMA_VERSION = "m2a-production-evidence-root-v1"
 FORMAL_EVIDENCE_VERIFIER_SCHEMA_VERSION = "m2a-formal-evidence-verifier-v1"
 FORMAL_EVIDENCE_ACCEPTANCE_REVIEW_SCHEMA_VERSION = "m2a-formal-evidence-acceptance-review-v2"
+FORMAL_EVIDENCE_ACCEPTANCE_REPORT_SCHEMA_VERSION = "m2a-formal-evidence-acceptance-report-v1"
 
 FormalEvidenceProducerRole = Literal[
     "control_plane",
@@ -303,6 +304,31 @@ class FormalEvidenceAcceptanceReview(FormalEvidenceAcceptanceReviewContent):
             or self.signature.algorithm != self.verifier.attestation_scheme
         ):
             raise ValueError("Formal acceptance review signature identity drifted")
+        return self
+
+
+class FormalEvidenceAcceptanceReport(_FrozenAcceptanceModel):
+    """Authenticated read model for one persisted D-owned Formal review."""
+
+    schema_version: Literal["m2a-formal-evidence-acceptance-report-v1"] = (
+        FORMAL_EVIDENCE_ACCEPTANCE_REPORT_SCHEMA_VERSION
+    )
+    round_id: UUID
+    readiness_audit_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{2,199}$")
+    snapshot_hash: str = Field(pattern=SHA256_PATTERN)
+    review: FormalEvidenceAcceptanceReview
+    owner_window_authorization: Literal["not_granted"] = "not_granted"
+    hcu_accessed: Literal[False] = False
+    automatic_release_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def require_bound_review(self) -> FormalEvidenceAcceptanceReport:
+        if (
+            self.review.round_id != self.round_id
+            or self.review.readiness_audit_id != self.readiness_audit_id
+            or self.review.verification_input_digest != self.snapshot_hash
+        ):
+            raise ValueError("Formal acceptance Report review is bound to another snapshot")
         return self
 
 
