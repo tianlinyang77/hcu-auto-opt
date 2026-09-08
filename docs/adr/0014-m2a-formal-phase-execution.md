@@ -42,6 +42,72 @@ Receipt 只证明执行、预算结算与清理事实，固定
 
 ## 后果
 
+### 2026-09-08：M1 生产端的隔离身份交接（#126）
+
+Formal 结果校验要求三组身份摘要，原 M1 Harness 的 `MeasurementSeries.summary` 未输出，
+导致现有唯一 Harness 无法通过该结果边界。本切片补生产端输出，不放宽 Formal 的必填检查。
+
+`m1_isolation_hashes()` 从 M1 原始 acquisitions 投影三组集合，排序、去重后，以既有
+`canonical_json_bytes` 编码 `{schema_version: "m1-isolation-set-v1", kind: <字段名>,
+members: <集合>}`，计算 SHA256：
+
+- `baseline_sample_set_hash`：仅 baseline arm 的原始 device Event record SHA256 集合；
+- `process_identity_set_hash`：全部 acquisition 的 `(process_id, process_start_token)` 集合；
+- `cache_namespace_set_hash`：全部 acquisition 的 activation cache namespace Hash 集合。
+
+摘要不加入 Round、Candidate、phase、文件路径或 report ID 盐值；同一批采样换标签后仍得到
+相同身份。字段由 Harness 从已构造的原始证据生成，忽略调用者提供的同名字段。原 M1
+performance.json 格式不变；旧证据不回填或重写，没有迁移、裁决或 Real Profile 注册。
+
+新增组合测试使用真实 `M1TrustedMeasurementHarness` 与 CPU 计时/清理夹具，再调用现有
+Formal 结果校验和 `RoundMeasurementRef` 构造。它只验收结果交接，不调用 Formal `run()`，
+不证明完整 A/B 授权、租约、预算、Search/Holdout 或 HCU 已联通。
+
+保留的后续工作：部署层完整冻结输入、当期 Target Lock/Lease/fencing、
+完整生命周期联验，以及 D 独立重读原始 acquisition/Event 并复算摘要。整组 Hash 只能识别
+整组复用，不等于逐成员的部分重叠检测；不能据此宣布 #126 或正式隔离验收完成。
+
+### 2026-09-08：运行时上下文与局部预算接线
+
+Formal Adapter 在 reserve 之前编译并核对 Harness payload。由冻结 binding/round/reservation
+填充 Task、Baseline、Stage 0、Workload/Configuration 身份，以及 M1 实际读取的
+`_job_context`（Lease ID、独占 scope、resource、Fence）和 `budget`（样本数、墙钟上限）。
+调用者若携带这些字段，必须与派生值的规范 JSON 完全一致；额外上下文字段、不同资源或
+放大预算均在 reserve 前拒绝，不记录为已启动测量、不调用资源清理。
+
+M1 预算接口要求整数秒，因此 Formal 的局部墙钟预算向下取整；不足一秒拒绝，不向上扩大
+授权。M1 在初始化 device timer 前复算实际采样 Plan Hash 并核对预期样本数，拒绝冻结计划
+与实际 `plan_factory` 的偏差。
+
+运行时 Lease guard 由 Adapter 注入 M1 原有 `lease_lost_event.is_set()` 检查点，不接受调用方
+提供的事件或假值。guard 每次核对窗口、租约/续租截止和部署 Lease 活性，异常或非精确 True
+均视作失效；M1 在计时标定前以及既有采样检查点消费它。该机制不自动续租，不代替 Worker
+进程超时/强制 fencing，也不能中断一条已经阻塞的设备调用。
+
+此增量不证明完整 Target/Artifact/Stage0 来源已与部署注册逐一接通。Real Profile、D 独立重读、完整 run 生命周期与当期
+实机验收仍未放行。旧 M1 非 Formal 调用保留原行为。
+
+### 2026-09-08：失败证据与计量交接
+
+M1 新失败文件使用 `m1-measurement-failure-v2`，显式区分调用过的采样批次数和拿到有效 Event
+证据的次数。每次 `measure_batch` 调用前递增 attempted；验证 Event 后才保留 verified sample。
+失败 acquisition 的部分样本不再丢失，已完成 acquisition 也一并保留。计量含失败调用但不把它
+算成有效性能样本；warmup 不计入样本数，其耗时由墙钟预算承担。
+
+异常携带已发布文件的 URI/Hash；Formal 默认用原生 no-follow Reader 从本次 output root 重读，
+核对 Run/Task/Candidate/Artifact/Target/Stage0/Baseline/Workload、Lease/Fence、Plan、预期数量，
+并验证完整 execution request Hash，防止跨 phase、attempt 或 reservation 重放。同名旧 v1
+失败文件不自动升级、不用于这条结算路径。
+
+成功重读后，按 attempted 数量 settle，在 usage 中保留 failure URI/Hash、计量口径和 verified
+数量；失败不生成 `RoundMeasurementRef`，清理结果沿用原失败文件，不重复调用已经完成的清理。
+这只是执行账本证据，不替代 D 对 Event 内容的独立真实性验证或性能裁决。
+
+失败文件缺失、损坏、身份不匹配，或普通异常没有显式计量回执时，执行当前 binding 的恢复，
+记录 `formal-failure-accounting-blocked-v1`，保留 reservation，拒绝 settle/release。未知用量
+不是零；该分支不生成虚假的终态执行 Receipt，需要后续持久恢复/人工核对处理。若阻塞记录
+本身也写不出，异常仍上抛，reservation 仍未结算。未发布自动核对/自动释放任务。
+
 - 无 HCU 测试可以覆盖缺 Lease、窗口过期、Fence 错误、预算不足、timeout、清理失败和改绑拒绝。
 - Formal Adapter 依赖 A1/A2a Authority Reader、owner signature verifier、现有 Harness、durable
   isolation authority、预算权威、Lease/Fence/Target Lock 活性检查与恢复回调。

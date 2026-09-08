@@ -17,7 +17,7 @@ from hcuopt.contracts.v1 import ManualPerformanceEvidenceResult
 from hcuopt.domain.enums import LeaseScope
 from hcuopt.evaluation.stage0_protocol import load_registered_stage0_protocol
 from hcuopt.evaluation.stage0_verifier import Stage0EvidenceReader
-from hcuopt.measurement.evidence import write_evidence
+from hcuopt.measurement.evidence import EvidenceArtifact, write_evidence
 from hcuopt.measurement.fingerprint import stable_fingerprint
 from hcuopt.measurement.harness import (
     CleanupController,
@@ -25,6 +25,8 @@ from hcuopt.measurement.harness import (
     ProcessLifecycleRecorder,
     TelemetryCollector,
 )
+from hcuopt.measurement.m1_failure import M1FailureReport, M1MeasurementFailure, M1SamplingProgress
+from hcuopt.measurement.m1_identities import m1_isolation_hashes
 from hcuopt.measurement.m1_models import (
     M1AcquisitionEvidence,
     M1ActivationEvidence,
@@ -163,6 +165,12 @@ class M1TrustedMeasurementHarness:
         reference = M1Stage0ReportReference.model_validate(reference_payload)
         authority = load_m1_stage0_authority(self.reader, reference, task_payload=payload)
         plan = self.plan_factory(payload, authority)
+        if payload.get("mode") == "formal" and (
+            payload.get("measurement_plan_hash") != m1_plan_hash(plan)
+            or type(payload.get("expected_sample_count")) is not int
+            or payload["expected_sample_count"] != plan.expected_sample_count
+        ):
+            raise MeasurementSafetyError("Formal frozen measurement plan differs from M1 plan")
         _enforce_budget(payload, plan)
         deadline_ns = _wall_deadline_ns(payload, self.clock)
         measurement_id = uuid4()
@@ -196,11 +204,13 @@ class M1TrustedMeasurementHarness:
         measurement_root = output_dir / "m1" / measurement_id.hex
         cleanup: dict[str, Any]
         acquisitions: list[M1AcquisitionEvidence] = []
+        progress = M1SamplingProgress()
         calibration = None
         device_timer: DeviceTimer | None = None
         owns_device_timer = False
         collection_error: BaseException | None = None
         try:
+            _require_live_lease(context)
             _require_within_wall_budget(deadline_ns, self.clock)
             if self.device_timer_factory is not None:
                 device_timer = self.device_timer_factory(payload, measurement_root)
@@ -228,6 +238,7 @@ class M1TrustedMeasurementHarness:
                         measurement_root,
                         context,
                         deadline_ns,
+                        progress,
                     )
                 )
         except BaseException as exc:
@@ -253,7 +264,7 @@ class M1TrustedMeasurementHarness:
             except BaseException as exc:
                 failure = exc
         if failure is not None:
-            _write_failure_evidence(
+            failure_file = _write_failure_evidence(
                 measurement_root,
                 binding=binding,
                 plan=plan,
@@ -261,7 +272,11 @@ class M1TrustedMeasurementHarness:
                 calibration=calibration,
                 cleanup=cleanup,
                 error=failure,
+                progress=progress,
+                formal_execution_request_hash=payload.get("formal_execution_request_hash"),
             )
+            if isinstance(failure, Exception):
+                raise M1MeasurementFailure(str(failure), failure_file) from failure
             raise failure
 
         assert calibration is not None
@@ -285,7 +300,7 @@ class M1TrustedMeasurementHarness:
                 evidence,
             )
         except BaseException as exc:
-            _write_failure_evidence(
+            failure_file = _write_failure_evidence(
                 measurement_root,
                 binding=binding,
                 plan=plan,
@@ -293,7 +308,11 @@ class M1TrustedMeasurementHarness:
                 calibration=calibration,
                 cleanup=cleanup,
                 error=exc,
+                progress=progress,
+                formal_execution_request_hash=payload.get("formal_execution_request_hash"),
             )
+            if isinstance(exc, Exception):
+                raise M1MeasurementFailure(str(exc), failure_file) from exc
             raise
         series = MeasurementSeries(
             measurement_id=measurement_id,
@@ -308,6 +327,7 @@ class M1TrustedMeasurementHarness:
             raw_samples_hash=artifact_file.sha256,
             environment_fingerprint=binding.environment_fingerprint,
             summary={
+                **m1_isolation_hashes(evidence),
                 "plan_hash": evidence.plan_hash,
                 "stage0_report_hash": authority.report.sha256,
                 "stage0_input_digest": authority.report.input_digest,
@@ -332,6 +352,7 @@ class M1TrustedMeasurementHarness:
         measurement_root: Path,
         context: Mapping[str, Any],
         deadline_ns: int | None,
+        progress: M1SamplingProgress,
     ) -> M1AcquisitionEvidence:
         workload = self.workload_factory(arm, acquisition_ordinal, payload, measurement_root)
         identity = ProcessIdentity.model_validate(workload.process_identity())
@@ -404,6 +425,8 @@ class M1TrustedMeasurementHarness:
             for sample_ordinal in range(plan.samples_per_acquisition):
                 _require_live_lease(context)
                 _require_within_wall_budget(deadline_ns, self.clock)
+                # Invocation may execute even if the call or evidence read later fails.
+                progress.attempted_sample_count += 1
                 event_reference = RawEvidenceFileV2.model_validate(
                     workload.measure_batch(plan.batch_iterations)
                 )
@@ -436,6 +459,7 @@ class M1TrustedMeasurementHarness:
                         device_event_record=event_reference,
                     )
                 )
+                progress.verified_samples.append(samples[-1])
                 _require_within_wall_budget(deadline_ns, self.clock)
         finally:
             workload.close()
@@ -590,24 +614,26 @@ def _write_failure_evidence(
     calibration: Any,
     cleanup: Mapping[str, Any],
     error: BaseException,
-) -> None:
-    write_evidence(
-        measurement_root / "failure.json",
-        {
-            "schema_version": "m1-measurement-failure-v1",
-            "binding": binding.model_dump(mode="json"),
-            "plan_hash": m1_plan_hash(plan),
-            "completed_acquisitions": [
-                item.model_dump(mode="json") for item in acquisitions
-            ],
-            "calibration": (
-                calibration.model_dump(mode="json") if calibration is not None else None
-            ),
-            "cleanup_evidence": dict(cleanup),
-            "error_type": type(error).__name__,
-            "error": str(error),
-        },
-    )
+    progress: M1SamplingProgress,
+    formal_execution_request_hash: str | None,
+) -> EvidenceArtifact:
+    try:
+        report = M1FailureReport(
+            binding=binding,
+            plan_hash=m1_plan_hash(plan),
+            formal_execution_request_hash=formal_execution_request_hash,
+            expected_sample_count=plan.expected_sample_count,
+            attempted_sample_count=progress.attempted_sample_count,
+            verified_samples=tuple(progress.verified_samples),
+            completed_acquisitions=tuple(acquisitions),
+            calibration=calibration,
+            cleanup_evidence=dict(cleanup),
+            error_type=type(error).__name__,
+            error=str(error),
+        )
+        return write_evidence(measurement_root / "failure.json", report)
+    except Exception as exc:
+        raise M1MeasurementFailure("M1 failure evidence could not be published", None) from exc
 
 
 def _telemetry(collector: TelemetryCollector) -> TelemetrySnapshotV2:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from copy import deepcopy
@@ -18,8 +19,9 @@ from hcuopt.contracts.v1 import ManualPerformanceEvidenceResult
 from hcuopt.domain.errors import AdapterUnavailable
 from hcuopt.evaluation.stage0_protocol import load_registered_stage0_protocol
 from hcuopt.evaluation.stage0_verifier import Stage0EvidenceError, Stage0EvidenceReader
-from hcuopt.measurement.evidence import write_evidence
+from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence
 from hcuopt.measurement.m1_harness import M1TrustedMeasurementHarness
+from hcuopt.measurement.m1_identities import m1_isolation_hashes
 from hcuopt.measurement.m1_models import (
     M1ActivationEvidence,
     M1DeviceEventRecord,
@@ -430,6 +432,74 @@ def test_m1_harness_preserves_noop_and_known_signal_as_raw_evidence(
         for sample in item.samples
     ]
     assert set(candidate_deltas) == {candidate_ticks}
+
+
+def test_m1_summary_derives_formal_isolation_sets_from_raw_evidence(tmp_path: Path) -> None:
+    harness, payload = _fixture(tmp_path)
+    # Caller-provided summaries must not become sampling identities.
+    payload.update(
+        {
+            name: "sha256:" + "f" * 64
+            for name in (
+                "baseline_sample_set_hash",
+                "process_identity_set_hash",
+                "cache_namespace_set_hash",
+            )
+        }
+    )
+    result = harness.run_manual_performance(payload, tmp_path)
+    raw = json.loads(_path_from_uri(result.measurement.raw_samples_uri).read_bytes())
+    acquisitions = raw["acquisitions"]
+    expected_members = {
+        "baseline_sample_set_hash": sorted(
+            {
+                sample["device_event_record"]["sha256"]
+                for item in acquisitions
+                if item["arm"] == "baseline"
+                for sample in item["samples"]
+            }
+        ),
+        "process_identity_set_hash": sorted(
+            {(item["process_id"], item["process_start_token"]) for item in acquisitions}
+        ),
+        "cache_namespace_set_hash": sorted(
+            {item["activation"]["cache_namespace_hash"] for item in acquisitions}
+        ),
+    }
+    for name, members in expected_members.items():
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "schema_version": "m1-isolation-set-v1",
+                        "kind": name,
+                        "members": members,
+                    }
+                )
+            ).hexdigest()
+        )
+        assert result.measurement.summary[name] == digest
+        assert digest != payload[name]
+
+
+def test_m1_isolation_sets_ignore_relabeling_and_detect_changed_members(tmp_path: Path) -> None:
+    harness, payload = _fixture(tmp_path)
+    result = harness.run_manual_performance(payload, tmp_path)
+    raw = json.loads(_path_from_uri(result.measurement.raw_samples_uri).read_bytes())
+    original = m1_isolation_hashes(M1MeasurementEvidence.model_validate_json(json.dumps(raw)))
+    raw["binding"]["round_id"] = str(uuid4())
+    raw["binding"]["measurement_id"] = str(uuid4())
+    assert (
+        m1_isolation_hashes(M1MeasurementEvidence.model_validate_json(json.dumps(raw))) == original
+    )
+    # A different device Event record affects only the baseline sample identity.
+    changed = deepcopy(raw)
+    changed["acquisitions"][0]["samples"][0]["device_event_record"]["sha256"] = "sha256:" + "a" * 64
+    recomputed = m1_isolation_hashes(M1MeasurementEvidence.model_validate_json(json.dumps(changed)))
+    assert recomputed["baseline_sample_set_hash"] != original["baseline_sample_set_hash"]
+    assert recomputed["process_identity_set_hash"] == original["process_identity_set_hash"]
+    assert recomputed["cache_namespace_set_hash"] == original["cache_namespace_set_hash"]
 
 
 def test_m1_evidence_contract_rejects_cache_event_and_cleanup_rebinding(
