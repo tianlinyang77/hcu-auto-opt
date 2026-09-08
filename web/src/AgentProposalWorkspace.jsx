@@ -24,7 +24,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { loadOperatorAgentInspection, loadOperatorAgentProposals } from "./api.js";
-import { agentProposalSummary, inspectionReadModel, pendingReviewDisplay } from "./agent-proposals.js";
+import { agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay } from "./agent-proposals.js";
 import { loadDemoAgentProposals } from "./demo-data.js";
 
 function shortValue(value, length = 12) {
@@ -316,7 +316,7 @@ function ErrorState({ error, onRetry }) {
 }
 
 export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false, inspectionAuthorization }) {
-  const [workspace, setWorkspace] = useState(null);
+  const [loadedWorkspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -364,7 +364,10 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
     setReloadNonce((current) => current + 1);
   };
 
-  const summary = useMemo(() => agentProposalSummary(workspace), [workspace]);
+  const { workspace, summary, metrics } = useMemo(
+    () => agentWorkspacePresentation(loadedWorkspace, { loading, error }),
+    [loadedWorkspace, loading, error],
+  );
   const selectedProposal = workspace?.proposals?.find((proposal) => proposal.proposal_id === selectedId)
     || workspace?.proposals?.[0];
 
@@ -384,9 +387,9 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
         </header>
 
         <div className="agent-summary">
-          <div><span>Generator Attempts</span><strong>{summary.attempts.length}</strong><small>{summary.failedAttempts.length} 次超时 / 失败</small></div>
-          <div><span>Retained Proposal</span><strong>{summary.keptCount}</strong><small>{summary.duplicateCount} 个稳定去重</small></div>
-          <div><span>Budget Used</span><strong>{Math.round(summary.budget.attemptsRatio * 100)}%</strong><small>{summary.budget.usage.attempt_count}/{summary.budget.limit.max_generator_attempts} 次尝试</small></div>
+          <div><span>Generator Attempts</span><strong>{metrics.attempts}</strong><small>{metrics.failed}</small></div>
+          <div><span>Retained Proposal</span><strong>{metrics.retained}</strong><small>{metrics.duplicates}</small></div>
+          <div><span>Budget Used</span><strong>{metrics.budgetPercent}</strong><small>{metrics.budgetAttempts}</small></div>
           <div className="release-locked"><LockKey size={21} /><span>Formal Readiness</span><strong>HOLD</strong><small>禁止自动发布</small></div>
         </div>
 

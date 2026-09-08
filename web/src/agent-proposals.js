@@ -52,6 +52,30 @@ function ratio(value, limit) {
   return Math.min(1, Math.max(0, value / limit))
 }
 
+// An unavailable read is not a measured zero. Hide the previous snapshot while
+// revalidating it, including its export, until the current request succeeds.
+export function agentWorkspacePresentation(readModel, { loading = false, error = null } = {}) {
+  const workspace = loading || error ? null : readModel
+  const summary = agentProposalSummary(workspace)
+  const hasAttempts = Array.isArray(workspace?.attempts)
+  const hasProposals = Array.isArray(workspace?.proposals)
+  const used = workspace?.budget?.attempt_count
+  const limit = workspace?.budget_limit?.max_generator_attempts
+  const hasBudget = Number.isFinite(used) && used >= 0 && Number.isFinite(limit) && limit > 0
+  return {
+    workspace,
+    summary,
+    metrics: {
+      attempts: hasAttempts ? summary.attempts.length : '—',
+      failed: hasAttempts ? `${summary.failedAttempts.length} 次超时 / 失败` : '未读取到执行证据',
+      retained: hasProposals ? summary.keptCount : '—',
+      duplicates: hasProposals ? `${summary.duplicateCount} 个稳定去重` : '未读取到提案证据',
+      budgetPercent: hasBudget ? `${Math.round(summary.budget.attemptsRatio * 100)}%` : '—',
+      budgetAttempts: hasBudget ? `${used}/${limit} 次尝试` : '用量未知，不代表未消耗',
+    },
+  }
+}
+
 export function inspectionReadModel(inspection, expectedRunId) {
   const model = inspection?.read_model
   if (inspection?.schema_version !== 'm2b-agent-inspection-v1'

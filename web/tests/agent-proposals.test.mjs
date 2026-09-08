@@ -1,7 +1,50 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentProposalSummary, inspectionReadModel, pendingReviewDisplay } from '../src/agent-proposals.js'
+import { agentProposalSummary, agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay } from '../src/agent-proposals.js'
+
+test('unavailable evidence never displays zero attempts or zero budget', () => {
+  for (const model of [null, undefined, {}]) {
+    const { metrics } = agentWorkspacePresentation(model)
+    assert.equal(metrics.attempts, '—')
+    assert.equal(metrics.retained, '—')
+    assert.equal(metrics.budgetPercent, '—')
+    assert.match(metrics.budgetAttempts, /未知/)
+  }
+})
+
+test('loading and denied refresh hide the old evidence and export snapshot', () => {
+  const old = { attempts: [{status: 'succeeded'}], proposals: [{status: 'kept'}],
+    budget: {attempt_count: 1}, budget_limit: {max_generator_attempts: 2} }
+  for (const state of [{loading: true}, {error: 'denied'}, {error: 'transport failure'}]) {
+    const view = agentWorkspacePresentation(old, state)
+    assert.equal(view.workspace, null)
+    assert.equal(view.metrics.attempts, '—')
+    assert.equal(view.metrics.retained, '—')
+    assert.equal(view.metrics.budgetPercent, '—')
+  }
+  const recovered = agentWorkspacePresentation(old)
+  assert.equal(recovered.workspace, old)
+  assert.equal(recovered.metrics.attempts, 1)
+  assert.equal(recovered.metrics.retained, 1)
+  assert.equal(recovered.metrics.budgetPercent, '50%')
+})
+
+test('verified zero remains zero while missing or invalid usage remains unknown', () => {
+  const empty = {attempts: [], proposals: [], budget: {attempt_count: 0},
+    budget_limit: {max_generator_attempts: 2}}
+  const view = agentWorkspacePresentation(empty)
+  assert.equal(view.metrics.attempts, 0)
+  assert.equal(view.metrics.retained, 0)
+  assert.equal(view.metrics.budgetPercent, '0%')
+  assert.equal(view.metrics.budgetAttempts, '0/2 次尝试')
+  for (const used of [undefined, null, -1, NaN, Infinity, '0']) {
+    assert.equal(agentWorkspacePresentation({...empty, budget: {attempt_count: used}}).metrics.budgetPercent, '—')
+  }
+  for (const limit of [undefined, null, 0, -1, NaN, Infinity]) {
+    assert.equal(agentWorkspacePresentation({...empty, budget_limit: {max_generator_attempts: limit}}).metrics.budgetPercent, '—')
+  }
+})
 
 test('retained proposal pending review is not rendered as eliminated', () => {
   const display = pendingReviewDisplay({ review_status: 'pending', review: null })
