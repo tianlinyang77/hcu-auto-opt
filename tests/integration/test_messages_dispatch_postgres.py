@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -16,18 +17,31 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from hcuopt.adapters.agent_promotion import (
+    BaselineOverlaySource,
+    CandidateSourcePackagePublisher,
+    ProposalDecisionStore,
+    ProposalPromotionService,
+    ProposalReviewAuthority,
+)
 from hcuopt.adapters.agent_runner import AgentInputFile
-from hcuopt.adapters.messages_generator import messages_profile_for_input
+from hcuopt.adapters.business_candidate_family import BusinessCandidateFamilyVerifier
+from hcuopt.adapters.git_source import GitSourceManager
+from hcuopt.adapters.messages_generator import messages_profile_for_input, prepare_messages_input
 from hcuopt.agent.authority import ApexGenerationCoordinator
+from hcuopt.agent.identity import candidate_generation_request_hash
 from hcuopt.agent.messages_dispatch import MessagesDispatchService
 from hcuopt.agent.messages_worker import MessagesGenerationWorker
 from hcuopt.contracts.agent_v1 import GenerationRunStartRequest
+from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
+from hcuopt.contracts.platform_v1 import SourceSnapshot
 from hcuopt.domain.errors import SourceArtifactError, StaleClaimToken
 from hcuopt.evaluation.agent_generation_inspection import AgentGenerationInspectionService
 from hcuopt.generators import anthropic_messages
 from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 from hcuopt.storage.repository import PostgresRepository
-from tests.unit.test_messages_generator import _response
+from tests.unit.test_messages_generator import SOURCE_PATH, _hash, _response
 from tests.unit.test_messages_generator import setup as messages_setup  # noqa: F401
 
 pytestmark = [
@@ -55,11 +69,93 @@ def repository():
             connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def _git(root, *args):
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+
+
+def _promotion_input(fixture):
+    """A real temporary Git baseline; never a user checkout or real model output."""
+    root = fixture["root"]
+    fixture["source"].write_bytes(b"def forward(value):\n    return value\n")
+    (root / "unchanged.txt").write_bytes(b"Included in the complete worktree Hash.\n")
+    _git(root, "init")
+    _git(root, "config", "core.autocrlf", "false")
+    _git(root, "add", "--", SOURCE_PATH, "unchanged.txt")
+    _git(
+        root,
+        "-c",
+        "user.name=HCU Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "test(source): add isolated baseline",
+    )
+    baseline = BaselineOverlaySource(
+        snapshot=SourceSnapshot(
+            kind="baseline",
+            repository=root.as_uri(),
+            commit=_git(root, "rev-parse", "HEAD"),
+            tree_hash=_git(root, "rev-parse", "HEAD^{tree}"),
+            source_hash=canonical_source_hash(root),
+            worktree_uri=root.as_uri(),
+            clean=True,
+        ),
+        path=SOURCE_PATH,
+    )
+    request = fixture["request"].model_copy(
+        update={
+            "baseline_source_hash": baseline.snapshot.source_hash,
+            "max_proposals": 2,
+        }
+    )
+    item = prepare_messages_input(
+        request,
+        baseline=baseline,
+        knowledge_store=fixture["knowledge"],
+        settings=fixture["settings"],
+        hotspot_summary="CPU integration fixture, not a real hotspot",
+    )
+    generator = fixture["plan"].generators[0].model_copy(update={"max_proposals": 2})
+    plan = fixture["plan"].model_copy(
+        update={
+            "request_hash": candidate_generation_request_hash(request),
+            "generators": (generator,),
+            "budget": fixture["plan"].budget.model_copy(update={"max_proposals": 2}),
+        }
+    )
+    fixture.update(baseline=baseline, request=request, item=item, plan=plan)
+    proposals = []
+    for expression in ("value + 0", "value * 1"):
+        proposals.append(
+            {
+                "optimization_intent": "Exercise source handoff: " + expression,
+                "rationale": "Local stub fixture only; no performance claim.",
+                "risk_summary": "Test review is not approval for a real workload.",
+                "patch": (
+                    f"--- a/{SOURCE_PATH}\n+++ b/{SOURCE_PATH}\n@@ -1,2 +1,2 @@\n"
+                    f" def forward(value):\n-    return value\n+    return {expression}\n"
+                ),
+            }
+        )
+    return _response(proposals)
+
+
 @pytest.fixture
-def dispatch_case(messages_setup, repository, tmp_path):  # noqa: F811
+def dispatch_case(messages_setup, repository, tmp_path, request):  # noqa: F811
     fixture = messages_setup
     calls = []
     response = {"reply": _response(), "status": 200}
+    if getattr(request, "param", None) == "promotion":
+        response["reply"] = _promotion_input(fixture)
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -193,7 +289,8 @@ def test_postgres_to_native_d_inspection(dispatch_case, mode, api_kind):
         password = credential_file.read_text().splitlines()[1].split(": ", 1)[1]
         auth = ("operator", password)
         app = create_inspection_app(
-            repository=case["repository"], evidence_root=case["root"],
+            repository=case["repository"],
+            evidence_root=case["root"],
             access=FileRunReadAccess(access_file),
         )
     else:
@@ -203,16 +300,22 @@ def test_postgres_to_native_d_inspection(dispatch_case, mode, api_kind):
                 lambda _request, run_id: run_id == status.run.generation_run_id
             ),
         )
-    with patch.dict(os.environ, HCUOPT_AGENT_INSPECTION_ROOT=str(case["root"]),
-                    HCUOPT_AUTO_MIGRATE="false"), TestClient(
-                        app, base_url="https://testserver") as client:
+    with (
+        patch.dict(
+            os.environ, HCUOPT_AGENT_INSPECTION_ROOT=str(case["root"]), HCUOPT_AUTO_MIGRATE="false"
+        ),
+        TestClient(app, base_url="https://testserver") as client,
+    ):
         url = f"/v1/operator/agent-generations/{status.run.generation_run_id}/inspection"
         if api_kind == "readonly":
             assert client.get(url).status_code == 401
             assert client.get(url, auth=("operator", "wrong")).status_code == 403
-            assert client.get(
-                f"/v1/operator/agent-generations/{uuid4()}/inspection", auth=auth
-            ).status_code == 403
+            assert (
+                client.get(
+                    f"/v1/operator/agent-generations/{uuid4()}/inspection", auth=auth
+                ).status_code
+                == 403
+            )
             client.auth = auth
         response = client.get(
             f"/v1/operator/agent-generations/{status.run.generation_run_id}/inspection"
@@ -331,3 +434,190 @@ def test_lease_larger_than_frozen_budget_is_rejected_before_claim(dispatch_case)
         )
     assert case["repository"].generation_run_status(run_id).attempts[0].state == "pending"
     assert not case["calls"]
+
+
+def _promotion_services(case):
+    # New instances read the dispatcher's actual Batch/Patch stores, not hand-built refs.
+    worker = MessagesGenerationWorker(case["root"])
+    decisions = ProposalDecisionStore(case["root"] / "test-decisions")
+    authority = ProposalReviewAuthority(
+        patch_store=worker.patches,
+        batch_store=worker.batches,
+        decision_store=decisions,
+    )
+    publisher = CandidateSourcePackagePublisher(
+        case["root"] / "test-packages",
+        profile="messages-promotion-integration-v1",
+        source_manager=GitSourceManager(),
+        allowed_overlay_roots=("sglang",),
+        approved_mount_targets={
+            case["start"].request.replacement_point: "/opt/hcuopt/overlay/" + SOURCE_PATH,
+        },
+    )
+    service = ProposalPromotionService(
+        review_authority=authority,
+        package_publisher=publisher,
+        decision_store=decisions,
+    )
+    return decisions, authority, publisher, service
+
+
+def _test_review(authority, status, proposal_id, decision="approved"):
+    return authority.review(
+        status,
+        proposal_id,
+        decision=decision,
+        reviewer="test-fixture-reviewer",
+        reason="Exercise the C interface only; not an actual human approval.",
+        review_evidence=b'{"scope":"test-only-not-human-approval"}',
+        idempotency_key=f"test-review-{proposal_id}",
+        reviewed_at=datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.parametrize("dispatch_case", ["promotion"], indirect=True)
+def test_messages_to_git_packages_and_verified_family(dispatch_case):
+    case = dispatch_case
+    status = _execute(case)
+    assert status.run.state == "awaiting_review"
+    assert len(status.proposals) == 2
+    assert all(ref.disposition == "retained" for ref in status.proposals)
+    assert len(case["calls"]) == 1
+    # Simulate restart between generation and C intake, using PostgreSQL authority.
+    status = PostgresRepository(case["repository"].database_url).generation_run_status(
+        status.run.generation_run_id
+    )
+    decisions, authority, publisher, service = _promotion_services(case)
+    baseline = case["fixture"]["baseline"]
+    output = case["tmp_path"] / "promotion-work"
+    with pytest.raises((SourceArtifactError, FileNotFoundError)):
+        service.prepare(
+            status,
+            status.proposals[0].proposal_id,
+            uuid4(),
+            baseline=baseline,
+            candidate_id=uuid4(),
+            candidate_output_dir=output,
+        )
+    assert not publisher.root.exists()  # missing review cannot publish a Package
+    prepared = []
+    for ref in status.proposals:
+        review = _test_review(authority, status, ref.proposal_id)
+        prepared.append(
+            service.prepare(
+                status,
+                ref.proposal_id,
+                review.review_id,
+                baseline=baseline,
+                candidate_id=uuid4(),
+                candidate_output_dir=output,
+            )
+        )
+    assert len({item.source_package_ref.candidate_source_hash for item in prepared}) == 2
+    assert not any((output / "worktrees").iterdir())
+    baseline_root = file_uri_to_path(baseline.snapshot.worktree_uri)
+    assert _git(baseline_root, "status", "--porcelain") == ""
+    assert canonical_source_hash(baseline_root) == baseline.snapshot.source_hash
+    # Reapply each Package with the real Source Manager, proving full source hashes.
+    for item in prepared:
+        manager = GitSourceManager()
+        replay = manager.create_candidate(baseline.snapshot, uuid4(), output)
+        try:
+            package = publisher.source_packages.read(
+                candidate_source_hash=item.source_package_ref.candidate_source_hash,
+            )
+            replay_root = file_uri_to_path(replay.worktree_uri)
+            publisher.source_packages.apply(package, replay_root)
+            assert (
+                canonical_source_hash(replay_root) == item.source_package_ref.candidate_source_hash
+            )
+            assert (replay_root / "unchanged.txt").read_bytes() == (
+                baseline_root / "unchanged.txt"
+            ).read_bytes()
+        finally:
+            manager.remove_candidate(baseline.snapshot, replay, output)
+    request = status.run.request
+    store_id, store_hash = "messages-test-package-store", _hash(b"test-deployment-store")
+    family = BusinessCandidateFamilyManifest(
+        family_id="messages-test-family",
+        source_package_store_id=store_id,
+        source_package_store_hash=store_hash,
+        target_snapshot_id=request.target_snapshot_id,
+        stage0_run_id=request.stage0_run_id,
+        baseline_epoch_id=request.baseline_epoch_id,
+        baseline_source_hash=request.baseline_source_hash,
+        hotspot_id=request.hotspot_id,
+        replacement_point=request.replacement_point,
+        profiler_evidence_uri=request.profiler_evidence_uri,
+        profiler_evidence_hash=request.profiler_evidence_hash,
+        overlay_mount_target="/opt/hcuopt/overlay/" + SOURCE_PATH,
+        overlay_file_path=SOURCE_PATH,
+        members=tuple(
+            {
+                "candidate_id": item.candidate_id,
+                "source_package_ref": item.source_package_ref,
+                "optimization_intent": item.resolved.proposal.optimization_intent,
+            }
+            for item in prepared
+        ),
+        reviewed_by="test-fixture-family-reviewer",
+        reviewed_at=datetime.now(timezone.utc),
+    )
+    # Independent Store/Decision instances, no in-memory C publication shortcut.
+    fresh_decisions, _, fresh_publisher, fresh_service = _promotion_services(case)
+    verifier = BusinessCandidateFamilyVerifier(
+        fresh_publisher.source_packages,
+        store_id=store_id,
+        store_hash=store_hash,
+    )
+    for item in prepared:
+        receipt = fresh_service.finalize(
+            item,
+            family,
+            verifier,
+            promoted_by="test-fixture-promoter",
+            promoted_at=datetime.now(timezone.utc),
+            idempotency_key=f"test-promote-{item.candidate_id}",
+        )
+        assert ProposalDecisionStore(decisions.root).load_receipt(receipt.promotion_id) == receipt
+        assert fresh_decisions.read_evidence(
+            receipt.source_family_verification_evidence_uri,
+            expected_hash=receipt.source_family_verification_evidence_hash,
+        )
+        assert receipt.formal_intake_allowed is False
+        assert receipt.automatic_release_allowed is False
+        assert receipt.performance_conclusion == "not_measured"
+    assert not any((output / "worktrees").iterdir())
+    assert _git(baseline_root, "worktree", "list", "--porcelain").count("worktree ") == 1
+    assert _git(baseline_root, "status", "--porcelain") == ""
+    assert case["repository"].generation_run_status(request.generation_run_id) == status
+    assert len(case["calls"]) == 1  # C never reexecutes the model
+
+
+@pytest.mark.parametrize("dispatch_case", ["promotion"], indirect=True)
+@pytest.mark.parametrize("failure", ["rejected", "baseline_drift"])
+def test_messages_promotion_denial_creates_no_package(dispatch_case, failure):
+    case = dispatch_case
+    status = _execute(case)
+    _, authority, publisher, service = _promotion_services(case)
+    proposal = status.proposals[0]
+    review = _test_review(
+        authority,
+        status,
+        proposal.proposal_id,
+        decision="rejected" if failure == "rejected" else "approved",
+    )
+    if failure == "baseline_drift":
+        case["fixture"]["source"].write_bytes(b"def forward(value):\n    return None\n")
+    with pytest.raises(SourceArtifactError, match="rejected|drifted"):
+        service.prepare(
+            status,
+            proposal.proposal_id,
+            review.review_id,
+            baseline=case["fixture"]["baseline"],
+            candidate_id=uuid4(),
+            candidate_output_dir=case["tmp_path"] / "promotion-work",
+        )
+    assert not publisher.root.exists()
+    assert len(case["calls"]) == 1
+    assert case["repository"].generation_run_status(status.run.generation_run_id) == status

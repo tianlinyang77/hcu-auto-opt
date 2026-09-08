@@ -228,6 +228,39 @@ Messages/inspection 定向测试，POSIX 专属项继续明确跳过。
 远端同一批源码、CPU 日志和执行脚本位于 `/tmp/hcuopt-agent-accept-20260907.byipW5/`。
 数据库验收使用 Windows Worker；不能把它描述为在无网络 Linux 容器内跑通 PostgreSQL。
 
+## Messages 到真实 Git 源码制品的组合验收（2026-09-08）
+
+补充三项 PostgreSQL 集成用例，直接消费实际 Messages Dispatch 生成的 Batch/Patch，
+不再为 C 接入另造一份状态或 Proposal。只使用本地 HTTP 模拟模型和测试专用审核证据，
+不审核部署中的真实 Run，也不把测试审核当成人工批准。
+
+- 成功路径：一次生成两个不同补丁 → PostgreSQL 状态独立重读 → 测试审核 →
+  `GitSourceManager` 创建独立 Worktree → 两个源码制品 → 双成员 Family 独立验证 →
+  Promotion Receipt 落盘与独立重读。
+- 每个制品都重新应用到新的 Git Worktree，校验完整源码 Hash 与未改文件；结束确认
+  Baseline 干净且只剩 Baseline Worktree。C 接入不重复调用模型。
+- 缺失审核、明确拒绝和 Baseline 漂移均不能发布源码制品。
+- Receipt 保持 `formal_intake_allowed=false`、`automatic_release_allowed=false`、
+  `performance_conclusion=not_measured`。A 状态仍为 `awaiting_review`；这组用例不覆盖
+  最终人工签核或 D 终态发布，不能把审核前 inspection 测试当作终态报告验收。
+
+| 验证 | 结果 |
+| --- | --- |
+| Linux Python 3.10.12，真实 PostgreSQL + 子进程 Runner + 本地 HTTP 模拟模型 | 18 passed，零跳过，22.89 秒；含上述新增 3 项用例 |
+| Windows Messages Generator 与 Proposal Promotion 定向单测 | 33 passed，5.16 秒 |
+| 修改文件 Ruff 检查 | 通过 |
+
+沿用已批准的 CPU 隔离范围：一次性容器与既有测试 PostgreSQL 共享网络命名空间，
+源码和离线 wheels 只读挂载、只读根文件系统、临时数据写 `/tmp`，无 HCU 映射、
+无模型密钥、无 privileged。数据库各例使用独立随机 schema；容器结束自动删除。
+
+运行源码为基线 `051e2ab7ed9c9b9bfaeb55e07c0a0efca9876c44` 加当时未提交的
+`tests/integration/test_messages_dispatch_postgres.py`，不是该 Commit 单独通过新增测试。
+该测试文件 SHA256：`560ec806d4ecdd049a6a8aa37ce1007749b0edbdc5e2af83389fb4522da2b59b`。
+原始日志保存为 `results/messages-promotion-acceptance.log`（不进 Git），SHA256：
+`8d62ef54ec68b13ce62f2e57d76f2c13b21b621bd75907244f2e0f02deb8984e`。
+两项依赖弃用警告不影响测试通过；本轮没有重新调用真实模型或进行 HCU 优化验收。
+
 ## 手动源文件级试跑
 
 在独立的 Python 3.10 环境安装项目依赖，从仓库根目录运行。事先在进程环境设置
