@@ -164,6 +164,12 @@ class M1TrustedMeasurementHarness:
         reference = M1Stage0ReportReference.model_validate(reference_payload)
         authority = load_m1_stage0_authority(self.reader, reference, task_payload=payload)
         plan = self.plan_factory(payload, authority)
+        if payload.get("mode") == "formal" and (
+            payload.get("measurement_plan_hash") != m1_plan_hash(plan)
+            or type(payload.get("expected_sample_count")) is not int
+            or payload["expected_sample_count"] != plan.expected_sample_count
+        ):
+            raise MeasurementSafetyError("Formal frozen measurement plan differs from M1 plan")
         _enforce_budget(payload, plan)
         deadline_ns = _wall_deadline_ns(payload, self.clock)
         measurement_id = uuid4()
@@ -202,6 +208,7 @@ class M1TrustedMeasurementHarness:
         owns_device_timer = False
         collection_error: BaseException | None = None
         try:
+            _require_live_lease(context)
             _require_within_wall_budget(deadline_ns, self.clock)
             if self.device_timer_factory is not None:
                 device_timer = self.device_timer_factory(payload, measurement_root)

@@ -63,9 +63,30 @@ performance.json 格式不变；旧证据不回填或重写，没有迁移、裁
 Formal 结果校验和 `RoundMeasurementRef` 构造。它只验收结果交接，不调用 Formal `run()`，
 不证明完整 A/B 授权、租约、预算、Search/Holdout 或 HCU 已联通。
 
-保留的后续工作：部署层冻结输入与 M1 `_job_context` 接线、当期 Target Lock/Lease/fencing、
+保留的后续工作：部署层完整冻结输入、当期 Target Lock/Lease/fencing、
 完整生命周期联验，以及 D 独立重读原始 acquisition/Event 并复算摘要。整组 Hash 只能识别
 整组复用，不等于逐成员的部分重叠检测；不能据此宣布 #126 或正式隔离验收完成。
+
+### 2026-09-08：运行时上下文与局部预算接线
+
+Formal Adapter 在 reserve 之前编译并核对 Harness payload。由冻结 binding/round/reservation
+填充 Task、Baseline、Stage 0、Workload/Configuration 身份，以及 M1 实际读取的
+`_job_context`（Lease ID、独占 scope、resource、Fence）和 `budget`（样本数、墙钟上限）。
+调用者若携带这些字段，必须与派生值的规范 JSON 完全一致；额外上下文字段、不同资源或
+放大预算均在 reserve 前拒绝，不记录为已启动测量、不调用资源清理。
+
+M1 预算接口要求整数秒，因此 Formal 的局部墙钟预算向下取整；不足一秒拒绝，不向上扩大
+授权。M1 在初始化 device timer 前复算实际采样 Plan Hash 并核对预期样本数，拒绝冻结计划
+与实际 `plan_factory` 的偏差。
+
+运行时 Lease guard 由 Adapter 注入 M1 原有 `lease_lost_event.is_set()` 检查点，不接受调用方
+提供的事件或假值。guard 每次核对窗口、租约/续租截止和部署 Lease 活性，异常或非精确 True
+均视作失效；M1 在计时标定前以及既有采样检查点消费它。该机制不自动续租，不代替 Worker
+进程超时/强制 fencing，也不能中断一条已经阻塞的设备调用。
+
+此增量不证明完整 Target/Artifact/Stage0 来源已与部署注册逐一接通，也未完成 M1 部分采样
+失败到 Formal 实际预算消费的完整交接。Real Profile、D 独立重读、完整 run 生命周期与当期
+实机验收仍未放行。旧 M1 非 Formal 调用保留原行为。
 
 - 无 HCU 测试可以覆盖缺 Lease、窗口过期、Fence 错误、预算不足、timeout、清理失败和改绑拒绝。
 - Formal Adapter 依赖 A1/A2a Authority Reader、owner signature verifier、现有 Harness、durable

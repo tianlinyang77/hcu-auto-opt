@@ -70,6 +70,7 @@ from hcuopt.measurement.m2_formal_runner import (
     M2FormalExecutionFailure,
     M2FormalHarnessFailure,
     M2FormalPhaseExecutionAdapter,
+    _FormalLeaseGuard,
 )
 from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan
 from hcuopt.operator.formal_plans import formal_operator_resolved_plan_hash
@@ -755,6 +756,8 @@ def test_execution_authority_hash_binds_fence_and_topology() -> None:
     assert m2_formal_phase_execution_request_hash(changed) != (
         m2_formal_phase_execution_request_hash(request)
     )
+
+
 def test_formal_search_executes_through_unique_harness_and_settles(tmp_path: Path) -> None:
     round_authority = _round(RoundPhase.SEARCH)
     authority = _authority(round_authority)
@@ -795,6 +798,100 @@ def test_formal_search_executes_through_unique_harness_and_settles(tmp_path: Pat
     ).report_hash
     assert budget.finalizes[0].ledger_entry.entry_type is RoundBudgetEntryType.SETTLE
     assert budget.finalizes[0].ledger_entry.actual.search_samples == 8
+    payload = harness.payloads[0]
+    assert payload["budget"] == {"max_samples": 8, "max_wall_seconds": 20}
+    assert payload["task_id"] == str(request.binding.task_id)
+    assert payload["workload_hash"] == round_authority.workload_hash
+    assert payload["_job_context"]["lease_id"] == str(request.binding.lease_id)
+    assert payload["_job_context"]["fencing_token"] == request.binding.fencing_token
+    assert isinstance(payload["_job_context"]["lease_lost_event"], _FormalLeaseGuard)
+    assert payload["_job_context"]["lease_lost_event"].is_set() is False
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        {"_job_context": {"resource_id": "hcu-0"}},
+        {"_job_context": {"lease_lost_event": False}},
+        {"budget": {"max_samples": 800, "max_wall_seconds": 20}},
+        {"budget": {"max_samples": 8, "max_wall_seconds": 200}},
+        {"budget": {"max_samples": 8.0, "max_wall_seconds": 20}},
+        {"task_id": str(uuid4())},
+        {"workload_hash": "sha256:" + "f" * 64},
+        {"candidate_id": str(uuid4())},
+    ],
+)
+def test_formal_payload_conflicts_rejected_before_budget_or_harness(tmp_path, conflict):
+    round_ = _round(RoundPhase.SEARCH)
+    authority = _authority(round_)
+    member = _member(round_, RoundPhase.SEARCH)
+    request = _request(round_, authority, member, RoundPhase.SEARCH)
+    request = request.model_copy(update={"harness_payload": conflict})
+    budget, harness = RecordingBudget(), Harness()
+    with pytest.raises(MeasurementSafetyError, match="override frozen"):
+        _adapter(tmp_path, harness, budget).run(
+            round_authority=round_,
+            formal_authority=authority,
+            member=member,
+            request=request,
+            output_dir=tmp_path / "execution",
+        )
+    assert budget.reserves == budget.finalizes == harness.payloads == []
+    assert not (tmp_path / "execution").exists()
+
+
+@pytest.mark.parametrize("mode", ["expired", "renewal", "window", "false", "truthy", "error"])
+def test_formal_runtime_guard_fails_closed(mode):
+    round_ = _round(RoundPhase.SEARCH)
+    authority = _authority(round_)
+    member = _member(round_, RoundPhase.SEARCH)
+    binding = _request(round_, authority, member, RoundPhase.SEARCH).binding
+    observed = {
+        "expired": binding.lease_expires_at,
+        "renewal": binding.lease_renewal_due_at,
+        "window": binding.window.expires_at,
+    }.get(mode, NOW)
+
+    def live(_binding, _now):
+        if mode == "error":
+            raise RuntimeError("authority unavailable")
+        return {"false": False, "truthy": 1}.get(mode, True)
+
+    assert _FormalLeaseGuard(binding, lambda: observed, live).is_set() is True
+
+
+def test_formal_m1_wall_budget_rounds_down_not_up():
+    round_ = _round(RoundPhase.SEARCH)
+    authority = _authority(round_)
+    member = _member(round_, RoundPhase.SEARCH)
+    request = _request(round_, authority, member, RoundPhase.SEARCH)
+    for seconds, expected in ((1.9, 1), (0.9, None)):
+        changed = request.model_copy(
+            update={
+                "reservation": request.reservation.model_copy(
+                    update={
+                        "planned": request.reservation.planned.model_copy(
+                            update={"wall_seconds": seconds}
+                        )
+                    }
+                )
+            }
+        )
+
+        def build(changed=changed):
+            return M2FormalPhaseExecutionAdapter._harness_payload(
+                round_,
+                member,
+                changed,
+                _refresh(changed.binding),
+                m2_formal_phase_execution_request_hash(changed),
+            )
+
+        if expected is None:
+            with pytest.raises(MeasurementSafetyError, match="whole M1 second"):
+                build()
+        else:
+            assert build()["budget"]["max_wall_seconds"] == expected
 
 
 def test_search_and_holdout_use_independent_execution_receipts(tmp_path: Path) -> None:

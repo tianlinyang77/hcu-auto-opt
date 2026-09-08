@@ -2,12 +2,15 @@
 
 """Real M1 producer to Formal result-consumer seam; no live execution authority."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from hcuopt.domain.enums import RoundPhase
 from hcuopt.measurement.harness import MeasurementSafetyError
+from hcuopt.measurement.m1_models import M1Stage0ReportReference, m1_plan_hash
+from hcuopt.measurement.m1_stage0 import load_m1_stage0_authority
 from hcuopt.measurement.m2_formal_runner import M2FormalPhaseExecutionAdapter
 from tests.unit.test_m1_measurement import _fixture
 from tests.unit.test_m2_formal_execution import _authority, _member, _request, _round
@@ -33,9 +36,21 @@ class FormalFixtureCleaner:
         }
 
 
+def _freeze_m1_plan(harness, payload):
+    reference = M1Stage0ReportReference.model_validate_json(json.dumps(payload["stage0_report"]))
+    authority = load_m1_stage0_authority(harness.reader, reference, task_payload=payload)
+    plan = harness.plan_factory(payload, authority)
+    payload.update(
+        mode="formal",
+        measurement_plan_hash=m1_plan_hash(plan),
+        expected_sample_count=plan.expected_sample_count,
+    )
+
+
 def test_real_m1_result_enters_formal_reference_without_sampling_reimplementation(tmp_path: Path):
     harness, payload = _fixture(tmp_path)
     harness.cleaner = FormalFixtureCleaner()
+    _freeze_m1_plan(harness, payload)
     result = harness.run_manual_performance(payload, tmp_path)
     # This tests only the result boundary, not A authorization or B's run lifecycle.
     round_ = _round(RoundPhase.SEARCH)
@@ -79,3 +94,40 @@ def test_real_m1_result_enters_formal_reference_without_sampling_reimplementatio
         )
         with pytest.raises(MeasurementSafetyError, match="mismatched"):
             adapter._validate_harness_result(round_, member, request, missing)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("measurement_plan_hash", "sha256:" + "f" * 64),
+        ("expected_sample_count", 1),
+        ("expected_sample_count", 400.0),
+    ],
+)
+def test_m1_rejects_frozen_plan_drift_before_device_access(tmp_path, field, value):
+    harness, payload = _fixture(tmp_path)
+    _freeze_m1_plan(harness, payload)
+    payload[field] = value
+    called = []
+    harness.workload_factory = lambda *_: called.append(True)
+    with pytest.raises(MeasurementSafetyError, match="frozen measurement plan"):
+        harness.run_manual_performance(payload, tmp_path)
+    assert called == []
+    assert harness.device_timer.value == 1000
+
+
+def test_m1_consumes_lost_lease_hook_before_device_calibration(tmp_path):
+    harness, payload = _fixture(tmp_path)
+    _freeze_m1_plan(harness, payload)
+
+    class LostLease:
+        def is_set(self):
+            return True
+
+    payload["_job_context"]["lease_lost_event"] = LostLease()
+    called = []
+    harness.workload_factory = lambda *_: called.append(True)
+    with pytest.raises(MeasurementSafetyError, match="lease was lost"):
+        harness.run_manual_performance(payload, tmp_path)
+    assert called == []
+    assert harness.device_timer.value == 1000

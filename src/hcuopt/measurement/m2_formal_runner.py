@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -129,6 +130,29 @@ class M2FormalPhaseExecutionOutcome:
     usage_evidence_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class _FormalLeaseGuard:
+    binding: M2FormalExecutionBinding
+    clock: Callable[[], datetime]
+    lease_is_live: Callable[[M2FormalExecutionBinding, datetime], bool]
+
+    def is_set(self) -> bool:
+        """Reuse M1's cancellation hook; exceptions cannot imply a live Fence."""
+        try:
+            now = self.clock()
+            return not (
+                self.binding.window.starts_at <= now
+                < min(
+                    self.binding.window.expires_at,
+                    self.binding.lease_expires_at,
+                    self.binding.lease_renewal_due_at,
+                )
+                and self.lease_is_live(self.binding, now) is True
+            )
+        except Exception:
+            return True
+
+
 class M2FormalPhaseExecutionAdapter:
     """Formal B-line lifecycle wrapper; sampling and verdicts remain external."""
 
@@ -206,6 +230,14 @@ class M2FormalPhaseExecutionAdapter:
             request,
             now,
         )
+        # Reject caller conflicts before reserve, not as a started Harness failure.
+        payload = self._harness_payload(
+            round_authority, member, request, target_lock_refresh, request_hash
+        )
+        # Runtime authority never comes from the serializable caller payload.
+        payload["_job_context"]["lease_lost_event"] = _FormalLeaseGuard(
+            request.binding, self.clock, self.lease_is_live
+        )
 
         _, reserve_hash = self._write_payload(
             output_dir / "budget" / "reserve",
@@ -231,13 +263,7 @@ class M2FormalPhaseExecutionAdapter:
         try:
             result = ManualPerformanceEvidenceResult.model_validate(
                 self.harness.run_manual_performance(
-                    self._harness_payload(
-                        round_authority,
-                        member,
-                        request,
-                        target_lock_refresh,
-                        request_hash,
-                    ),
+                    payload,
                     output_dir,
                 )
             )
@@ -690,6 +716,9 @@ class M2FormalPhaseExecutionAdapter:
         request_hash: str,
     ) -> dict[str, Any]:
         binding = request.binding
+        wall_seconds = math.floor(request.reservation.planned.wall_seconds)
+        if wall_seconds < 1:
+            raise MeasurementSafetyError("Formal wall budget cannot represent a whole M1 second")
         protected = {
             "formal_execution_request_hash": request_hash,
             "formal_authorization_id": str(binding.formal_authorization_id),
@@ -697,6 +726,12 @@ class M2FormalPhaseExecutionAdapter:
             "resolved_plan_hash": binding.resolved_plan_hash,
             "authority_context_hash": binding.authority_context_hash,
             "round_id": str(binding.round_id),
+            "task_id": str(binding.task_id),
+            "baseline_epoch_id": str(round_authority.baseline_epoch_id),
+            "stage0_run_id": str(round_authority.stage0_run_id),
+            "workload_id": round_authority.workload_id,
+            "workload_hash": round_authority.workload_hash,
+            "configuration_hash": round_authority.configuration_hash,
             "candidate_id": str(binding.candidate_id),
             "artifact_id": str(binding.artifact_id),
             "artifact_hash": binding.artifact_hash,
@@ -730,10 +765,22 @@ class M2FormalPhaseExecutionAdapter:
             "synthetic": False,
             "producer_verdict": None,
             "performance_conclusion": "not_measured",
+            "_job_context": {
+                "lease_id": str(binding.lease_id),
+                "lease_scope": "exclusive",
+                "resource_id": binding.resource_id,
+                "fencing_token": binding.fencing_token,
+            },
+            "budget": {
+                "max_samples": request.reservation.expected_sample_count,
+                "max_wall_seconds": wall_seconds,
+            },
         }
         payload = dict(request.harness_payload)
         for name, value in protected.items():
-            if name in payload and payload[name] != value:
+            if name in payload and canonical_json_bytes(payload[name]) != (
+                canonical_json_bytes(value)
+            ):
                 raise MeasurementSafetyError(
                     f"Formal Harness payload attempted to override frozen {name}"
                 )
