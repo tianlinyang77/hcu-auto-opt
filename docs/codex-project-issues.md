@@ -1,5 +1,33 @@
 # Codex 项目本地已知问题
 
+## Messages 与 D 衔接必须保留原生安全读取及失败 Batch 语义
+
+- Scope: project-local；2026-09-07。
+- D 的 HashedEvidenceReader 在 Windows 明确拒绝读取；不能通过替换正式 Reader 为
+  PortableReader 来宣称整链验收。Windows 验证数据库调度，原生 D/API 在 Linux CPU 验证。
+- API 测试需要 `with TestClient(...)` 启动 lifespan，否则 app.state.repository 不存在；
+  只读验收设置 HCUOPT_AUTO_MIGRATE=false，避免混入启动迁移写操作。
+- 无 .git 的只读归档必须设置 HCUOPT_SOURCE_COMMIT；它只标基线，实际修改用源码包 Hash 固定。
+- A 接受“Runner 成功 / Batch 失败”的有据结算。D 仅在存在独立重读且 Hash 绑定的 failed Batch
+  时接受该组合，核对错误码，展示为失败并保留用量；Generator barrier 以 A 的 Attempt 成功为准，
+  不能用进程成功替代候选生成成功。
+- 已新增失败 Batch、审核前只读检查、状态漂移和 API 篡改拒绝回归。
+
+## Messages CPU 验收必须自包含依赖并回收孤儿进程（2026-09-07）
+
+- Scope: project-local。
+- nmz36 主机是 Python 3.6，不得用它验收要求 Python 3.10 的新生成器，也不要升级共享主机。
+- 本次在批准的无 HCU、无网络、源码只读容器中验证。旧测试依赖目录不完整，先报
+  `ModuleNotFoundError: typing_extensions`。从清华源准备完整 CPython 3.10 Linux wheels，
+  容器内 `pip --no-index --no-deps --target /tmp/test-deps /wheels/*.whl` 安装，不改主机。
+- `/tmp` 的 Docker tmpfs 若带默认 noexec，Pydantic 原生扩展报 `failed to map segment`。
+  本次仅对容器临时目录指定 `rw,nosuid,exec`，根文件系统和源码仍只读、网络仍关闭、不映射设备。
+- 未加 `--init` 时两个原有 Runner 子进程清理用例返回 `cleanup_failed`；相同代码加 `--init`
+  后全部通过。必须让 PID 1 回收孤儿进程，不能放宽清理断言或忽略未回收的进程域。
+- 真实模型探针曾在报告序列化 datetime 时中断。输入和 Receipt 已保存，因此使用
+  `messages_hotspot_probe.py --recover --output <原目录>` 补报告，不重复付费调用模型。
+- 后续同事先重读 Receipt，再处理报告；不要因为报告缺失直接重跑生成器，不要复用可变旧依赖目录。
+
 ## React lint 禁止在 Effect 中同步调用含 setState 的加载函数
 
 - Scope: project-local
@@ -170,3 +198,19 @@
 - Do not repeat: 不要把旧 checkout 的帮助输出判成当前分支代码未生效，也不要在未核对
   `__file__` 前修改 parser。
 - Last updated: 2026-08-28
+## Messages Worker 的租约必须服从 A 冻结超时
+
+- Scope: project-local
+- Symptom: 独立 Worker 单测通过，但真实 PostgreSQL Claim 拒绝 lease 大于 generator timeout。
+- Cause: Worker 原先在冻结 timeout 外追加清理余量，与 A 的不可扩预算规则矛盾。
+- Proven workaround: Claim 默认等于冻结 timeout，Runner 使用 timeout 减 5 秒，HTTP 再留余量；过期结算仍拒绝。
+- Validation: 新增真实 PostgreSQL 调度/恢复回归，不用 SQLite 或模拟 Claim 替代。
+- Do not repeat: 不修改 A 的预算上限来迎合 Worker；不对共享数据库运行会 TRUNCATE 的旧测试。
+- Last updated: 2026-09-07
+# 2026-09-07：Windows 全仓补跑未完成
+
+- Scope: project-local。
+- Symptom: 全仓单测停留在既有 F1-C 临时仓库夹具，子进程为 `git config user.email`。
+- Cause: 尚未确认；不能归因于 Messages 生成器或数据库，也不能计为测试通过。
+- Validation: 定向 Windows/Linux CPU 和 Linux PostgreSQL 联验已另有记录；全仓交由 PR CI。
+- Do not repeat: 不把中止的补跑报成全量通过，不为此更改共享 Git 配置或真实源码基线。

@@ -54,6 +54,9 @@ jobs:
           tests/unit/test_agent_proposal_verifier.py
           tests/unit/test_agent_generation_read_model_api.py
           tests/unit/test_agent_cli.py
+          tests/unit/test_messages_generator.py
+          tests/unit/test_agent_generation_inspection.py
+          tests/unit/test_inspection_server.py
           tests/unit/test_m2_business_candidate_family.py
           tests/unit/test_m2a_business_candidate_family_verification.py -v
 

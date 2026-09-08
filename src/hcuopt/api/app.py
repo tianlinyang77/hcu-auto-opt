@@ -99,6 +99,10 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.agent_generation_inspection import (
+    AgentGenerationInspection,
+    AgentGenerationInspectionService,
+)
 from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationEvidenceReadService,
     AgentGenerationReadModelError,
@@ -228,6 +232,7 @@ def create_app(
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
+    agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -356,9 +361,12 @@ def create_app(
     async def agent_evidence_handler(
         _request: Request, exc: AgentGenerationReadModelError
     ) -> JSONResponse:
-        unavailable = exc.code == "agent_evidence_root_unavailable"
+        unavailable = exc.code in {
+            "agent_evidence_root_unavailable", "agent_inspection_unconfigured"
+        }
         return JSONResponse(
             status_code=503 if unavailable else 422,
+            headers={"Cache-Control": "no-store"},
             content={
                 "code": exc.code,
                 "message": str(exc),
@@ -661,6 +669,50 @@ def create_app(
         request: Request,
     ) -> AgentGenerationReadModel:
         return agent_evidence_service(request).get(generation_run_id)
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/inspection",
+        response_model=AgentGenerationInspection,
+    )
+    def get_operator_agent_generation_inspection(
+        generation_run_id: UUID, request: Request, response: Response
+    ) -> AgentGenerationInspection:
+        # Authenticate each exact Run before looking at its Store or A state.
+        # The model credential is never a browser/read credential.
+        if agent_inspection_read_authorizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication is not configured",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            authorized = agent_inspection_read_authorizer(request, generation_run_id)
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication failed closed",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        if authorized is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Agent inspection read access was rejected",
+                headers={"Cache-Control": "no-store"},
+            )
+        root = os.getenv("HCUOPT_AGENT_INSPECTION_ROOT")
+        if not root:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unconfigured", "Agent inspection is not configured"
+            )
+        try:
+            service = AgentGenerationInspectionService(repo(request), Path(root))
+            response.headers["Cache-Control"] = "no-store"
+            return service.get(generation_run_id)
+        except (OSError, ValueError) as exc:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unavailable",
+                "Agent inspection could not be independently verified",
+            ) from exc
 
     @application.get(
         "/v1/operator/formal-rounds/{round_id}/evidence-acceptance",
