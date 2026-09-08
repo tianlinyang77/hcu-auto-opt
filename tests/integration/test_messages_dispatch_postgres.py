@@ -717,17 +717,44 @@ def _verify_terminal_handoff(case, status, reviews, promotions, decisions, mode)
         fresh_repository, HashedEvidenceReader(case["root"])
     )
     assert reader.get(run_id) == read_model
-    # Existing control-plane API in-process only: no listener or viewer ACL change.
+    from hcuopt.api.inspection_access import FileRunReadAccess, provision_run_read_access
+    from hcuopt.api.inspection_server import create_inspection_app
+
+    private = case["root"].parent / "test-terminal-access"
+    private.mkdir(mode=0o700)
+    access_file, credential_file = private / "access.json", private / "credential.txt"
+    provision_run_read_access(access_file, credential_file, run_ids=(run_id,))
+    auth = ("operator", credential_file.read_text().splitlines()[1].split(": ", 1)[1])
+    private_app = create_inspection_app(
+        repository=fresh_repository,
+        evidence_root=case["root"],
+        access=FileRunReadAccess(access_file),
+    )
+    # In-process clients only; deployment credentials and grants are unchanged.
     with (
         patch.dict(
             os.environ, HCUOPT_AGENT_EVIDENCE_ROOT=str(case["root"]), HCUOPT_AUTO_MIGRATE="false"
         ),
         TestClient(create_app(repository=fresh_repository)) as client,
+        TestClient(private_app, base_url="https://testserver") as private_client,
     ):
         url = f"/v1/operator/agent-generations/{run_id}/evidence"
         response = client.get(url)
         assert response.status_code == 200, response.text
         assert response.json() == read_model.model_dump(mode="json")
+        assert private_client.get(url).status_code == 401
+        assert private_client.get(url, auth=("operator", "wrong")).status_code == 403
+        assert (
+            private_client.get(
+                f"/v1/operator/agent-generations/{uuid4()}/evidence", auth=auth
+            ).status_code
+            == 403
+        )
+        assert private_client.post(url, auth=auth).status_code == 405
+        private_response = private_client.get(url, auth=auth)
+        assert private_response.status_code == 200, private_response.text
+        assert private_response.headers["cache-control"] == "no-store"
+        assert private_response.json() == response.json()
         if mode != "read":
             reference = {
                 "promotion_receipt": context.promotion_receipts[0],
@@ -745,6 +772,13 @@ def _verify_terminal_handoff(case, status, reviews, promotions, decisions, mode)
             denied = client.get(url)
             assert denied.status_code == 422, denied.text
             assert "proposals" not in denied.json()
+            private_denied = private_client.get(url, auth=auth)
+            assert private_denied.status_code == 422
+            assert private_denied.headers["cache-control"] == "no-store"
+            assert "proposals" not in private_denied.json()
+        # Revocation is checked afresh, including after a successful response.
+        access_file.write_text("{}")
+        assert private_client.get(url, auth=auth).status_code == 503
     assert fresh_repository.generation_run_status(run_id) == terminal_status
     assert len(case["calls"]) == 1  # terminal publication/read never invokes the model
 

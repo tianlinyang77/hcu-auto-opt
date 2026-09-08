@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { AgentProposalWorkspace } from './AgentProposalWorkspace.jsx';
 import { inspectionAuthorization } from './inspection-client.js';
 
-export function InspectionEntry({ generationRunId }) {
+export function InspectionEntry({ generationRunId, terminalMode = false }) {
   const [authorization, setAuthorization] = useState(null);
   const [error, setError] = useState('');
   function login(event) {
@@ -22,14 +22,17 @@ export function InspectionEntry({ generationRunId }) {
     }
   }
   if (authorization) return <AgentProposalWorkspace
-    demoMode={false} inspectionMode generationRunId={generationRunId}
+    demoMode={false} inspectionMode={!terminalMode} terminalMode={terminalMode} generationRunId={generationRunId}
     inspectionAuthorization={authorization} onClose={() => setAuthorization(null)}
   />;
   return <main className="inspection-entry">
     <form className="inspection-login" onSubmit={login} autoComplete="off">
       <span className="read-only-tag">单 Run · 只读访问</span>
-      <h1>查看 Agent 候选证据</h1>
-      <p>使用独立访问凭据登录。页面只读取审核前快照，不启动任务、不调用模型、不执行签核。</p>
+      <h1>{terminalMode ? '查看 Agent 终态报告' : '查看 Agent 候选证据'}</h1>
+      <p>使用独立访问凭据登录。页面只读取{terminalMode ? '已登记的终态报告' : '审核前快照'}，不启动任务、不调用模型、不执行签核。</p>
+      <a href={`/?${terminalMode ? 'agentInspection' : 'agentEvidence'}=${encodeURIComponent(generationRunId)}`}>
+        {terminalMode ? '切换到审核前快照' : '切换到终态报告'}（需重新登录）
+      </a>
       <p className="mono inspection-run">{generationRunId}</p>
       <label htmlFor="inspection-username">用户名</label>
       <input id="inspection-username" name="username" defaultValue="operator" required autoComplete="off" spellCheck={false} />

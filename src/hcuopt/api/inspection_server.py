@@ -20,12 +20,17 @@ from hcuopt.api.inspection_access import (
     provision_run_read_access,
     require_private_transport,
 )
+from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
 from hcuopt.domain.errors import NotFound, SourceArtifactError
 from hcuopt.evaluation.agent_generation_inspection import (
     AgentGenerationInspection,
     AgentGenerationInspectionService,
 )
-from hcuopt.evaluation.agent_generation_read_model import AgentGenerationReadModelError
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    AgentGenerationReadModelError,
+)
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.storage.repository import PostgresRepository
 
 
@@ -52,14 +57,12 @@ def create_inspection_app(*, repository, evidence_root: Path, access: FileRunRea
         # Liveness only: deliberately does not touch DB, credentials or Evidence.
         return {"status": "ok", "scope": "read_only_liveness_not_readiness"}
 
-    @application.get(
-        "/v1/operator/agent-generations/{generation_run_id}/inspection",
-        response_model=AgentGenerationInspection,
-    )
-    def inspection(
+    def authorized_read(
         generation_run_id: UUID,
         request: Request,
-        credentials: HTTPBasicCredentials | None = basic_dependency,
+        credentials: HTTPBasicCredentials | None,
+        *,
+        terminal: bool,
     ):
         try:
             require_private_transport(request)
@@ -78,6 +81,10 @@ def create_inspection_app(*, repository, evidence_root: Path, access: FileRunRea
         if allowed is not True:
             raise HTTPException(403, "Inspection read access rejected")
         try:
+            if terminal:
+                return AgentGenerationEvidenceReadService(
+                    repository, HashedEvidenceReader(evidence_root)
+                ).get(generation_run_id)
             return AgentGenerationInspectionService(repository, evidence_root).get(
                 generation_run_id
             )
@@ -91,6 +98,29 @@ def create_inspection_app(*, repository, evidence_root: Path, access: FileRunRea
                 status_code=503,
                 content={"code": "inspection_unavailable", "message": "Evidence not available"},
             )
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/inspection",
+        response_model=AgentGenerationInspection,
+    )
+    def inspection(
+        generation_run_id: UUID,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = basic_dependency,
+    ):
+        return authorized_read(generation_run_id, request, credentials, terminal=False)
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/evidence",
+        response_model=AgentGenerationReadModel,
+    )
+    def terminal_evidence(
+        generation_run_id: UUID,
+        request: Request,
+        credentials: HTTPBasicCredentials | None = basic_dependency,
+    ):
+        # Same exact Run ACL, fresh native D validation, no writes or fallback.
+        return authorized_read(generation_run_id, request, credentials, terminal=True)
 
     return application
 

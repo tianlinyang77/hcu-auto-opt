@@ -10,7 +10,9 @@ export function inspectionAuthorization(username, password) {
 export async function readInspection(runId, authorization, {
   origin = window.location.origin,
   fetchImpl = fetch,
+  kind = 'inspection',
 } = {}) {
+  if (!['inspection', 'evidence'].includes(kind)) throw new Error('不支持的只读证据类型。');
   const destination = new URL(origin);
   if (destination.protocol !== 'https:' && !(destination.protocol === 'http:'
     && ['127.0.0.1', 'localhost', '[::1]'].includes(destination.hostname))) {
@@ -20,7 +22,7 @@ export async function readInspection(runId, authorization, {
     throw new Error('缺少有效 Run ID 或访问凭据。');
   }
   // Deliberately ignore VITE_HCUOPT_API_BASE: never send this credential cross-origin.
-  const response = await fetchImpl(`${destination.origin}/v1/operator/agent-generations/${runId}/inspection`, {
+  const response = await fetchImpl(`${destination.origin}/v1/operator/agent-generations/${runId}/${kind}`, {
     headers: { Accept: 'application/json', Authorization: authorization },
     credentials: 'omit', cache: 'no-store', redirect: 'error',
     signal: AbortSignal.timeout(30000),
@@ -30,4 +32,8 @@ export async function readInspection(runId, authorization, {
     throw new Error(`只读证据暂不可用（HTTP ${response.status}），不会回退到演示数据。`);
   }
   return response.json();
+}
+
+export function readTerminalEvidence(runId, authorization, options = {}) {
+  return readInspection(runId, authorization, { ...options, kind: 'evidence' });
 }

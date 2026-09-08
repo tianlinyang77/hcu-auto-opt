@@ -300,6 +300,30 @@ Windows 相关单测：**22 passed、4 POSIX-only skipped，5.41 秒**。
 授权或数据库权限。因此这不是终态报告的浏览器部署验收；下一个部署切片需把终态
 只读接口接入同样的精确 Run 鉴权和 no-store 保护，不能直接暴露完整控制面。
 
+## 受保护的终态查看入口（2026-09-08）
+
+新增专用只读 `/evidence` 和 `?agentEvidence=<Run UUID>` 页面入口，复用现有 Run ACL
+及原生 D 终态 Reader；前端、本机代理和后端不回退 demo，也不挂载控制面写接口。
+这是上一节进程内终态联验后的产品接线，不代表真实 Run 已审核或已产生性能结果。
+
+- Linux Python 3.10.12：只读服务与 Messages/PostgreSQL 整链 **39 passed，零跳过，31.90 秒**。
+- 同批真实生成制品的终态结果经过专用鉴权 API 返回 200；未登录 401、跨 Run/错误凭据 403、
+  写请求 405、证据损坏 422、配置撤销 503，响应保持 no-store。
+- Windows 只读服务测试 **15 passed、2 POSIX-only skipped**；前端 **33 passed**，
+  lint/build 与 **4 项 Sites 包装测试**通过。没有新增依赖或修改已确认字体。
+- 沿用已批准的 CPU 容器范围，无 HCU、无真实模型 Key、源码只读、每例隔离 PostgreSQL schema。
+
+运行源码为 `51dcbb2d60ee4c1251390a3af63c85cc5a8bda8b` 加未提交差异归档
+`results/terminal-viewer-overlay.tar`，SHA256：
+`f342f0ad195b4d45c89b7b4835e9701702d0763d981720c313f4e168d82831e4`。
+原始日志 `results/terminal-viewer-acceptance.log` SHA256：
+`22ac0be5ede525c92556a093546ddc780cc860eb01b97a8013116bb08efc179b`。
+归档/日志不进 Git；归档不包含后补文档。未创建真实人工批准或生产终态 Publication。
+
+部署须按[只读部署说明](agent-inspection-deployment.md)同步后端、本机代理和前端，
+确认只读账户及证据根可访问终态 Publication。本轮测试不自动修改部署凭据或数据库权限；
+实际升级结果另记，不能把此处 TestClient 通过描述为浏览器真实终态报告验收。
+
 ## 手动源文件级试跑
 
 在独立的 Python 3.10 环境安装项目依赖，从仓库根目录运行。事先在进程环境设置

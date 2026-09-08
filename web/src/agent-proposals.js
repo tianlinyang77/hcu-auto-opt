@@ -92,3 +92,16 @@ export function inspectionReadModel(inspection, expectedRunId) {
   }
   return model
 }
+
+export function terminalEvidenceReadModel(model, expectedRunId) {
+  if (model?.schema_version !== 'm2b-agent-generation-read-model-v1'
+    || model.generation_run_id !== expectedRunId
+    || model.formal_intake_allowed !== false
+    || model.automatic_release_allowed !== false
+    || model.formal_readiness !== 'hold'
+    || model.performance_conclusion !== 'not_measured'
+    || !Array.isArray(model.attempts) || !Array.isArray(model.proposals)) {
+    throw new Error('invalid_agent_evidence: 终态报告的身份或权限边界不匹配')
+  }
+  return model
+}

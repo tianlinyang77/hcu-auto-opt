@@ -84,5 +84,16 @@ healthz 与 inspection GET，不挂载控制面，也不执行迁移。配置通
 
 ## 回滚方式
 
+### 终态只读入口补充（2026-09-08）
+
+专用 app 扩展为 healthz、inspection、evidence 三个 GET 路由；两种证据共用逐请求的
+精确 Run 鉴权、private transport、no-store 与安全错误处理。终态路由只消费既有 D
+`AgentGenerationEvidenceReadService`，不挂载控制面、不迁移、不创建 Review/Publication。
+既有完整控制面的 `/evidence` 不在本次全站鉴权改造范围，禁止用它替代专用查看服务。
+
+前端 `agentEvidence` 与 `agentInspection` 分开，终态入口使用显式内存凭据且只向同源
+精确路由发送。两个入口不自动回退、不共享页面持久凭据；终态数据核对既有 Contract
+版本、Run 和权限边界。新增读取能力不改变原 Review/Promotion、Formal 或发布语义。
+
 停用新 CLI Worker、取消 inspection root 配置并移除页面直达入口即可停用此接线。
 在途 Attempt 仍按 A 的原 reconcile/结算规则处理，不删除证据或账本，不触碰 HCU/系统库。

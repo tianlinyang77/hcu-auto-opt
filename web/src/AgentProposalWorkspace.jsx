@@ -24,7 +24,8 @@ import {
 } from "@phosphor-icons/react";
 
 import { loadOperatorAgentInspection, loadOperatorAgentProposals } from "./api.js";
-import { agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay } from "./agent-proposals.js";
+import { agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay, terminalEvidenceReadModel } from "./agent-proposals.js";
+import { readTerminalEvidence } from "./inspection-client.js";
 import { loadDemoAgentProposals } from "./demo-data.js";
 
 function shortValue(value, length = 12) {
@@ -315,7 +316,7 @@ function ErrorState({ error, onRetry }) {
   return <section className="agent-workspace-empty danger"><WarningCircle size={42} /><span>Operator API error</span><h2>Agent/Apex 证据暂不可用</h2><p>{error}</p><button className="primary-button" type="button" onClick={onRetry}><ArrowClockwise size={18} />重新读取</button></section>;
 }
 
-export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false, inspectionAuthorization }) {
+export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false, terminalMode = false, inspectionAuthorization }) {
   const [loadedWorkspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -332,7 +333,9 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
 
     async function readWorkspace() {
       try {
-        const value = inspectionMode
+        const value = terminalMode
+          ? terminalEvidenceReadModel(await readTerminalEvidence(generationRunId, inspectionAuthorization), generationRunId)
+          : inspectionMode
           ? inspectionReadModel(await loadOperatorAgentInspection(generationRunId, inspectionAuthorization), generationRunId)
           : demoMode
           ? await loadDemoAgentProposals()
@@ -356,7 +359,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
 
     void readWorkspace();
     return () => { cancelled = true; };
-  }, [demoMode, generationRunId, reloadNonce, inspectionMode, inspectionAuthorization]);
+  }, [demoMode, generationRunId, reloadNonce, inspectionMode, terminalMode, inspectionAuthorization]);
 
   const retry = () => {
     setLoading(true);
@@ -380,7 +383,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
             <div><span>UI-5 · READ-ONLY AGENT / APEX EVIDENCE</span><h1 id="agent-workspace-title">Agent Proposal → Review → Business Package</h1></div>
           </div>
           <div className="plan-workspace-meta">
-            <span className="synthetic-badge">Proposal-only</span>
+            <span className="synthetic-badge">{terminalMode ? '终态报告 · 非性能结论' : 'Proposal-only'}</span>
             <span className="read-only-tag"><Eye size={15} />只读</span>
             <button className="icon-button" type="button" aria-label="关闭 Agent/Apex 证据" title="关闭 Agent/Apex 证据" onClick={onClose}><X size={20} /></button>
           </div>
@@ -397,6 +400,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
           {loading ? <LoadingState /> : error ? <ErrorState error={error} onRetry={retry} /> : workspace && (
             <div className="agent-workspace-content">
               {inspectionMode && <section className="agent-locked-note"><LockKey size={18} />审核前只读检查，不是人工签核或终态发布。沿用 D v1 开发证据分类；真实 Runner 不等于真实模型质量或性能已验证。</section>}
+              {terminalMode && <section className="agent-locked-note"><LockKey size={18} />终态报告已由 D 重新验证。审核或制品晋级记录不代表 HCU 性能验收、正式签核或发布授权。</section>}
               <PlanCard workspace={workspace} summary={summary} />
               <AttemptsCard attempts={workspace.attempts || []} />
               {!!summary.failureCodes.length && <section className="agent-locked-note" role="status">未通过项：{summary.failureCodes.join("、")}</section>}

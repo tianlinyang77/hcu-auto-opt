@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentProposalSummary, agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay } from '../src/agent-proposals.js'
+import { agentProposalSummary, agentWorkspacePresentation, inspectionReadModel, pendingReviewDisplay, terminalEvidenceReadModel } from '../src/agent-proposals.js'
+import { readFileSync } from 'node:fs'
 
 test('unavailable evidence never displays zero attempts or zero budget', () => {
   for (const model of [null, undefined, {}]) {
@@ -11,6 +12,18 @@ test('unavailable evidence never displays zero attempts or zero budget', () => {
     assert.equal(metrics.budgetPercent, '—')
     assert.match(metrics.budgetAttempts, /未知/)
   }
+})
+
+test('terminal report checks the real contract, Run binding and locked permissions', () => {
+  const model = JSON.parse(readFileSync(new URL('../public/fixtures/demo-agent-proposals.json', import.meta.url)))
+  const runId = model.generation_run_id
+  assert.equal(terminalEvidenceReadModel(model, runId), model)
+  for (const changes of [{schema_version: 'm2b-agent-inspection-v1'}, {generation_run_id: 'other'},
+    {formal_intake_allowed: true}, {automatic_release_allowed: true}, {formal_readiness: 'ready'},
+    {performance_conclusion: 'faster'}, {attempts: null}, {proposals: null}]) {
+    assert.throws(() => terminalEvidenceReadModel({...model, ...changes}, runId))
+  }
+  assert.throws(() => terminalEvidenceReadModel({read_model: model}, runId))
 })
 
 test('loading and denied refresh hide the old evidence and export snapshot', () => {

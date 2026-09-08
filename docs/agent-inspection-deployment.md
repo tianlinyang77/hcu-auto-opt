@@ -10,8 +10,9 @@
 
 - `GET /healthz`：进程存活，不查询数据库或文件；**不是环境已就绪**。
 - `GET /v1/operator/agent-generations/{run-id}/inspection`：登录后读取该 Run 的 D 复核结果。
+- `GET /v1/operator/agent-generations/{run-id}/evidence`：相同 Run ACL 下，独立重读已登记的 D 终态报告。
 
-没有创建任务、调度、模型执行、签核、迁移、静态文件目录、Swagger 或旧证据入口。即使进程
+没有创建任务、调度、模型执行、签核、迁移、静态文件目录或 Swagger。即使进程
 设置 `HCUOPT_AUTO_MIGRATE=true`，本服务也不迁移。环境工厂对数据库连接设置只读事务；部署
 仍须使用专门的只读数据库账户，不能把这个选项当作数据库角色权限的替代。
 
@@ -50,7 +51,7 @@ Proposal/Receipt。修改配置必须继续维持 0600。已交付给读者的�
 | 环境变量 | 用途 |
 | --- | --- |
 | `HCUOPT_INSPECTION_DATABASE_URL` | 专用只读 DB 账户的连接配置 |
-| `HCUOPT_AGENT_INSPECTION_ROOT` | 原 Worker Store/审核前快照的受保护只读根目录 |
+| `HCUOPT_AGENT_INSPECTION_ROOT` | 原 Worker Store、审核前快照及终态报告引用的受保护只读根目录 |
 | `HCUOPT_INSPECTION_ACCESS_FILE` | 本用户私有的 access.json 绝对路径 |
 
 **不要设置 `HCUOPT_MODEL_API_KEY`**；环境工厂发现该值会拒绝启动，模型密钥属于另一个 Worker。
@@ -86,11 +87,13 @@ npm run inspection:serve -- --port 4191 --api-port 8091
 ```
 
 打开 `http://127.0.0.1:4191/?agentInspection=<获准的Run UUID>` 并登录。
+终态报告使用 `http://127.0.0.1:4191/?agentEvidence=<获准的Run UUID>`；两个入口在登录页
+提供明确切换链接，切换需重新登录，不把凭据放进 URL。不能同时指定两个入口。
 无需复制 `results/` 下的临时脚本；该命令固定监听 127.0.0.1，并只连接本机 API 端口。
 静态页面仅来自可信的 `dist/client` 构建产物，不能将 Evidence/私有凭据放入该目录，运行
 期间不要由不可信主体更改构建文件。该工具是本地预览代理，不是生产网关或云端部署入口。
 
-只代理 GET inspection，拒绝其他 API、写操作、跨源/跨站请求、非预期 Host、路径越界、
+只代理精确 GET inspection/evidence，拒绝其他 API、写操作、跨源/跨站请求、非预期 Host、路径越界、
 上游跳转和非 JSON 响应；不转发 Cookie、任意代理头或模型 Key。响应统一 no-store，单次
 上游读取最多 30 秒、8 MiB，不自动重试。端口占用会报错退出，不终止已有服务。
 
@@ -106,6 +109,15 @@ npm run inspection:serve -- --port 4191 --api-port 8091
 按 Ctrl+C 只停止本机代理，后端、SSH 隧道、证据和凭据不受影响。
 
 ### 登录与数据边界
+
+终态入口复用 `AgentGenerationEvidenceReadService`，不是绕过权限调用完整控制面。
+每次读取先核对 Run ACL，再核对实时 A 状态、Publication 与全部 D 引用。缺少终态报告、
+状态/内容漂移或权限失效时拒绝读取，不回退到 inspection 或演示数据。`approved/promoted`
+只描述已有审核/制品记录，不等于性能验收、Formal Signoff 或发布授权。
+
+升级需同时更新专用后端、前端构建和本机代理进程。部署方须确认既有只读账户可读取
+`agent_generation_evidence_read_models` 及其依赖的 A 记录，且报告所有 URI 位于已批准只读根内；
+程序不自动增加数据库 GRANT、扩展证据目录或续期凭据。旧后端返回 404 不代表候选失败。
 
 加载中、鉴权拒绝或读取失败时，统计显示“— / 用量未知”，不能把未取得证据解释为零次
 尝试、零提案或零消耗。重新读取期间不展示或导出旧快照；只有本次读取成功才恢复证据

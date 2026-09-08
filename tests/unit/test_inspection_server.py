@@ -18,8 +18,8 @@ RUN = UUID(int=100)
 PATH = f"/v1/operator/agent-generations/{RUN}/inspection"
 
 
-@pytest.fixture
-def client_case(tmp_path, monkeypatch):
+@pytest.fixture(params=["inspection", "evidence"])
+def client_case(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HCUOPT_AUTO_MIGRATE", "true")
     repository = Mock()
     access = Mock()
@@ -29,15 +29,21 @@ def client_case(tmp_path, monkeypatch):
         "AgentGenerationInspectionService",
         service,
     )
+    monkeypatch.setattr(
+        importlib.import_module("hcuopt.api.inspection_server"),
+        "AgentGenerationEvidenceReadService",
+        service,
+    )
     app = create_inspection_app(repository=repository, evidence_root=tmp_path, access=access)
-    return app, repository, access, service
+    return app, repository, access, service, PATH.replace("/inspection", "/" + request.param)
 
 
-def test_read_only_app_registers_only_two_get_routes_and_never_migrates(client_case):
-    app, repository, access, service = client_case
+def test_read_only_app_registers_only_three_get_routes_and_never_migrates(client_case):
+    app, repository, access, service, route_path = client_case
     assert {(route.path, tuple(route.methods)) for route in app.routes} == {
         ("/healthz", ("GET",)),
         ("/v1/operator/agent-generations/{generation_run_id}/inspection", ("GET",)),
+        ("/v1/operator/agent-generations/{generation_run_id}/evidence", ("GET",)),
     }
     with TestClient(app, base_url="https://viewer.invalid") as client:
         assert client.get("/healthz").json()["scope"] == "read_only_liveness_not_readiness"
@@ -45,8 +51,8 @@ def test_read_only_app_registers_only_two_get_routes_and_never_migrates(client_c
             assert client.get(path).status_code == 404
             assert client.post(path, json={}).status_code == 404
         for method in ("POST", "PUT", "PATCH", "DELETE"):
-            assert client.request(method, PATH).status_code == 405
-        response = client.get(PATH)
+            assert client.request(method, route_path).status_code == 405
+        response = client.get(route_path)
         assert response.status_code == 401
         assert response.headers["www-authenticate"].startswith("Basic ")
         assert response.headers["cache-control"] == "no-store"
@@ -59,12 +65,12 @@ def test_read_only_app_registers_only_two_get_routes_and_never_migrates(client_c
     "decision,code", [(False, 403), (1, 403), (RuntimeError("secret-error"), 503)]
 )
 def test_auth_failure_never_reads_evidence(client_case, decision, code):
-    app, repository, access, service = client_case
+    app, repository, access, service, route_path = client_case
     access.authorize.return_value = decision
     if isinstance(decision, Exception):
         access.authorize.side_effect = decision
     with TestClient(app, base_url="https://viewer.invalid") as client:
-        response = client.get(PATH, auth=("operator", "test-not-a-real-password"))
+        response = client.get(route_path, auth=("operator", "test-not-a-real-password"))
     assert response.status_code == code
     assert response.headers["cache-control"] == "no-store"
     assert "secret-error" not in response.text
@@ -74,9 +80,9 @@ def test_auth_failure_never_reads_evidence(client_case, decision, code):
 
 
 def test_plaintext_remote_and_spoofed_forwarded_headers_are_rejected(client_case):
-    app, repository, access, service = client_case
+    app, repository, access, service, route_path = client_case
     with TestClient(app, base_url="http://viewer.invalid") as client:
-        response = client.get(PATH, headers={"x-forwarded-proto": "https"})
+        response = client.get(route_path, headers={"x-forwarded-proto": "https"})
     assert response.status_code == 403
     assert "www-authenticate" not in response.headers
     assert not access.mock_calls

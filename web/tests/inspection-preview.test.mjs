@@ -108,6 +108,32 @@ test('viewer forwards exact read plus explicit auth only and retains denial/no-s
   assert.equal(calls.at(-1).headers.authorization, undefined);
 });
 
+test('terminal route is read-only, same-origin, bounded to exact path and does not forward cookies', async t => {
+  const terminalPath = apiPath.replace('/inspection', '/evidence');
+  let status = 200;
+  const {viewer, calls} = await fixture(t, (req, res) => {
+    res.writeHead(status, {'Content-Type': 'application/json'});
+    res.end('{"fixture":true}');
+  });
+  for (status of [200, 401, 403, 404, 422, 503]) {
+    const response = await request(viewer, terminalPath, {headers: {
+      Authorization: 'Basic fixture-only', Cookie: 'must-not-forward=1',
+    }});
+    assert.equal(response.status, status);
+    assert.equal(response.headers['cache-control'], 'no-store');
+    assert.equal(calls.at(-1).path, terminalPath);
+    assert.equal(calls.at(-1).headers.authorization, 'Basic fixture-only');
+    assert.equal(calls.at(-1).headers.cookie, undefined);
+  }
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']) {
+    assert.equal((await request(viewer, terminalPath, {method})).status, 405);
+  }
+  assert.equal((await request(viewer, terminalPath, {headers: {Origin: 'https://other.invalid'}})).status, 403);
+  assert.equal((await request(viewer, terminalPath + '?run=other')).status, 400);
+  assert.equal((await request(viewer, terminalPath + '/raw')).status, 404);
+  assert.equal(calls.length, 6);
+});
+
 test('viewer rejects redirects and HTML without following a credential-bearing hop', async t => {
   let redirect = true;
   const { viewer, calls } = await fixture(t, (req, res) => {

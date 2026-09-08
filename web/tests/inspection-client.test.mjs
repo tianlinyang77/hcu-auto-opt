@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { inspectionAuthorization, readInspection } from '../src/inspection-client.js';
+import { inspectionAuthorization, readInspection, readTerminalEvidence } from '../src/inspection-client.js';
 
 const runId = '091705f9-e1bb-55f4-b07c-de3d58cb173c';
 const authorization = inspectionAuthorization('operator', 'a'.repeat(43));
@@ -37,4 +37,28 @@ test('denial and expiry never return a fallback snapshot', async () => {
       origin:'https://inspection.example', fetchImpl:async () => ({ok:false,status}),
     }));
   }
+});
+
+test('terminal evidence uses the same safe transport and never falls back to inspection', async () => {
+  for (const status of [200, 401, 403, 404, 422, 503]) {
+    const calls = [];
+    const read = readTerminalEvidence(runId, authorization, {
+      origin: 'http://127.0.0.1:4191',
+      fetchImpl: async (url, options) => {
+        calls.push(url);
+        assert.equal(options.headers.Authorization, authorization);
+        assert.equal(options.credentials, 'omit');
+        assert.equal(options.redirect, 'error');
+        assert.equal(options.cache, 'no-store');
+        return {ok: status === 200, status, json: async () => ({fixture: true})};
+      },
+    });
+    if (status === 200) assert.deepEqual(await read, {fixture: true});
+    else await assert.rejects(read);
+    assert.deepEqual(calls, [`http://127.0.0.1:4191/v1/operator/agent-generations/${runId}/evidence`]);
+  }
+  await assert.rejects(readInspection(runId, authorization, {
+    kind: '../tasks', fetchImpl: () => assert.fail('unexpected request'),
+    origin: 'https://viewer.invalid',
+  }));
 });

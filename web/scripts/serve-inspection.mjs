@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const defaultRoot = fileURLToPath(new URL('../dist/client/', import.meta.url));
-const inspectionPath = /^\/v1\/operator\/agent-generations\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/inspection$/i;
+const inspectionPath = /^\/v1\/operator\/agent-generations\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/(?:inspection|evidence)$/i;
 const assetPath = /^\/assets\/[a-zA-Z0-9][a-zA-Z0-9_.-]*\.(?:js|css|woff2|svg|png|ico)$/;
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2', '.svg': 'image/svg+xml',
