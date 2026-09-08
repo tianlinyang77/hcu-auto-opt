@@ -42,6 +42,31 @@ Receipt 只证明执行、预算结算与清理事实，固定
 
 ## 后果
 
+### 2026-09-08：M1 生产端的隔离身份交接（#126）
+
+Formal 结果校验要求三组身份摘要，原 M1 Harness 的 `MeasurementSeries.summary` 未输出，
+导致现有唯一 Harness 无法通过该结果边界。本切片补生产端输出，不放宽 Formal 的必填检查。
+
+`m1_isolation_hashes()` 从 M1 原始 acquisitions 投影三组集合，排序、去重后，以既有
+`canonical_json_bytes` 编码 `{schema_version: "m1-isolation-set-v1", kind: <字段名>,
+members: <集合>}`，计算 SHA256：
+
+- `baseline_sample_set_hash`：仅 baseline arm 的原始 device Event record SHA256 集合；
+- `process_identity_set_hash`：全部 acquisition 的 `(process_id, process_start_token)` 集合；
+- `cache_namespace_set_hash`：全部 acquisition 的 activation cache namespace Hash 集合。
+
+摘要不加入 Round、Candidate、phase、文件路径或 report ID 盐值；同一批采样换标签后仍得到
+相同身份。字段由 Harness 从已构造的原始证据生成，忽略调用者提供的同名字段。原 M1
+performance.json 格式不变；旧证据不回填或重写，没有迁移、裁决或 Real Profile 注册。
+
+新增组合测试使用真实 `M1TrustedMeasurementHarness` 与 CPU 计时/清理夹具，再调用现有
+Formal 结果校验和 `RoundMeasurementRef` 构造。它只验收结果交接，不调用 Formal `run()`，
+不证明完整 A/B 授权、租约、预算、Search/Holdout 或 HCU 已联通。
+
+保留的后续工作：部署层冻结输入与 M1 `_job_context` 接线、当期 Target Lock/Lease/fencing、
+完整生命周期联验，以及 D 独立重读原始 acquisition/Event 并复算摘要。整组 Hash 只能识别
+整组复用，不等于逐成员的部分重叠检测；不能据此宣布 #126 或正式隔离验收完成。
+
 - 无 HCU 测试可以覆盖缺 Lease、窗口过期、Fence 错误、预算不足、timeout、清理失败和改绑拒绝。
 - Formal Adapter 依赖 A1/A2a Authority Reader、owner signature verifier、现有 Harness、durable
   isolation authority、预算权威、Lease/Fence/Target Lock 活性检查与恢复回调。

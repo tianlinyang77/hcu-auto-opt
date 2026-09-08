@@ -48,6 +48,7 @@ jobs:
           tests/unit/test_stage0_verifier.py tests/unit/test_m1_measurement.py
           tests/unit/test_m1_d_verifier.py tests/unit/test_m2a_formal_readiness.py
           tests/unit/test_m2_formal_execution.py
+          tests/unit/test_m1_formal_result_bridge.py
           tests/unit/test_formal_execution_profile_registry.py
           tests/unit/test_formal_evidence_acceptance_report_api.py
           tests/unit/test_formal_evaluation_registry.py

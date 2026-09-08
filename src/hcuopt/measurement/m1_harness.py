@@ -25,6 +25,7 @@ from hcuopt.measurement.harness import (
     ProcessLifecycleRecorder,
     TelemetryCollector,
 )
+from hcuopt.measurement.m1_identities import m1_isolation_hashes
 from hcuopt.measurement.m1_models import (
     M1AcquisitionEvidence,
     M1ActivationEvidence,
@@ -308,6 +309,7 @@ class M1TrustedMeasurementHarness:
             raw_samples_hash=artifact_file.sha256,
             environment_fingerprint=binding.environment_fingerprint,
             summary={
+                **m1_isolation_hashes(evidence),
                 "plan_hash": evidence.plan_hash,
                 "stage0_report_hash": authority.report.sha256,
                 "stage0_input_digest": authority.report.input_digest,
