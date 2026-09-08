@@ -68,6 +68,45 @@ python -m hcuopt.api.inspection_server serve --port 8091
 
 ## 浏览器怎样看
 
+### 仓库自带的本机入口
+
+前提：部署管理员已配置专用只读后端、有效 Run 凭据，以及指向后端的本机 SSH 隧道。
+前端命令不自动连接主机、不创建/续期凭据、不操作数据库或 HCU。Node.js 使用项目 CI 的
+22 或兼容版本。在 `web/` 下执行一次安装和构建：
+
+```text
+npm ci
+npm run build
+```
+
+之后每次启动只需：
+
+```text
+npm run inspection:serve -- --port 4191 --api-port 8091
+```
+
+打开 `http://127.0.0.1:4191/?agentInspection=<获准的Run UUID>` 并登录。
+无需复制 `results/` 下的临时脚本；该命令固定监听 127.0.0.1，并只连接本机 API 端口。
+静态页面仅来自可信的 `dist/client` 构建产物，不能将 Evidence/私有凭据放入该目录，运行
+期间不要由不可信主体更改构建文件。该工具是本地预览代理，不是生产网关或云端部署入口。
+
+只代理 GET inspection，拒绝其他 API、写操作、跨源/跨站请求、非预期 Host、路径越界、
+上游跳转和非 JSON 响应；不转发 Cookie、任意代理头或模型 Key。响应统一 no-store，单次
+上游读取最多 30 秒、8 MiB，不自动重试。端口占用会报错退出，不终止已有服务。
+
+| 故障 | 下一步 |
+| --- | --- |
+| 缺少构建产物 | 在 web 下执行 `npm run build` |
+| Viewer port already in use | 核对现有进程，或显式选另一个本机端口 |
+| 503 inspection_upstream_unavailable | 核对后端和获准 SSH 隧道，不自动重启它们 |
+| 504 inspection_upstream_timeout | 排查后端读取/文件验证耗时，不以刷新页面扩大执行预算 |
+| 401/403 | 重新登录或向管理员申请该 Run 的有效凭据，不自动续期 |
+| 422 | 检查证据/身份/状态漂移，不修改 Hash 绕过验证 |
+
+按 Ctrl+C 只停止本机代理，后端、SSH 隧道、证据和凭据不受影响。
+
+### 登录与数据边界
+
 独立服务采用 HTTP Basic。前端访问 `/?agentInspection=<run-id>` 时先显示显式登录表单，
 输入 `operator` 和私有文件中的密码；未提交表单不读取 inspection，避免内置浏览器的原生
 认证提示不可见而一直等待。密码只作为当前页面内存中的 Authorization 使用，提交后清空

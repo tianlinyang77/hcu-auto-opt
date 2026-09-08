@@ -161,8 +161,9 @@ Windows 不做兼容性降级。API 部署设置 `HCUOPT_AGENT_INSPECTION_ROOT=<
 它不执行模型、补丁、HCU、Review、Promotion 或终态 publication。快照不可覆盖；
 发生后续人工 Review 后，应转入已有终态证据流程，不复用审核前快照冒充新状态。
 
-前端访问 `/?agentInspection=<run-id>`，使用部署配置的 `VITE_HCUOPT_API_BASE`。
-开发代理/同源反向代理须指向获准的 Linux API；仅启动 Vite 并不自动部署后端。
+前端访问 `/?agentInspection=<run-id>`，显式登录后只向当前源的 inspection 路径发送凭据，
+不使用 `VITE_HCUOPT_API_BASE`，避免凭据跨源。已构建前端可用 `npm run inspection:serve`
+启动本机专用代理；后端和获准 SSH 隧道仍须事先配置，代理不创建数据库账号或延长授权。
 这个入口不依赖 Round 列表，不回退 `?demo=1`。读取失败、零有效提案、生成失败都会
 保留可解释的状态；HTTP/进程成功但 Batch 被拒绝时，不显示成“生成成功”。
 
