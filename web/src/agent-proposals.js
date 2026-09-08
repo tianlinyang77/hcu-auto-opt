@@ -1,3 +1,13 @@
+export function pendingReviewDisplay(lifecycle) {
+  if (lifecycle?.review_status === 'pending') {
+    return { title: '待人工审核', description: '尚无人工审核记录；此页面只读，不执行审核或晋级。' }
+  }
+  if (lifecycle?.review_status === 'not_applicable') {
+    return { title: '不适用', description: '该提案未被保留，不能进入审核。' }
+  }
+  return { title: '审核证据未确认', description: '缺少可展示的审核记录，不能推定已审核或不适用。' }
+}
+
 export function agentProposalSummary(readModel) {
   const proposals = Array.isArray(readModel?.proposals) ? readModel.proposals : []
   const attempts = Array.isArray(readModel?.attempts) ? readModel.attempts : []

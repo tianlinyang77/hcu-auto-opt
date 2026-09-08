@@ -68,17 +68,41 @@ python -m hcuopt.api.inspection_server serve --port 8091
 
 ## 浏览器怎样看
 
-独立服务采用 HTTP Basic 登录，由浏览器的原生登录提示输入 `operator` 和私有文件中的密码。
-不把密码放在 URL、JavaScript、localStorage、截图或聊天中。Basic 编码**不是加密**，只能
-在上述 HTTPS 或本机/SSH 通道中使用；浏览器可能缓存密码，但服务器不会缓存权限判定。
+独立服务采用 HTTP Basic。前端访问 `/?agentInspection=<run-id>` 时先显示显式登录表单，
+输入 `operator` 和私有文件中的密码；未提交表单不读取 inspection，避免内置浏览器的原生
+认证提示不可见而一直等待。密码只作为当前页面内存中的 Authorization 使用，提交后清空
+密码输入框；不写入源码、URL、localStorage、sessionStorage、截图或聊天。关闭证据页即
+退出当前页面登录，刷新需重新输入；这不是服务端撤权，也不能追回已下载的证据。
 
-前端静态文件与 API 通过同一个受控源提供。先访问该源下的具体 inspection URL 完成登录，
-再访问 `/?agentInspection=<run-id>`；沿用原页面，不启用 demo 回退。前端无需获得模型 Key。
-代理仅转发这一条只读 API，不把整个 `/v1/` 指向完整控制面。当前仓库未自动安装/启用代理，
-也未验收真实浏览器的登录提示行为，部署时需实测，不能用 TestClient 的 HTTPS 字符串替代
-真实 TLS 或浏览器联验。
+Basic 编码**不是加密**，只能在上述 HTTPS 或本机/SSH 通道中使用。前端静态文件与 API 必须
+通过同一个受控源提供；inspection 请求不使用 `VITE_HCUOPT_API_BASE`，只发往当前源的确切
+只读路径，禁止跟随重定向、不附带 cookies、不缓存，并设置 30 秒超时。服务端仍逐次检查
+密码、Run ACL 和有效期，前端的登录状态不能放宽服务端权限。前端无需获得模型 Key。
+
+代理仅转发这一条只读 API，不把整个 `/v1/` 指向完整控制面。登录失败、到期和证据不可用
+均不启用 demo 回退。部署时需要实际验证登录与成功后的证据内容，不能用 TestClient 的
+HTTPS 字符串替代真实 TLS 或浏览器联验。
 
 ## 验收清单
+
+### 2026-09-08 开发验收记录
+
+已在获准 CPU 环境部署专用只读 API，经 SSH 隧道和同源静态页面接入既有 PostgreSQL。
+使用独立 schema 与 SELECT 角色，真实本地 Runner 执行模拟模型夹具，生成 1 个待审核提案；
+不是实际优化案例，也不产生 HCU 性能结论。
+
+- HTTP 九项检查通过：存活、缺少/错误/有效凭据、跨 Run、非本机 Host、写请求、控制面路径、
+  OpenAPI 路径；所有响应均 no-store。专用 DB 角色的 UPDATE 被拒绝。
+- 初次一小时凭据到期后实际返回 403；获得新的限时授权并轮换后，旧密码 403、新密码 200。
+- 实际浏览器已观察成功登录后的 Attempt、保留 Proposal、Patch、Receipt、清理与 HOLD。
+- 页面发现 pending review 被误显示为 not_applicable；修复只按 D 的 review_status 显示
+  待审核/不适用/证据未确认，不改变后台状态。修复后单测和构建通过，未冒称已再次完成浏览器登录。
+- 当前前端 20 项 unit + 4 项 Sites tests、lint/build 通过；CI 结果须绑定对应提交单独记录。
+
+这里只确认受控只读展示链路，不代表生产部署、安全认证、跨模块接受、真实模型质量或 Formal
+验收。原始凭据、模型回复和现场部署目录不进 Git。后续仍需 CODEOWNER/接口上下游审核。
+
+### 后续部署检查
 
 - 无登录：401；错误凭据/跨 Run/过期：403；配置缺失、权限错误或损坏：503。
 - 有效凭据 + 当前证据：200；证据 Hash/状态漂移：422；数据库或底层读失败：503。

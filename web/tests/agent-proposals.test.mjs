@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { agentProposalSummary, inspectionReadModel } from '../src/agent-proposals.js'
+import { agentProposalSummary, inspectionReadModel, pendingReviewDisplay } from '../src/agent-proposals.js'
+
+test('retained proposal pending review is not rendered as eliminated', () => {
+  const display = pendingReviewDisplay({ review_status: 'pending', review: null })
+  assert.equal(display.title, '待人工审核')
+  assert.doesNotMatch(display.description, /未被保留/)
+  assert.match(display.description, /只读/)
+})
+
+test('only explicit not_applicable displays non-applicable review', () => {
+  assert.equal(pendingReviewDisplay({ review_status: 'not_applicable' }).title, '不适用')
+  for (const status of ['approved', 'rejected', 'unexpected', undefined]) {
+    assert.equal(pendingReviewDisplay({ review_status: status }).title, '审核证据未确认')
+  }
+  assert.equal(pendingReviewDisplay(null).title, '审核证据未确认')
+})
 
 test('proposal read model copies D verdicts and never upgrades authority', () => {
   const summary = agentProposalSummary({

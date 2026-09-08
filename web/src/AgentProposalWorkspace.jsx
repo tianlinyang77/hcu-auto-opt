@@ -24,7 +24,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { loadOperatorAgentInspection, loadOperatorAgentProposals } from "./api.js";
-import { agentProposalSummary, inspectionReadModel } from "./agent-proposals.js";
+import { agentProposalSummary, inspectionReadModel, pendingReviewDisplay } from "./agent-proposals.js";
 import { loadDemoAgentProposals } from "./demo-data.js";
 
 function shortValue(value, length = 12) {
@@ -262,6 +262,7 @@ function LifecycleCard({ proposal, summary }) {
   const lifecycle = proposal.lifecycle || {};
   const review = lifecycle.review;
   const promotion = lifecycle.promotion;
+  const missingReview = pendingReviewDisplay(lifecycle);
   return (
     <section className="agent-detail-card agent-lifecycle-card">
       <div className="agent-card-head">
@@ -275,7 +276,7 @@ function LifecycleCard({ proposal, summary }) {
           <div><small>人工审核</small><strong>{review.decision} · {review.reviewer}</strong><p>{review.reason}</p><em className="mono">record {shortValue(review.review_record_hash)}</em></div>
         </div>
       ) : (
-        <div className="agent-lifecycle-step locked"><span><LockKey size={20} /></span><div><small>人工审核</small><strong>不适用</strong><p>该提案未被保留，不能进入审核。</p></div></div>
+        <div className="agent-lifecycle-step locked"><span><LockKey size={20} /></span><div><small>人工审核</small><strong>{missingReview.title}</strong><p>{missingReview.description}</p></div></div>
       )}
       {promotion ? (
         <div className="agent-lifecycle-step complete">
@@ -314,7 +315,7 @@ function ErrorState({ error, onRetry }) {
   return <section className="agent-workspace-empty danger"><WarningCircle size={42} /><span>Operator API error</span><h2>Agent/Apex 证据暂不可用</h2><p>{error}</p><button className="primary-button" type="button" onClick={onRetry}><ArrowClockwise size={18} />重新读取</button></section>;
 }
 
-export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false }) {
+export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, inspectionMode = false, inspectionAuthorization }) {
   const [workspace, setWorkspace] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -332,7 +333,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
     async function readWorkspace() {
       try {
         const value = inspectionMode
-          ? inspectionReadModel(await loadOperatorAgentInspection(generationRunId), generationRunId)
+          ? inspectionReadModel(await loadOperatorAgentInspection(generationRunId, inspectionAuthorization), generationRunId)
           : demoMode
           ? await loadDemoAgentProposals()
           : await loadOperatorAgentProposals(generationRunId);
@@ -355,7 +356,7 @@ export function AgentProposalWorkspace({ demoMode, generationRunId, onClose, ins
 
     void readWorkspace();
     return () => { cancelled = true; };
-  }, [demoMode, generationRunId, reloadNonce, inspectionMode]);
+  }, [demoMode, generationRunId, reloadNonce, inspectionMode, inspectionAuthorization]);
 
   const retry = () => {
     setLoading(true);

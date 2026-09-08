@@ -3,16 +3,13 @@ import { createRoot } from "react-dom/client";
 import "@fontsource-variable/jetbrains-mono";
 import "@fontsource-variable/noto-sans-sc";
 import { App } from "./App.jsx";
-import { AgentProposalWorkspace } from "./AgentProposalWorkspace.jsx";
+import { InspectionEntry } from "./InspectionEntry.jsx";
 import "./styles.css";
 
 const inspectionRun = new URLSearchParams(window.location.search).get("agentInspection");
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    {inspectionRun ? <AgentProposalWorkspace
-      demoMode={false} inspectionMode generationRunId={inspectionRun}
-      onClose={() => window.location.assign(window.location.pathname)}
-    /> : <App />}
+    {inspectionRun ? <InspectionEntry generationRunId={inspectionRun} /> : <App />}
   </React.StrictMode>,
 );
