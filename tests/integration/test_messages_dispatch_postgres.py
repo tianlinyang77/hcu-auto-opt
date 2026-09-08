@@ -29,14 +29,33 @@ from hcuopt.adapters.business_candidate_family import BusinessCandidateFamilyVer
 from hcuopt.adapters.git_source import GitSourceManager
 from hcuopt.adapters.messages_generator import messages_profile_for_input, prepare_messages_input
 from hcuopt.agent.authority import ApexGenerationCoordinator
-from hcuopt.agent.identity import candidate_generation_request_hash
+from hcuopt.agent.identity import (
+    candidate_generation_request_hash,
+    candidate_proposal_promotion_receipt_hash,
+    candidate_proposal_review_record_hash,
+)
 from hcuopt.agent.messages_dispatch import MessagesDispatchService
 from hcuopt.agent.messages_worker import MessagesGenerationWorker
 from hcuopt.contracts.agent_v1 import GenerationRunStartRequest
+from hcuopt.contracts.agent_verification_v1 import (
+    AgentEvidenceRef,
+    AgentProposalVerificationContext,
+)
 from hcuopt.contracts.m2_candidate_family_v1 import BusinessCandidateFamilyManifest
 from hcuopt.contracts.platform_v1 import SourceSnapshot
 from hcuopt.domain.errors import SourceArtifactError, StaleClaimToken
 from hcuopt.evaluation.agent_generation_inspection import AgentGenerationInspectionService
+from hcuopt.evaluation.agent_generation_read_model import (
+    AgentGenerationEvidenceReadService,
+    AgentGenerationReadModelError,
+    build_agent_generation_evidence_publication,
+)
+from hcuopt.evaluation.agent_proposal_reporting import write_agent_generation_report
+from hcuopt.evaluation.agent_proposal_verifier import (
+    AgentProposalVerifier,
+    build_agent_generation_read_model,
+)
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.generators import anthropic_messages
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
@@ -476,7 +495,18 @@ def _test_review(authority, status, proposal_id, decision="approved"):
 
 
 @pytest.mark.parametrize("dispatch_case", ["promotion"], indirect=True)
-def test_messages_to_git_packages_and_verified_family(dispatch_case):
+@pytest.mark.parametrize(
+    "terminal_mode",
+    ["pre_review"]
+    + [
+        pytest.param(
+            mode,
+            marks=pytest.mark.skipif(os.name != "posix", reason="D requires native POSIX reads"),
+        )
+        for mode in ("read", "promotion_receipt", "report", "status_snapshot")
+    ],
+)
+def test_messages_to_git_packages_and_verified_family(dispatch_case, terminal_mode):
     case = dispatch_case
     status = _execute(case)
     assert status.run.state == "awaiting_review"
@@ -500,9 +530,10 @@ def test_messages_to_git_packages_and_verified_family(dispatch_case):
             candidate_output_dir=output,
         )
     assert not publisher.root.exists()  # missing review cannot publish a Package
-    prepared = []
+    prepared, reviews, promotions = [], [], []
     for ref in status.proposals:
         review = _test_review(authority, status, ref.proposal_id)
+        reviews.append(review)
         prepared.append(
             service.prepare(
                 status,
@@ -579,6 +610,7 @@ def test_messages_to_git_packages_and_verified_family(dispatch_case):
             promoted_at=datetime.now(timezone.utc),
             idempotency_key=f"test-promote-{item.candidate_id}",
         )
+        promotions.append(receipt)
         assert ProposalDecisionStore(decisions.root).load_receipt(receipt.promotion_id) == receipt
         assert fresh_decisions.read_evidence(
             receipt.source_family_verification_evidence_uri,
@@ -592,6 +624,129 @@ def test_messages_to_git_packages_and_verified_family(dispatch_case):
     assert _git(baseline_root, "status", "--porcelain") == ""
     assert case["repository"].generation_run_status(request.generation_run_id) == status
     assert len(case["calls"]) == 1  # C never reexecutes the model
+    if terminal_mode != "pre_review":
+        _verify_terminal_handoff(case, status, reviews, promotions, decisions, terminal_mode)
+
+
+def _verify_terminal_handoff(case, status, reviews, promotions, decisions, mode):
+    """Test-only completion; never touch the deployed Run or simulate real signoff."""
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from hcuopt.api.app import create_app
+
+    run_id = status.run.generation_run_id
+    repository = case["repository"]
+    inspector = AgentGenerationInspectionService(repository, case["root"])
+    before = inspector.prepare(
+        run_id,
+        knowledge_store=case["fixture"]["knowledge"],
+        task_id=uuid4(),
+        target_id="test-only-cpu-terminal-handoff",
+    )
+    assert before.read_model.human_review_status == "pending"
+    context_path = case["root"] / "inspections" / str(run_id) / "context.json"
+    old_context = AgentProposalVerificationContext.model_validate_json(context_path.read_bytes())
+    overall_review = decisions.publish_evidence(
+        "test-generation-review",
+        canonical_json_bytes(
+            {
+                "scope": "test-only-not-human-approval",
+                "generation_run_id": str(run_id),
+                "review_ids": [str(item.review_id) for item in reviews],
+                "promotion_ids": [str(item.promotion_id) for item in promotions],
+            }
+        ),
+    )
+    completed = repository.complete_generation_review(
+        run_id,
+        review_evidence_uri=overall_review.uri,
+        review_evidence_hash=overall_review.content_hash,
+        now=datetime.now(timezone.utc),
+    )
+    assert completed.state == "completed"
+    # The old pre-review descriptor must not become an approved terminal result.
+    with pytest.raises(AgentGenerationReadModelError) as stale:
+        inspector.get(run_id)
+    assert stale.value.code == "agent_inspection_not_settled"
+    fresh_repository = PostgresRepository(repository.database_url)
+    terminal_status = fresh_repository.generation_run_status(run_id)
+    status_ref = decisions.publish_evidence(
+        "test-terminal-status", canonical_json_bytes(terminal_status)
+    )
+    context = old_context.model_copy(
+        update={
+            "generation_status": AgentEvidenceRef(
+                uri=status_ref.uri, content_hash=status_ref.content_hash
+            ),
+            "review_records": tuple(
+                AgentEvidenceRef(
+                    uri=(decisions.root / "reviews" / f"{item.review_id}.json").as_uri(),
+                    content_hash=candidate_proposal_review_record_hash(item),
+                )
+                for item in reviews
+            ),
+            "promotion_receipts": tuple(
+                AgentEvidenceRef(
+                    uri=(decisions.root / "promotions" / f"{item.promotion_id}.json").as_uri(),
+                    content_hash=candidate_proposal_promotion_receipt_hash(item),
+                )
+                for item in promotions
+            ),
+        }
+    )
+    result = AgentProposalVerifier(HashedEvidenceReader(case["root"])).verify(context)
+    read_model = build_agent_generation_read_model(result)
+    assert read_model.human_review_status == "approved"
+    assert read_model.package_promotion_status == "promoted"
+    assert len(read_model.proposals) == 2
+    assert read_model.formal_readiness == "hold"
+    assert read_model.performance_conclusion == "not_measured"
+    assert read_model.formal_intake_allowed is False
+    assert read_model.automatic_release_allowed is False
+    report_root = case["root"] / "test-terminal-report"
+    report_root.mkdir()
+    artifacts = write_agent_generation_report(report_root, context, result)
+    publication = build_agent_generation_evidence_publication(context, result, artifacts)
+    assert repository.publish_agent_generation_evidence_publication(publication) == publication
+    assert (
+        fresh_repository.publish_agent_generation_evidence_publication(publication) == publication
+    )
+    reader = AgentGenerationEvidenceReadService(
+        fresh_repository, HashedEvidenceReader(case["root"])
+    )
+    assert reader.get(run_id) == read_model
+    # Existing control-plane API in-process only: no listener or viewer ACL change.
+    with (
+        patch.dict(
+            os.environ, HCUOPT_AGENT_EVIDENCE_ROOT=str(case["root"]), HCUOPT_AUTO_MIGRATE="false"
+        ),
+        TestClient(create_app(repository=fresh_repository)) as client,
+    ):
+        url = f"/v1/operator/agent-generations/{run_id}/evidence"
+        response = client.get(url)
+        assert response.status_code == 200, response.text
+        assert response.json() == read_model.model_dump(mode="json")
+        if mode != "read":
+            reference = {
+                "promotion_receipt": context.promotion_receipts[0],
+                "report": publication.report,
+                "status_snapshot": context.generation_status,
+            }[mode]
+            path = file_uri_to_path(reference.uri)
+            assert path.is_relative_to(case["root"])
+            # Fault injection in pytest's private tree only. Production reports
+            # are read-only; test the additional Hash check if bytes are altered.
+            path.chmod(path.stat().st_mode | 0o200)
+            path.write_bytes(b"{}")
+            with pytest.raises(AgentGenerationReadModelError):
+                reader.get(run_id)
+            denied = client.get(url)
+            assert denied.status_code == 422, denied.text
+            assert "proposals" not in denied.json()
+    assert fresh_repository.generation_run_status(run_id) == terminal_status
+    assert len(case["calls"]) == 1  # terminal publication/read never invokes the model
 
 
 @pytest.mark.parametrize("dispatch_case", ["promotion"], indirect=True)

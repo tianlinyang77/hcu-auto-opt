@@ -261,6 +261,45 @@ Messages/inspection 定向测试，POSIX 专属项继续明确跳过。
 `8d62ef54ec68b13ce62f2e57d76f2c13b21b621bd75907244f2e0f02deb8984e`。
 两项依赖弃用警告不影响测试通过；本轮没有重新调用真实模型或进行 HCU 优化验收。
 
+## 同批 Messages 输出的 D 终态报告联验（2026-09-08）
+
+在前述双候选源码制品用例上增加四种终态参数：正常读取、Promotion Receipt 篡改、
+报告正文篡改、状态快照篡改。它们使用同一用例实际产生的 Review/Promotion 记录，
+通过已有 `complete_generation_review`、D Verifier、报告器和数据库 Publication 接口，
+没有新建报告格式或修改产品权限。
+
+验证链路：
+
+```text
+Messages Dispatch → 两个源码制品与 Family → 测试审核完成
+  → 独立读取终态 A 状态 → D 验证 → 报告及清单 → Publication 落库
+  → 新 Repository/Reader 独立重读 → 既有 control-plane evidence API
+```
+
+- 终态后旧 inspection 快照被拒绝；另建绑定终态状态、Review 和 Promotion 的验证上下文。
+- Publication 重复登记保持幂等，API 返回与独立 D 重算一致的两候选结果。
+- 三种证据损坏均导致读取失败、API 返回 422，不能返回旧的候选结果。
+- 全程只调用一次本地模拟模型；终态读取不修改 A 状态或预算。
+- `approved/promoted` 只描述测试记录；仍为 `formal_readiness=hold`、
+  `performance_conclusion=not_measured`，Formal Intake 与自动发布均为 false。
+
+Linux Python 3.10.12 + 真实 PostgreSQL：**22 passed，零跳过，30.74 秒**。
+Windows 相关单测：**22 passed、4 POSIX-only skipped，5.41 秒**。
+仓库 Ruff 与 diff whitespace 检查通过。沿用前节已批准的 CPU 隔离范围，
+测试结束临时容器已自动删除，未调用真实模型或访问 HCU。
+
+运行源码为 `4a4971768a891aa7ca5fb99f1e82f8d16c08ba86` 加当时未提交的集成测试文件；
+测试文件 SHA256：`473032fd6466222047383bb71e5aba12db8a3edce67df2d5747e6df9ca656abc`。
+日志 `results/messages-terminal-acceptance.log`（不进 Git）SHA256：
+`e6efef221d456107dd77b4b097bbd242a7b6804e3be7f4d723c459c0b07530ae`。
+早期两轮失败来自测试准备：未创建报告根目录、尝试直接写只读报告；已修正测试，
+没有放宽产品报告器的目录检查或只读权限。篡改注入仅作用于 pytest 私有临时目录。
+
+**部署边界：**上述 API 通过进程内 TestClient 调用，未开放网络监听。
+当前专用只读服务及本机代理仍只开放 `/inspection`，没有新增 `/evidence` 路由、
+授权或数据库权限。因此这不是终态报告的浏览器部署验收；下一个部署切片需把终态
+只读接口接入同样的精确 Run 鉴权和 no-store 保护，不能直接暴露完整控制面。
+
 ## 手动源文件级试跑
 
 在独立的 Python 3.10 环境安装项目依赖，从仓库根目录运行。事先在进程环境设置
