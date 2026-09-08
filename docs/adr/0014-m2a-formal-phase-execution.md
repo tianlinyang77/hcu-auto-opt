@@ -84,9 +84,29 @@ M1 预算接口要求整数秒，因此 Formal 的局部墙钟预算向下取整
 均视作失效；M1 在计时标定前以及既有采样检查点消费它。该机制不自动续租，不代替 Worker
 进程超时/强制 fencing，也不能中断一条已经阻塞的设备调用。
 
-此增量不证明完整 Target/Artifact/Stage0 来源已与部署注册逐一接通，也未完成 M1 部分采样
-失败到 Formal 实际预算消费的完整交接。Real Profile、D 独立重读、完整 run 生命周期与当期
+此增量不证明完整 Target/Artifact/Stage0 来源已与部署注册逐一接通。Real Profile、D 独立重读、完整 run 生命周期与当期
 实机验收仍未放行。旧 M1 非 Formal 调用保留原行为。
+
+### 2026-09-08：失败证据与计量交接
+
+M1 新失败文件使用 `m1-measurement-failure-v2`，显式区分调用过的采样批次数和拿到有效 Event
+证据的次数。每次 `measure_batch` 调用前递增 attempted；验证 Event 后才保留 verified sample。
+失败 acquisition 的部分样本不再丢失，已完成 acquisition 也一并保留。计量含失败调用但不把它
+算成有效性能样本；warmup 不计入样本数，其耗时由墙钟预算承担。
+
+异常携带已发布文件的 URI/Hash；Formal 默认用原生 no-follow Reader 从本次 output root 重读，
+核对 Run/Task/Candidate/Artifact/Target/Stage0/Baseline/Workload、Lease/Fence、Plan、预期数量，
+并验证完整 execution request Hash，防止跨 phase、attempt 或 reservation 重放。同名旧 v1
+失败文件不自动升级、不用于这条结算路径。
+
+成功重读后，按 attempted 数量 settle，在 usage 中保留 failure URI/Hash、计量口径和 verified
+数量；失败不生成 `RoundMeasurementRef`，清理结果沿用原失败文件，不重复调用已经完成的清理。
+这只是执行账本证据，不替代 D 对 Event 内容的独立真实性验证或性能裁决。
+
+失败文件缺失、损坏、身份不匹配，或普通异常没有显式计量回执时，执行当前 binding 的恢复，
+记录 `formal-failure-accounting-blocked-v1`，保留 reservation，拒绝 settle/release。未知用量
+不是零；该分支不生成虚假的终态执行 Receipt，需要后续持久恢复/人工核对处理。若阻塞记录
+本身也写不出，异常仍上抛，reservation 仍未结算。未发布自动核对/自动释放任务。
 
 - 无 HCU 测试可以覆盖缺 Lease、窗口过期、Fence 错误、预算不足、timeout、清理失败和改绑拒绝。
 - Formal Adapter 依赖 A1/A2a Authority Reader、owner signature verifier、现有 Harness、durable

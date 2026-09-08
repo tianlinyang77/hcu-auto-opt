@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from hcuopt.evaluation.stage0_protocol import load_registered_stage0_protocol
-from hcuopt.evaluation.stage0_verifier import Stage0EvidenceError, Stage0EvidenceReader
 from hcuopt.measurement.m1_models import (
     M1SampleBudget,
     M1Stage0Authority,
     M1Stage0ReportReference,
     m1_sample_budget_hash,
 )
+
+if TYPE_CHECKING:
+    from hcuopt.evaluation.stage0_verifier import Stage0EvidenceReader
 
 
 def load_m1_stage0_authority(
@@ -22,6 +23,10 @@ def load_m1_stage0_authority(
     task_payload: Mapping[str, Any],
 ) -> M1Stage0Authority:
     """Re-hash and bind the Formal report before using its run-scoped threshold."""
+
+    # evaluation's package exports import the M1 verifier; avoid an eager cycle.
+    from hcuopt.evaluation.stage0_protocol import load_registered_stage0_protocol
+    from hcuopt.evaluation.stage0_verifier import Stage0EvidenceError
 
     report = reader.read(reference.uri, reference.sha256)
     verification = report.get("verification")

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NoReturn, Protocol, runtime_checkable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.contracts.formal_profile_authorization_v1 import (
@@ -48,8 +48,10 @@ from hcuopt.domain.enums import (
     SearchRoundRunMode,
     SearchRoundState,
 )
+from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.measurement.harness import MeasurementSafetyError
+from hcuopt.measurement.m1_failure import M1FailureReport, M1MeasurementFailure
 from hcuopt.measurement.m2_models import (
     M2PhaseBudgetReservationPlan,
     RoundMeasurementRef,
@@ -176,6 +178,7 @@ class M2FormalPhaseExecutionAdapter:
         clock: Callable[[], datetime] | None = None,
         monotonic_ns: Callable[[], int] | None = None,
         provenance: AdapterProvenance | None = None,
+        failure_reader: HashedEvidenceReader | None = None,
     ) -> None:
         self.harness = harness
         self.adapter_profile = adapter_profile
@@ -191,6 +194,7 @@ class M2FormalPhaseExecutionAdapter:
         self.recover_expired_lease = recover_expired_lease or recover_resource
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic_ns = monotonic_ns or time.monotonic_ns
+        self.failure_reader = failure_reader
         self.provenance = provenance or AdapterProvenance(
             profile=adapter_profile.profile_id,
             capability="formal_execution_adapter",
@@ -260,6 +264,7 @@ class M2FormalPhaseExecutionAdapter:
         failure: Exception | None = None
         cleanup_evidence: dict[str, Any] | None = None
         actual_sample_count = 0
+        failure_accounting: dict[str, Any] | None = None
         try:
             result = ManualPerformanceEvidenceResult.model_validate(
                 self.harness.run_manual_performance(
@@ -272,9 +277,32 @@ class M2FormalPhaseExecutionAdapter:
             self._validate_harness_result(round_authority, member, request, result)
         except Exception as exc:
             failure = exc
-            if isinstance(exc, M2FormalHarnessFailure):
+            if isinstance(exc, M1MeasurementFailure):
+                try:
+                    reader = self.failure_reader or HashedEvidenceReader(output_dir)
+                    report = self._read_m1_failure(reader, exc, round_authority, request)
+                except Exception as read_error:
+                    self._retain_unknown_usage(
+                        request, output_dir, request_hash, read_error, exc
+                    )
+                actual_sample_count = report.attempted_sample_count
+                cleanup_evidence = dict(report.cleanup_evidence)
+                failure_accounting = {
+                    "basis": report.accounting_basis,
+                    "verified_sample_count": len(report.verified_samples),
+                    "attempted_sample_count": actual_sample_count,
+                    "failure_evidence_uri": exc.evidence.uri,
+                    "failure_evidence_hash": exc.evidence.sha256,
+                }
+                failure = M2FormalHarnessFailure(
+                    str(exc), error_code="m1_measurement_failed",
+                    actual_sample_count=actual_sample_count, cleanup_evidence=cleanup_evidence,
+                )
+            elif isinstance(exc, M2FormalHarnessFailure):
                 cleanup_evidence = exc.cleanup_evidence
                 actual_sample_count = exc.actual_sample_count
+            elif result is None:
+                self._retain_unknown_usage(request, output_dir, request_hash, exc)
             if cleanup_evidence is None:
                 try:
                     cleanup_evidence = dict(self.recover_resource(request.binding))
@@ -382,6 +410,7 @@ class M2FormalPhaseExecutionAdapter:
                 "synthetic": False,
                 "producer_verdict": None,
                 "performance_conclusion": "not_measured",
+                **({"failure_accounting": failure_accounting} if failure_accounting else {}),
             },
         )
         settled = self.budget_authority.finalize(
@@ -406,6 +435,78 @@ class M2FormalPhaseExecutionAdapter:
             usage_evidence_uri=usage_uri,
             usage_evidence_hash=usage_hash,
         )
+
+    @staticmethod
+    def _read_m1_failure(
+        reader: HashedEvidenceReader, error: M1MeasurementFailure,
+        round_authority: SearchRound, request: M2FormalPhaseExecutionRequest,
+    ) -> M1FailureReport:
+        if error.evidence is None:
+            raise MeasurementSafetyError("M1 failure evidence was not published")
+        report = M1FailureReport.model_validate_json(
+            reader.read_bytes(error.evidence.uri, error.evidence.sha256)
+        )
+        observed, binding = report.binding, request.binding
+        if (
+            observed.task_id != binding.task_id
+            or observed.round_id != binding.round_id
+            or observed.candidate_id != binding.candidate_id
+            or observed.artifact_id != binding.artifact_id
+            or observed.artifact_content_hash != binding.artifact_hash
+            or observed.target_snapshot_id != binding.target_snapshot_id
+            or observed.adapter_profile != binding.adapter_profile
+            or observed.stage0_run_id != round_authority.stage0_run_id
+            or observed.baseline_epoch_id != round_authority.baseline_epoch_id
+            or observed.workload_id != round_authority.workload_id
+            or observed.workload_hash != round_authority.workload_hash
+            or observed.configuration_hash != round_authority.configuration_hash
+            or observed.image_digest != round_authority.image_digest
+            or observed.lease.lease_id != binding.lease_id
+            or observed.lease.resource_id != binding.resource_id
+            or observed.lease.fencing_token != binding.fencing_token
+            or observed.lease.lease_scope.value != "exclusive"
+            or report.plan_hash != binding.measurement_plan_hash
+            or report.expected_sample_count != request.reservation.expected_sample_count
+            or report.formal_execution_request_hash != (
+                m2_formal_phase_execution_request_hash(request)
+            )
+        ):
+            raise MeasurementSafetyError("M1 failure evidence belongs to another execution")
+        fence, health = report.cleanup_evidence.get("fence"), report.cleanup_evidence.get("health")
+        if (
+            not isinstance(fence, dict) or not isinstance(health, dict)
+            or fence.get("resource_id") != binding.resource_id
+            or fence.get("fencing_token") != binding.fencing_token
+            or health.get("resource_id") != binding.resource_id
+        ):
+            raise MeasurementSafetyError("M1 failure cleanup binding differs")
+        return report
+
+    def _retain_unknown_usage(
+        self, request: M2FormalPhaseExecutionRequest, output_dir: Path, request_hash: str,
+        cause: Exception, failure: M1MeasurementFailure | None = None,
+    ) -> NoReturn:
+        # Unknown usage is NOT zero. Never release a started reservation without accounting.
+        try:
+            recovery = dict(self.recover_resource(request.binding))
+        except Exception:
+            recovery = {"status": "unverified"}
+        evidence = failure.evidence if failure is not None else None
+        self._write_payload(
+            output_dir / "budget" / "accounting-blocked", request.reservation.reservation_id,
+            {
+                "schema_version": "formal-failure-accounting-blocked-v1",
+                "request_hash": request_hash,
+                "reservation_id": str(request.reservation.reservation_id),
+                "failure_evidence_uri": evidence.uri if evidence else None,
+                "failure_evidence_hash": evidence.sha256 if evidence else None,
+                "usage": "unknown", "reservation_action": "retained",
+                "cleanup_evidence": recovery, "automatic_release_allowed": False,
+            },
+        )
+        raise MeasurementSafetyError(
+            "Formal failure usage unverified; budget reservation retained"
+        ) from cause
 
     def release_unstarted(
         self,
@@ -895,6 +996,8 @@ class M2FormalPhaseExecutionAdapter:
         if isinstance(failure, TimeoutError):
             return "timed_out", "execution_timed_out"
         if isinstance(failure, M2FormalHarnessFailure):
+            if failure.error_code == "execution_timed_out":
+                return "timed_out", failure.error_code
             return "failed", failure.error_code
         if "renewal deadline" in str(failure):
             return "fence_lost", "lease_renewal_overdue"
