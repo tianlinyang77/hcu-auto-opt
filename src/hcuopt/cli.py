@@ -40,14 +40,17 @@ def _load_stage0(path: Path) -> Stage0Evidence:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hcuopt")
     sub = parser.add_subparsers(dest="command", required=True)
-    viewer = sub.add_parser("framework-viewer", help="manage a local read-only result viewer")
+    viewer = sub.add_parser(
+        "framework-viewer", help="manage a local result viewer (read-only default)"
+    )
     viewer_sub = viewer.add_subparsers(dest="viewer_action", required=True)
     viewer_serve = viewer_sub.add_parser(
         "serve", help="run in foreground; Ctrl+C stops this instance"
     )
     viewer_serve.add_argument("config", type=Path)
     viewer_serve.add_argument("--dsn-env", default="HCUOPT_VIEWER_DATABASE_URL")
-    for action in ("status", "stop"):
+    viewer_serve.add_argument("--signing-dsn-env", help="explicit independent signing DSN variable")
+    for action in ("status", "stop", "revoke-signing"):
         viewer_control = viewer_sub.add_parser(action)
         viewer_control.add_argument("instance_directory", type=Path)
     evidence = sub.add_parser(
@@ -119,7 +122,12 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             if args.viewer_action == "serve":
+                if args.signing_dsn_env == args.dsn_env:
+                    raise ViewerServiceError("signing_requires_separate_dsn_variable")
                 dsn = os.environ.pop(args.dsn_env, "")
+                if args.signing_dsn_env:
+                    signing_dsn = os.environ.pop(args.signing_dsn_env, "")
+                    return serve(load_config(args.config), dsn, signing_database_dsn=signing_dsn)
                 return serve(load_config(args.config), dsn)
             print(json.dumps(control_instance(args.instance_directory, args.viewer_action)))
             return 0

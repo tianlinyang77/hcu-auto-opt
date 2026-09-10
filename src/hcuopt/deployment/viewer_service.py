@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
-"""Single-user local viewer lifecycle. No HCU, schema migration, signoff or release."""
+"""Single-user local viewer lifecycle. Optional signing; no HCU, migration or release."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -13,6 +14,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
@@ -24,12 +26,24 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from hcuopt.contracts.v1 import FrameworkSmokeSummary
+from hcuopt.deployment.framework_signoff_identity import (
+    FrameworkSigningSession,
+    FrameworkSignoffIdentity,
+)
 from hcuopt.deployment.framework_smoke_viewer import create_viewer
+from hcuopt.deployment.framework_viewer_signing import ViewerSigning
 from hcuopt.storage.repository import PostgresRepository
 
 
 class ViewerServiceError(ValueError):
     """Public errors must never include DSNs or credential contents."""
+
+
+class SigningConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    actor: str = Field(min_length=1, max_length=200, pattern=r"^\S(?:.*\S)?$")
+    ttl_seconds: int = Field(default=1800, ge=60, le=3600)
 
 
 class ViewerConfig(BaseModel):
@@ -43,6 +57,7 @@ class ViewerConfig(BaseModel):
     port: int = Field(default=4194, ge=1024, le=65535)
     ssh_target: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.]+@[a-zA-Z0-9_.-]+$")
     ssh_remote_port: int = Field(default=55433, ge=1, le=65535)
+    signing: SigningConfig | None = None
 
 
 def load_config(path: Path) -> ViewerConfig:
@@ -190,9 +205,30 @@ def make_reader(config: ViewerConfig, dsn: str):
     return read
 
 
-def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | None = None) -> int:
+def signing_dsn(value: str, config: ViewerConfig, read_value: str, port: int | None = None) -> str:
+    """Separate, explicitly supplied write connection to the same frozen database.
+
+    The viewer read connection remains read-only. No role grants or migration here.
+    """
+    validated = conninfo_to_dict(readonly_dsn(value, config.database_schema, port))
+    read_fields = conninfo_to_dict(readonly_dsn(read_value, config.database_schema, port))
+    if any(validated[key] != read_fields[key] for key in ("host", "port", "dbname")):
+        raise ViewerServiceError("signing_database_mismatch")
+    validated["options"] = (
+        f"-c search_path={config.database_schema} -c default_transaction_read_only=off "
+        "-c statement_timeout=10000 -c lock_timeout=5000"
+    )
+    return make_conninfo(**validated)
+
+
+def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | None = None,
+          signing_database_dsn: str | None = None) -> int:
     # Reject DSN/config before any process, credentials or listening socket are created.
     readonly_dsn(database_dsn, config.database_schema)
+    if (config.signing is None) != (signing_database_dsn is None):
+        raise ViewerServiceError("signing_requires_config_and_separate_dsn")
+    if config.signing is not None:
+        signing_dsn(signing_database_dsn, config, database_dsn)
     if (
         config.static_root.resolve(strict=True) != config.static_root.absolute()
         or not (config.static_root / "index.html").is_file()
@@ -210,9 +246,18 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
     stopped = threading.Event()
     access = directory / "access-key.txt"
     control = directory / "control-key.txt"
+    signing_key = directory / "signing-key.txt"
+    signing = None
+
+    def revoke_signing():
+        if signing is not None:
+            signing.session.revoke()
+        signing_key.unlink(missing_ok=True)
 
     def request_shutdown():
         stopped.set()
+        if signing is not None:
+            signing.session.revoke()
         if server:
             server.should_exit = True
 
@@ -234,6 +279,26 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
                     if time.monotonic() >= deadline:
                         raise ViewerServiceError("database_unavailable") from None
                     time.sleep(0.25)
+            if config.signing is not None:
+                token = secrets.token_urlsafe(32)
+                identity = FrameworkSignoffIdentity(
+                    task_id=config.task_id, actor=config.signing.actor,
+                    token_sha256=hashlib.sha256(token.encode("ascii")).hexdigest(),
+                    expires_at=datetime.now(timezone.utc) + timedelta(
+                        seconds=config.signing.ttl_seconds),
+                    browser_origin=f"http://127.0.0.1:{config.port}",
+                )
+                write_repository = PostgresRepository(
+                    signing_dsn(signing_database_dsn, config, database_dsn, port))
+                read_repository = PostgresRepository(dsn)
+                signing = ViewerSigning(FrameworkSigningSession(identity),
+                                        write_repository.signoff_framework_task,
+                                        read_repository.framework_signoff)
+                signing_key.write_text(token, encoding="utf-8")
+                del token
+                record["signing_actor"] = identity.actor
+                record["signing_expires_at"] = identity.expires_at.isoformat()
+                record["signing_credential_file"] = str(signing_key)
             app = create_viewer(
                 task_id=config.task_id,
                 credential=access.read_text(),
@@ -241,6 +306,8 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
                 static_root=config.static_root,
                 control=(instance, control.read_text(), request_shutdown),
                 access_active=lambda: not stopped.is_set(),
+                signing=signing,
+                revoke_signing=revoke_signing if signing else None,
             )
             server = uvicorn.Server(
                 uvicorn.Config(
@@ -307,7 +374,7 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
                 record["status"] = "failed"
         # Revoke this instance's files on normal/failure exit. No recursive deletion.
         cleanup_failed = False
-        for credential in (access, control):
+        for credential in (access, control, signing_key):
             try:
                 credential.unlink(missing_ok=True)
             except OSError:
@@ -324,11 +391,11 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
     return 0
 
 
-def control_instance(directory: Path, action: Literal["status", "stop"]) -> dict:
+def control_instance(directory: Path, action: Literal["status", "stop", "revoke-signing"]) -> dict:
     """Authenticated instance-specific HTTP; no PID/port-name based termination."""
     try:
         if (
-            action not in {"status", "stop"}
+            action not in {"status", "stop", "revoke-signing"}
             or directory.resolve(strict=True) != directory.absolute()
         ):
             raise ValueError("invalid")
@@ -355,8 +422,8 @@ def control_instance(directory: Path, action: Literal["status", "stop"]) -> dict
             data = response.json()
             if data.get("instance_id") != str(instance) or data.get("task_id") != record["task_id"]:
                 raise ValueError("invalid")
-            if action == "stop":
-                response = client.post(url + "/stop", headers=headers)
+            if action in {"stop", "revoke-signing"}:
+                response = client.post(url + "/" + action, headers=headers)
                 response.raise_for_status()
                 data = response.json()
                 if data.get("instance_id") != str(instance):

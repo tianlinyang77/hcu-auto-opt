@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -64,3 +65,25 @@ class FrameworkSignoffIdentity:
             return None
         actual = hashlib.sha256(token.encode("ascii")).hexdigest()
         return self.actor if secrets.compare_digest(actual, self.token_sha256) else None
+
+
+class FrameworkSigningSession:
+    """Single-process, expiring capability. Restart requires a new credential.
+
+    Revocation rejects subsequent authorization, not a transaction already admitted.
+    The deployment must drain in-flight requests before declaring shutdown complete.
+    """
+
+    def __init__(self, identity: FrameworkSignoffIdentity):
+        self.identity = identity
+        self._revoked = threading.Event()
+
+    @property
+    def active(self) -> bool:
+        return not self._revoked.is_set() and datetime.now(timezone.utc) < self.identity.expires_at
+
+    def revoke(self) -> None:
+        self._revoked.set()
+
+    def __call__(self, request: Request, task_id: UUID) -> str | None:
+        return self.identity(request, task_id) if self.active else None

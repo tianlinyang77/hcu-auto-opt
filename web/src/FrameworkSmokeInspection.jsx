@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { checkLabel, frameworkState, loadFrameworkInspection } from "./framework-smoke.js";
 import "./framework-smoke.css";
+import { FrameworkSmokeSignoff } from "./FrameworkSmokeSignoff.jsx";
 
 const checks = [
   ["baseline_execution_succeeded", "Baseline 基线执行"],
@@ -16,8 +17,16 @@ export function FrameworkSmokeInspection({ taskId }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [signingPending, setSigningPending] = useState(false);
   const activeCredential = useRef("");
   const requestVersion = useRef(0);
+
+  useEffect(() => {
+    if (!signingPending) return;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [signingPending]);
 
   async function refresh(key) {
     const version = ++requestVersion.current;
@@ -52,9 +61,9 @@ export function FrameworkSmokeInspection({ taskId }) {
     <header><div><p className="smoke-eyebrow">HCU AUTO OPT · 框架验收</p>
       <h1>实机验收结果</h1><p className="smoke-id">{taskId}</p></div>
       {data && <div className="smoke-actions">
-        <button disabled={busy} onClick={() => refresh(activeCredential.current)}>
+        <button disabled={busy || signingPending} onClick={() => refresh(activeCredential.current)}>
           {busy ? "正在刷新…" : "刷新数据库结果"}</button>
-        <button onClick={logout}>退出查看</button></div>}
+        <button disabled={signingPending} onClick={logout}>退出查看</button></div>}
     </header>
     <p className="smoke-boundary">本页验证源码、构建、执行、输出一致性与清理闭环，不代表性能提升，也不允许自动发布。</p>
     {error && <p role="alert" className="smoke-error">{error}</p>}
@@ -85,7 +94,8 @@ export function FrameworkSmokeInspection({ taskId }) {
         <p>源码快照 {data.counts.sources} · 制品 {data.counts.artifacts} · 执行记录 {data.counts.executions}</p>
         <p>评估记录 {data.counts.evaluations} · 证据包 {data.counts.evidence_bundles}</p>
         <p>仅挂载 No-op 源码归档，不代表候选代码已激活。</p>
-        <button disabled>只读视图，不在此页签核</button>
+        <FrameworkSmokeSignoff key={taskId} data={data} onPendingChange={setSigningPending}
+          onRefresh={() => refresh(activeCredential.current)} />
         <p>Stage 0、优化收益与发布审批均不由本页放行。</p>
       </section></div>
       <section className="smoke-panel"><h2>已保存制品</h2>{data.artifacts.map((artifact) =>

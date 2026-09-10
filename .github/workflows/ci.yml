@@ -61,6 +61,7 @@ jobs:
           tests/unit/test_bw20_evidence.py
           tests/unit/test_framework_smoke_viewer.py
           tests/unit/test_framework_signoff_identity.py
+          tests/unit/test_framework_viewer_signing.py
           tests/unit/test_viewer_service.py
           tests/unit/test_worker_completion_heartbeat.py
           tests/unit/test_m2_business_candidate_family.py

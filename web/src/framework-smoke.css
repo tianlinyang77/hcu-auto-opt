@@ -32,5 +32,11 @@
 .smoke-panel li { padding: 6px 0; overflow-wrap: anywhere; }
 .smoke-panel time { color: var(--text-soft); margin-right: 20px; font-size: .875rem; }
 .smoke-inspection footer { margin-top: 24px; font-size: .875rem; overflow-wrap: anywhere; }
+.smoke-signoff { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 20px; }
+.smoke-signoff label { display: block; margin-top: 12px; }
+.smoke-signoff input, .smoke-signoff select, .smoke-signoff textarea { width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0 12px; font: inherit; color: var(--text); background: var(--bg-deep); border: 1px solid var(--border-strong); border-radius: 6px; }
+.smoke-signoff textarea { min-height: 100px; resize: vertical; }
+.smoke-signoff button { margin: 8px 8px 0 0; }
+.smoke-signoff :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 @media (max-width: 800px) { .smoke-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); } .smoke-columns { grid-template-columns: 1fr; gap: 0; } .smoke-verdict { display: block; } }
 @media (max-width: 480px) { .smoke-inspection { padding: 24px 16px; } .smoke-checks { grid-template-columns: 1fr; } }
