@@ -331,6 +331,7 @@ class ContainerExecutionAdapter:
             "termination": termination,
             "fencing_validated_before_execute": request.lease_scope is not LeaseScope.NONE,
             "fencing_validated_before_result": request.lease_scope is not LeaseScope.NONE,
+            **self._execution_metadata(request, target),
         }
         return ExecutionResult(
             request_id=request.request_id,
@@ -419,7 +420,6 @@ class ContainerExecutionAdapter:
         resource_id: str,
         fencing_token: int,
     ) -> tuple[str, ...]:
-        accelerator = target.execution_host.accelerator
         command = [
             "docker",
             "run",
@@ -441,19 +441,7 @@ class ContainerExecutionAdapter:
             "--workdir",
             request.working_directory,
         ]
-        if request.lease_scope is not LeaseScope.NONE:
-            command.extend(
-                (
-                    "--cpuset-cpus",
-                    accelerator.cpu_affinity,
-                    "--cpuset-mems",
-                    str(accelerator.numa_node),
-                    "--device",
-                    "/dev/kfd",
-                    "--device",
-                    "/dev/dri",
-                )
-            )
+        command.extend(self._resource_arguments(request, target))
         for key, value in sorted(self._container_environment(request, target).items()):
             command.extend(("--env", f"{key}={value}"))
         for mount in request.mounts:
@@ -464,6 +452,21 @@ class ContainerExecutionAdapter:
         command.extend(("--entrypoint", request.argv[0], request.container_image))
         command.extend(request.argv[1:])
         return tuple(command)
+
+    def _resource_arguments(self, request: ExecutionRequest, target: TargetSpec) -> tuple[str, ...]:
+        if request.lease_scope is LeaseScope.NONE:
+            return ()
+        accelerator = target.execution_host.accelerator
+        return (
+            "--cpuset-cpus", accelerator.cpu_affinity,
+            "--cpuset-mems", str(accelerator.numa_node),
+            "--device", "/dev/kfd", "--device", "/dev/dri",
+        )
+
+    def _execution_metadata(
+        self, request: ExecutionRequest, target: TargetSpec
+    ) -> dict[str, object]:
+        return {}
 
     @staticmethod
     def _container_environment(request: ExecutionRequest, target: TargetSpec) -> dict[str, str]:

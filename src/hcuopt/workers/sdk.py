@@ -191,6 +191,17 @@ class Worker:
                     **result,
                     "cleanup_evidence": self._cleanup_job(job, payload),
                 }
+            # Completion commits the job before the coordinator/HTTP response
+            # finishes. A concurrent heartbeat then sees a terminal job (409)
+            # and can incorrectly start lost-lease cleanup. Quiesce background
+            # heartbeats first, then renew/check ownership once synchronously.
+            heartbeat_stop.set()
+            heartbeat.join(timeout=35)
+            if heartbeat.is_alive():
+                raise RuntimeError("heartbeat did not stop before job completion")
+            if lease_lost.is_set():
+                raise RuntimeError("job lease was lost before completion")
+            self.client.heartbeat(self.worker_id, job)
             self.client.complete(job, result)
         except Exception as exc:
             LOGGER.exception("worker %s failed job %s", self.worker_id, job["job_id"])
