@@ -228,6 +228,7 @@ def create_app(
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
+    framework_signoff_authorizer: Callable[[Request, UUID], str | None] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -969,7 +970,20 @@ def create_app(
         payload: FrameworkSmokeSignoffRequest,
         request: Request,
     ) -> dict[str, Any]:
-        return repo(request).signoff_framework_task(task_id, payload)
+        if framework_signoff_authorizer is None:
+            raise HTTPException(503, "Framework Smoke signing identity is not configured")
+        try:
+            actor = framework_signoff_authorizer(request, task_id)
+        except Exception:
+            raise HTTPException(503, "Framework Smoke signing identity unavailable") from None
+        if not isinstance(actor, str) or not actor.strip() or len(actor) > 200:
+            raise HTTPException(403, "Framework Smoke signing authorization required")
+        if payload.actor != actor:
+            raise HTTPException(403, "Framework Smoke signer identity mismatch")
+        # The authenticated deployment identity, never an unchecked browser field,
+        # is handed to the original transactional state machine.
+        bound = payload.model_copy(update={"actor": actor})
+        return repo(request).signoff_framework_task(task_id, bound)
 
     @application.post("/v1/stage0-runs", response_model=Stage0RunView, status_code=201)
     def create_stage0_run(
