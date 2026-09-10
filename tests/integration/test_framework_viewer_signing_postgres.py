@@ -21,7 +21,7 @@ from hcuopt.deployment.framework_signoff_identity import (
     FrameworkSignoffIdentity,
 )
 from hcuopt.deployment.framework_smoke_viewer import create_viewer
-from hcuopt.deployment.framework_viewer_signing import ViewerSigning
+from hcuopt.deployment.framework_viewer_signing import ViewerSigning, read_framework_signoff
 from hcuopt.domain.enums import WorkerType
 from hcuopt.orchestrator.router import WorkflowRouter
 from hcuopt.storage.repository import PostgresRepository
@@ -120,7 +120,9 @@ def test_http_signoff_replay_and_readback_in_isolated_schema(repository, decisio
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
     signing = ViewerSigning(
-        FrameworkSigningSession(identity), repo.signoff_framework_task, repo.framework_signoff
+        FrameworkSigningSession(identity),
+        repo.signoff_framework_task,
+        lambda task_id: read_framework_signoff(repo, task_id),
     )
     app = create_viewer(
         task_id=task,
@@ -156,7 +158,7 @@ def test_http_signoff_replay_and_readback_in_isolated_schema(repository, decisio
         assert [reply.status_code for reply in replies] == [200, 200]
         assert replies[0].json() == replies[1].json()
         # Simulates a lost POST response: query persisted result with a NEW repository connection.
-        persisted = PostgresRepository(dsn).framework_signoff(task)
+        persisted = read_framework_signoff(PostgresRepository(dsn), task)
         assert persisted["idempotency_key"] == body["idempotency_key"]
         assert persisted["task_state"] == state
         assert client.get(url, headers=headers).json()["signoff"] == replies[0].json()

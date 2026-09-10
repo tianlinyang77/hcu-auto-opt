@@ -31,7 +31,7 @@ from hcuopt.deployment.framework_signoff_identity import (
     FrameworkSignoffIdentity,
 )
 from hcuopt.deployment.framework_smoke_viewer import create_viewer
-from hcuopt.deployment.framework_viewer_signing import ViewerSigning
+from hcuopt.deployment.framework_viewer_signing import ViewerSigning, read_framework_signoff
 from hcuopt.storage.repository import PostgresRepository
 
 
@@ -293,7 +293,7 @@ def serve(config: ViewerConfig, database_dsn: str, *, instance_parent: Path | No
                 read_repository = PostgresRepository(dsn)
                 signing = ViewerSigning(FrameworkSigningSession(identity),
                                         write_repository.signoff_framework_task,
-                                        read_repository.framework_signoff)
+                                        lambda task: read_framework_signoff(read_repository, task))
                 signing_key.write_text(token, encoding="utf-8")
                 del token
                 record["signing_actor"] = identity.actor

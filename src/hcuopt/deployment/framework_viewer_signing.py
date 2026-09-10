@@ -21,6 +21,20 @@ class ViewerSigning:
     read: Callable
 
 
+def read_framework_signoff(repository, task_id: UUID):
+    """Project an existing durable decision; no write or alternate state machine."""
+    with repository.connection() as connection:
+        return connection.execute(
+            """
+            SELECT signoff.*, task.state AS task_state
+            FROM framework_smoke_signoffs AS signoff
+            JOIN tasks AS task ON task.task_id = signoff.task_id
+            WHERE signoff.task_id = %s
+            """,
+            (task_id,),
+        ).fetchone()
+
+
 def attach_signing(app: FastAPI, signing: ViewerSigning, access_active: Callable[[], bool]):
     def authorizer(request, task):
         return signing.session(request, task) if access_active() else None

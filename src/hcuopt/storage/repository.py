@@ -8489,19 +8489,6 @@ class PostgresRepository(
         assert row is not None
         return row
 
-    def framework_signoff(self, task_id: UUID) -> dict[str, Any] | None:
-        """Read a durable decision without replaying a write or exposing other tasks."""
-        with self.connection() as connection:
-            return connection.execute(
-                """
-                SELECT signoff.*, task.state AS task_state
-                FROM framework_smoke_signoffs AS signoff
-                JOIN tasks AS task ON task.task_id = signoff.task_id
-                WHERE signoff.task_id = %s
-                """,
-                (task_id,),
-            ).fetchone()
-
     def signoff_framework_task(
         self,
         task_id: UUID,

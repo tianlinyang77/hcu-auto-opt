@@ -43,12 +43,12 @@ def test_live_signing_issue_revoke_and_stop(tmp_path, monkeypatch, capsys):
     summary.task.task_id = cfg.task_id
     summary.evidence_bundles[0]["task_id"] = cfg.task_id
     monkeypatch.setattr(service, "make_reader", lambda *_: lambda: summary)
+    monkeypatch.setattr(service, "read_framework_signoff", lambda *_: None)
     calls = []
     monkeypatch.setattr(
         service,
         "PostgresRepository",
         lambda *_: SimpleNamespace(
-            framework_signoff=lambda *_: None,
             signoff_framework_task=lambda *args: calls.append(args),
         ),
     )
