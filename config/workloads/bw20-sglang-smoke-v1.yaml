@@ -1,0 +1,33 @@
+# A paired functional workload, not a performance workload or execution approval.
+protocol_version: sglang-smoke-v1
+workload_id: bw20-sglang-smoke-v1
+target_id: bw20-sglang-0.5.12
+model_path: /public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct
+served_model_name: hcuopt-smoke
+host: 127.0.0.1
+port: 30000
+tensor_parallel_size: 1
+prompt: The capital of France is
+temperature: 0.0
+max_new_tokens: 8
+sampling_seed: 0
+stream: false
+ready_path: /health_generate
+generate_path: /generate
+ready_timeout_seconds: 300.0
+ready_poll_interval_seconds: 1.0
+request_timeout_seconds: 60.0
+stop_grace_seconds: 10.0
+execution_timeout_seconds: 420
+runner_python_executable: python
+server_entrypoint: sglang
+server_subcommand: serve
+trust_remote_code: true
+attention_backend: fa3
+page_size: 64
+mem_fraction_static: 0.85
+cookbook_repository: https://github.com/HYGON-AI/inference-cookbook-das
+cookbook_commit: 2a7f431301e41e6ea1f377129bf5ba3e43ae299f
+cookbook_paths:
+  - CONTRIBUTING.md
+  - docs/model-deployment/sglang/qwen3.5.md

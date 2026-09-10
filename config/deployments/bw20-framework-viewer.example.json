@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "task_id": "b90b2fdb-24da-4e70-98ca-1a64d38bd0af",
+  "database_schema": "bw20_api_3204bed89e0a4381a51367c97026deb3",
+  "adapter_profile": "bw20-framework-smoke-v1",
+  "static_root": "../../web/dist/client",
+  "port": 4194,
+  "ssh_target": "github@10.17.1.2",
+  "ssh_remote_port": 55433
+}

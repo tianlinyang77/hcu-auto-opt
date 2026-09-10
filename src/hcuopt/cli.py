@@ -40,6 +40,22 @@ def _load_stage0(path: Path) -> Stage0Evidence:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hcuopt")
     sub = parser.add_subparsers(dest="command", required=True)
+    viewer = sub.add_parser("framework-viewer", help="manage a local read-only result viewer")
+    viewer_sub = viewer.add_subparsers(dest="viewer_action", required=True)
+    viewer_serve = viewer_sub.add_parser(
+        "serve", help="run in foreground; Ctrl+C stops this instance"
+    )
+    viewer_serve.add_argument("config", type=Path)
+    viewer_serve.add_argument("--dsn-env", default="HCUOPT_VIEWER_DATABASE_URL")
+    for action in ("status", "stop"):
+        viewer_control = viewer_sub.add_parser(action)
+        viewer_control.add_argument("instance_directory", type=Path)
+    evidence = sub.add_parser(
+        "bw20-evidence-verify", help="replay historical BW20 F1 evidence without HCU or DB access"
+    )
+    evidence.add_argument("directory", type=Path)
+    evidence.add_argument("--receipt-sha256", required=True,
+                          help="trusted out-of-band SHA256 of independent-readback.json")
     stage0 = sub.add_parser("stage0-evaluate", help="evaluate Stage 0 probe evidence")
     stage0.add_argument("evidence", type=Path)
     api = sub.add_parser("api", help="run the FastAPI control plane")
@@ -93,6 +109,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "framework-viewer":
+        from hcuopt.deployment.viewer_service import (
+            ViewerServiceError,
+            control_instance,
+            load_config,
+            serve,
+        )
+
+        try:
+            if args.viewer_action == "serve":
+                dsn = os.environ.pop(args.dsn_env, "")
+                return serve(load_config(args.config), dsn)
+            print(json.dumps(control_instance(args.instance_directory, args.viewer_action)))
+            return 0
+        except ViewerServiceError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            return 2
+        except (OSError, ValueError):
+            print(json.dumps({"ok": False, "error": "viewer_command_failed"}))
+            return 2
+    if args.command == "bw20-evidence-verify":
+        from hcuopt.deployment.bw20_evidence import (
+            EvidenceVerificationError,
+            verify_bw20_evidence,
+        )
+
+        try:
+            report = verify_bw20_evidence(args.directory, receipt_sha256=args.receipt_sha256)
+        except EvidenceVerificationError as exc:
+            print(json.dumps({"historical_evidence_verified": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(report, indent=2))
+        return 0
     agent_generation_result = run_agent_generation_command(args)
     if agent_generation_result is not None:
         return agent_generation_result
