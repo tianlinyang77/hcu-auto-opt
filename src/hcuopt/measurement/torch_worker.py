@@ -14,7 +14,7 @@ import math
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -55,12 +55,15 @@ def _operation_multiplier(probe_type: str, segment: str) -> int:
     return 1
 
 
-def _child_loop(command_fd: int, response_fd: int) -> int:
+def _child_loop(command_fd: int, response_fd: int,
+                device_validator: Callable[[Any], dict] | None = None) -> int:
     command_stream = os.fdopen(command_fd, "r", encoding="utf-8", buffering=1)
     response_stream = os.fdopen(response_fd, "w", encoding="utf-8", buffering=1)
     try:
         import torch
 
+        # Deployment checks run only in the forked child, before test tensors/Events.
+        device_identity = device_validator(torch) if device_validator is not None else None
         if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
             raise RuntimeError("locked worker requires exactly one visible HCU")
         torch.cuda.set_device(0)
@@ -74,6 +77,7 @@ def _child_loop(command_fd: int, response_fd: int) -> int:
                 "protocol": PROTOCOL,
                 "event": "ready",
                 "process_id": os.getpid(),
+                **({"device_identity": device_identity} if device_identity is not None else {}),
             },
         )
         while command := _read_json(command_stream):
@@ -184,14 +188,14 @@ def _child_loop(command_fd: int, response_fd: int) -> int:
         response_stream.close()
 
 
-def _controller_loop() -> int:
+def _controller_loop(device_validator: Callable[[Any], dict] | None = None) -> int:
     parent_read, child_write = os.pipe()
     child_read, parent_write = os.pipe()
     child_pid = os.fork()
     if child_pid == 0:
         os.close(parent_read)
         os.close(parent_write)
-        exit_code = _child_loop(child_read, child_write)
+        exit_code = _child_loop(child_read, child_write, device_validator)
         os._exit(exit_code)
 
     os.close(child_read)
@@ -255,13 +259,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *,
+         device_validator: Callable[[Any], dict] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.controller:
         raise SystemExit("the Stage 0 torch worker must run through its lifecycle controller")
     if os.name != "posix" or not hasattr(os, "fork"):
         raise SystemExit("the Stage 0 torch worker requires POSIX fork/waitpid")
-    return _controller_loop()
+    return _controller_loop(device_validator)
 
 
 if __name__ == "__main__":
