@@ -21,6 +21,95 @@ from tests.unit.test_framework_smoke_viewer import projection_fixture
 DSN = "host=127.0.0.1 port=55433 user=fixture password=private-fixture dbname=fixture"
 
 
+def test_signing_requires_explicit_config_and_separate_connection(tmp_path):
+    cfg = config(tmp_path)
+    with pytest.raises(service.ViewerServiceError, match="config_and_separate"):
+        service.serve(cfg, DSN, signing_database_dsn=DSN)
+    cfg.signing = service.SigningConfig(actor="fixture-owner")
+    with pytest.raises(service.ViewerServiceError, match="config_and_separate"):
+        service.serve(cfg, DSN)
+    with pytest.raises(service.ViewerServiceError, match="database_mismatch"):
+        service.signing_dsn(DSN.replace("dbname=fixture", "dbname=other"), cfg, DSN)
+    write = conninfo_to_dict(service.signing_dsn(DSN, cfg, DSN))
+    read = conninfo_to_dict(service.readonly_dsn(DSN, cfg.database_schema))
+    assert "default_transaction_read_only=off" in write["options"]
+    assert "default_transaction_read_only=on" in read["options"]
+
+
+def test_live_signing_issue_revoke_and_stop(tmp_path, monkeypatch, capsys):
+    cfg = config(tmp_path)
+    cfg.signing = service.SigningConfig(actor="fixture-owner", ttl_seconds=60)
+    summary = projection_fixture()
+    summary.task.task_id = cfg.task_id
+    summary.evidence_bundles[0]["task_id"] = cfg.task_id
+    monkeypatch.setattr(service, "make_reader", lambda *_: lambda: summary)
+    monkeypatch.setattr(service, "read_framework_signoff", lambda *_: None)
+    calls = []
+    monkeypatch.setattr(
+        service,
+        "PostgresRepository",
+        lambda *_: SimpleNamespace(
+            signoff_framework_task=lambda *args: calls.append(args),
+        ),
+    )
+    parent = tmp_path / "instances"
+    errors = []
+
+    def run():
+        try:
+            service.serve(cfg, DSN, instance_parent=parent, signing_database_dsn=DSN)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    directory = None
+    try:
+        directory, record = wait_record(parent)
+        keys = [
+            (directory / name).read_text()
+            for name in ("access-key.txt", "control-key.txt", "signing-key.txt")
+        ]
+        assert len(set(keys)) == 3
+        assert record["signing_actor"] == "fixture-owner"
+        assert all(key not in (directory / "instance.json").read_text() for key in keys)
+        with httpx.Client(trust_env=False, timeout=3) as client:
+            root = f"http://127.0.0.1:{cfg.port}"
+            path = f"/v1/framework-smoke/tasks/{cfg.task_id}/signoff"
+            assert (
+                client.get(root + path, headers={"Authorization": "Bearer " + keys[0]}).status_code
+                == 403
+            )
+            status = client.get(root + path, headers={"Authorization": "Bearer " + keys[2]})
+            assert status.status_code == 200 and status.json()["signoff"] is None
+            assert not calls  # Launch, read and identity verification never sign.
+            assert (
+                service.control_instance(directory, "revoke-signing")["status"] == "signing_revoked"
+            )
+            assert not (directory / "signing-key.txt").exists()
+            assert (
+                client.get(root + path, headers={"Authorization": "Bearer " + keys[2]}).status_code
+                == 403
+            )
+            assert service.control_instance(directory, "status")["status"] == "running"
+    finally:
+        if directory:
+            service.control_instance(directory, "stop")
+        else:
+            # Startup polling can fail; still stop only this fixture's authenticated instance.
+            for candidate in parent.glob("*/instance.json"):
+                service.control_instance(candidate.parent, "stop")
+        thread.join(timeout=25)
+    assert not errors and not thread.is_alive()
+    assert directory is not None
+    assert not any(
+        (directory / name).exists()
+        for name in ("access-key.txt", "control-key.txt", "signing-key.txt")
+    )
+    captured = capsys.readouterr()
+    assert all(key not in captured.out + captured.err for key in keys)
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -104,7 +193,11 @@ def wait_record(parent, wanted="running"):
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         for path in parent.glob("*/instance.json"):
-            record = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (PermissionError, FileNotFoundError):
+                # Windows can briefly deny reads while the writer atomically replaces metadata.
+                continue
             if record["status"] == wanted:
                 return path.parent, record
         time.sleep(0.05)
@@ -258,7 +351,7 @@ def test_credential_cleanup_attempts_both_files(tmp_path, monkeypatch):
         service.serve(cfg, DSN, instance_parent=parent)
     assert "private-fixture" not in str(error.value)
     directory, _ = wait_record(parent, "failed")
-    assert attempted == ["access-key.txt", "control-key.txt"]
+    assert attempted == ["access-key.txt", "control-key.txt", "signing-key.txt"]
     assert not (directory / "control-key.txt").exists()
     original_unlink(directory / "access-key.txt")
 

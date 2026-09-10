@@ -228,6 +228,7 @@ def create_app(
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
+    framework_signoff_authorizer: Callable[[Request, UUID], str | None] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -969,7 +970,10 @@ def create_app(
         payload: FrameworkSmokeSignoffRequest,
         request: Request,
     ) -> dict[str, Any]:
-        return repo(request).signoff_framework_task(task_id, payload)
+        from hcuopt.api.framework_signoff import submit_signoff
+
+        return submit_signoff(framework_signoff_authorizer, repo(request).signoff_framework_task,
+                              request, task_id, payload)
 
     @application.post("/v1/stage0-runs", response_model=Stage0RunView, status_code=201)
     def create_stage0_run(

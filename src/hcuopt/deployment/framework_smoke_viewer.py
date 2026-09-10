@@ -1,8 +1,9 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
-"""Local-only, single-task, read-only view of the existing Framework Smoke model.
+"""Local-only, single-task view of the existing Framework Smoke model.
 
-No job/lease writes, signing, raw evidence download, or arbitrary file serving.
+Read-only by default, signing only through an explicit independent capability.
+No job/lease writes, raw evidence download, or arbitrary file serving.
 The embedding deployment owns the database connection and access credential.
 """
 
@@ -18,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 
 from hcuopt.contracts.v1 import FrameworkSmokeSummary
+from hcuopt.deployment.framework_viewer_signing import ViewerSigning, attach_signing
 
 
 def project_summary(summary: FrameworkSmokeSummary) -> dict:
@@ -79,10 +81,22 @@ def create_viewer(*, task_id: UUID, credential: str,
                   read_summary: Callable[[], FrameworkSmokeSummary],
                   static_root: Path | None = None,
                   control: tuple[UUID, str, Callable[[], None]] | None = None,
-                  access_active: Callable[[], bool] | None = None) -> FastAPI:
+                  access_active: Callable[[], bool] | None = None,
+                  signing: ViewerSigning | None = None,
+                  revoke_signing: Callable[[], None] | None = None) -> FastAPI:
     if len(credential) < 32 or not credential.isascii():
         raise ValueError("viewer requires an independent strong ASCII access credential")
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    if signing is not None:
+        import hashlib
+
+        identity = signing.session.identity
+        if identity.task_id != task_id or identity.token_sha256 in {
+            hashlib.sha256(key.encode("ascii")).hexdigest()
+            for key in (credential, control[1] if control else credential)
+        }:
+            raise ValueError("signing credential must be independent and task-bound")
+        attach_signing(app, signing, access_active or (lambda: True))
 
     if control is not None:
         instance_id, control_key, stop = control
@@ -107,6 +121,20 @@ def create_viewer(*, task_id: UUID, credential: str,
             authorize_control(request, requested_instance)
             stop()
             return {"instance_id": str(instance_id), "status": "stopping"}
+
+        if signing is not None and revoke_signing is not None:
+            @app.post("/v1/viewer-control/{requested_instance}/revoke-signing")
+            def control_revoke_signing(requested_instance: UUID, request: Request):
+                authorize_control(request, requested_instance)
+                # Reject new writes even if credential file cleanup fails.
+                signing.session.revoke()
+                try:
+                    revoke_signing()
+                except Exception:
+                    raise HTTPException(
+                        503, "Signing revoked; credential cleanup incomplete"
+                    ) from None
+                return {"instance_id": str(instance_id), "status": "signing_revoked"}
 
     @app.middleware("http")
     async def local_boundary(request: Request, call_next):
@@ -133,7 +161,9 @@ def create_viewer(*, task_id: UUID, credential: str,
             summary = read_summary()
             if summary.task.task_id != task_id:
                 raise ValueError("read model task mismatch")
-            return project_summary(summary)
+            result = project_summary(summary)
+            result["write_actions_available"] = signing is not None and signing.session.active
+            return result
         except Exception as exc:
             # Never reflect DB connection strings, internal paths or credential values.
             raise HTTPException(503, "Task read model unavailable") from exc
