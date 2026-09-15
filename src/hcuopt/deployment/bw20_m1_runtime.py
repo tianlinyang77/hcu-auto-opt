@@ -27,6 +27,7 @@ from hcuopt.deployment.nmz36_m1_allocator import ALLOCATOR_MOUNT_TARGET
 from hcuopt.domain.errors import ExecutionSafetyError
 
 ROOT = PurePosixPath("/home/github/hcu-auto-opt-runtime/bw20-m1")
+CONTROLLER_ROOT = PurePosixPath("/home/github/hcu-auto-opt-runtime/bw20-stage0")
 M1_WORKER_MODULE = "hcuopt.measurement.m1_allocator_worker"
 M1_WORKER_PROTOCOL = "hcuopt-m1-allocator-worker-v1"
 M1Arm = Literal["baseline", "candidate"]
@@ -82,7 +83,7 @@ def build_m1_container_plan(
         raise ValueError("BW20 M1 Candidate Artifact Hash must be SHA256")
 
     run_root = ROOT / str(run_id)
-    source_root = _inside_run(str(run_root / "controller"), run_root, "controller")
+    source_root = str(CONTROLLER_ROOT / str(run_id) / "controller")
     evidence_root = _inside_run(str(run_root / "evidence"), run_root, "evidence")
     cache_root = _inside_run(str(run_root / "cache"), run_root, "cache")
     artifact_path = (
@@ -307,6 +308,7 @@ class BW20M1DockerTransport(BW20DockerTransport):
 __all__ = [
     "BW20M1ContainerPlan",
     "BW20M1DockerTransport",
+    "CONTROLLER_ROOT",
     "M1_WORKER_PROTOCOL",
     "ROOT",
     "build_m1_container_plan",
