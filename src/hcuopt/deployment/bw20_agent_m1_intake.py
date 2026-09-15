@@ -69,6 +69,12 @@ TASK_KEY = "bw20-m1-agent-allocator-free-v1"
 HOTSPOT_KEY = "bw20-m1-agent-allocator-free-hotspot-v1"
 GENERATION_KEY = "bw20-m1-agent-allocator-free-generation-v1"
 CREATED_AT = datetime(2026, 9, 15, tzinfo=timezone.utc)
+DEFAULT_HOTSPOT_SUMMARY = (
+    "Review one source-only optimization for PagedTokenToKVPoolAllocator.free. "
+    "The only accepted business scope is the frozen page-contiguous input family. "
+    "Historical nmz36 profiling is a transferred hypothesis; do not claim BW20 share, "
+    "correctness, speedup, or general safety. Return one bounded single-file proposal."
+)
 HISTORICAL_PROFILER_URI = (
     "file:///home/github/hcu-auto-opt-m1-runs/20260825-prefill-v7-hcu7-uncached/"
     "traces/1787646066.6493704/"
@@ -141,12 +147,15 @@ def _register_baseline(repository: Any, snapshot_file: Path) -> SourceSnapshot:
 def _knowledge(
     source_root: Path,
     generation_root: Path,
+    *,
+    generation_key: str,
+    created_at: datetime,
 ) -> tuple[KnowledgeSnapshotStore, KnowledgeSnapshot]:
     document = (source_root / "docs" / "m1-hotspot-overlay.md").resolve(strict=True)
     payload = document.read_bytes()
     source_hash = _sha256(payload)
     snapshot = KnowledgeSnapshot(
-        snapshot_id=uuid5(NAMESPACE_URL, f"hcuopt:{GENERATION_KEY}:knowledge:v1"),
+        snapshot_id=uuid5(NAMESPACE_URL, f"hcuopt:{generation_key}:knowledge:v1"),
         sources=(
             {
                 "knowledge_id": "repository/hcu-auto-opt/m1-hotspot-overlay",
@@ -158,7 +167,7 @@ def _knowledge(
             },
         ),
         created_by="bw20-agent-m1-bootstrap",
-        created_at=CREATED_AT,
+        created_at=created_at,
     )
     store = KnowledgeSnapshotStore(
         generation_root / "knowledge",
@@ -180,6 +189,9 @@ def bootstrap(
     generation_root: Path,
     base_url: str,
     model: str,
+    generation_key: str = GENERATION_KEY,
+    hotspot_summary: str = DEFAULT_HOTSPOT_SUMMARY,
+    created_at: datetime = CREATED_AT,
     coordinator: ApexGenerationCoordinator | None = None,
 ) -> dict[str, Any]:
     """Create reproducible authority objects through A, stopping before human review."""
@@ -299,8 +311,13 @@ def bootstrap(
     if UUID(str(hotspot["hotspot_id"])) != hotspot_id:
         raise RuntimeError("BW20 M1 Hotspot identity drifted")
 
-    knowledge_store, knowledge = _knowledge(source_root.resolve(strict=True), generation_root)
-    generation_run_id = generation_run_id_for(GENERATION_KEY)
+    knowledge_store, knowledge = _knowledge(
+        source_root.resolve(strict=True),
+        generation_root,
+        generation_key=generation_key,
+        created_at=created_at,
+    )
+    generation_run_id = generation_run_id_for(generation_key)
     request = CandidateGenerationRequest(
         request_id=uuid5(generation_run_id, "hcuopt:bw20-agent-m1-request:v1"),
         generation_run_id=generation_run_id,
@@ -331,12 +348,7 @@ def bootstrap(
         baseline=BaselineOverlaySource(snapshot=baseline, path=ALLOCATOR_RELATIVE_PATH),
         knowledge_store=knowledge_store,
         settings=settings,
-        hotspot_summary=(
-            "Review one source-only optimization for PagedTokenToKVPoolAllocator.free. "
-            "The only accepted business scope is the frozen page-contiguous input family. "
-            "Historical nmz36 profiling is a transferred hypothesis; do not claim BW20 share, "
-            "correctness, speedup, or general safety. Return one bounded single-file proposal."
-        ),
+        hotspot_summary=hotspot_summary,
     )
     input_artifact = write_evidence_bytes(
         generation_root / "inputs" / str(generation_run_id) / "input.json",
@@ -370,13 +382,13 @@ def bootstrap(
             "max_proposals": 1,
         },
         created_by="bw20-agent-m1-bootstrap",
-        created_at=CREATED_AT,
+        created_at=created_at,
     )
     start_request = GenerationRunStartRequest(
         request=request,
         plan=plan,
         actor="bw20-agent-m1-bootstrap",
-        idempotency_key=GENERATION_KEY,
+        idempotency_key=generation_key,
     )
     start_artifact = _publish(generation_root, "start-request", start_request)
     started = (coordinator or ApexGenerationCoordinator()).start(start_request, repository)
@@ -409,10 +421,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generation-root", type=Path, required=True)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--generation-key", default=GENERATION_KEY)
+    parser.add_argument("--hotspot-summary-file", type=Path)
+    parser.add_argument(
+        "--created-at",
+        default=CREATED_AT.isoformat(),
+        help="fixed timezone-aware ISO-8601 timestamp used for idempotent replay",
+    )
     args = parser.parse_args(argv)
     database_url = os.getenv("HCUOPT_DATABASE_URL")
     if not database_url:
         parser.error("HCUOPT_DATABASE_URL is required")
+    created_at = datetime.fromisoformat(args.created_at.replace("Z", "+00:00"))
+    if created_at.tzinfo is None:
+        parser.error("--created-at must be timezone-aware")
+    hotspot_summary = DEFAULT_HOTSPOT_SUMMARY
+    if args.hotspot_summary_file is not None:
+        hotspot_summary = args.hotspot_summary_file.read_text(encoding="utf-8").strip()
     result = bootstrap(
         PostgresRepository(database_url),
         source_root=args.source_root,
@@ -421,6 +446,9 @@ def main(argv: list[str] | None = None) -> int:
         generation_root=args.generation_root,
         base_url=args.base_url,
         model=args.model,
+        generation_key=args.generation_key,
+        hotspot_summary=hotspot_summary,
+        created_at=created_at,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

@@ -144,3 +144,65 @@ def test_bootstrap_binds_real_authority_but_stops_before_candidate(tmp_path: Pat
     envelope = json.loads(input_path.read_text(encoding="utf-8"))
     assert envelope["context"]["performance_conclusion"] == "not_measured"
     assert envelope["context"]["formal_intake_allowed"] is False
+
+
+def test_bootstrap_creates_independent_generation_for_corrected_advisory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "baseline"
+    allocator = source / "python/sglang/srt/mem_cache/allocator.py"
+    allocator.parent.mkdir(parents=True)
+    allocator.write_text("def free(self):\n    return None\n", encoding="utf-8")
+    _git(source, "init")
+    _git(source, "config", "core.autocrlf", "false")
+    _git(source, "add", ".")
+    _git(
+        source,
+        "-c",
+        "user.name=HCU Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "test(source): add baseline",
+    )
+    _git(source, "remote", "add", "origin", "git@github.com:HYGON-AI/sglang-das.git")
+    snapshot = SourceSnapshot(
+        kind="baseline",
+        repository="git@github.com:HYGON-AI/sglang-das.git",
+        commit=_git(source, "rev-parse", "HEAD"),
+        tree_hash=_git(source, "rev-parse", "HEAD^{tree}"),
+        source_hash=canonical_source_hash(source),
+        worktree_uri=source.as_uri(),
+        clean=True,
+    )
+    snapshot_file = tmp_path / "baseline.json"
+    snapshot_file.write_text(snapshot.model_dump_json(), encoding="utf-8")
+    repository = Repository(snapshot)
+    generation_key = "bw20-m1-agent-allocator-free-generation-v2"
+    advisory = (
+        "page-contiguous means tokens from each page are adjacent. Page indices are "
+        "non-decreasing and contain repeated values; they are not strictly increasing."
+    )
+
+    result = bootstrap(
+        repository,
+        source_root=ROOT,
+        baseline_snapshot_file=snapshot_file,
+        evidence_root=tmp_path / "evidence",
+        generation_root=tmp_path / "generation",
+        base_url="https://api.example.invalid/anthropic",
+        model="test-model",
+        generation_key=generation_key,
+        hotspot_summary=advisory,
+        coordinator=Coordinator(),
+    )
+
+    assert result["generation_run_id"] != "061c23b8-8a52-5c89-8afc-f24a3da9b739"
+    assert repository.start.idempotency_key == generation_key
+    assert repository.start.request.generation_run_id == repository.start.plan.generation_run_id
+    envelope = json.loads(file_uri_to_path(result["input_uri"]).read_text(encoding="utf-8"))
+    assert envelope["context"]["hotspot_summary"] == advisory
+    assert "not strictly increasing" in envelope["context"]["hotspot_summary"]
