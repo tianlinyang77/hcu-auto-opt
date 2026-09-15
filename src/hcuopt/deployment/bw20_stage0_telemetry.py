@@ -173,7 +173,11 @@ class BW20TelemetryCollector:
         for binding in bindings:
             if (
                 binding.get("resource_id") != RESOURCE
-                or binding.get("worker_protocol") != "hcuopt-stage0-torch-worker-v1"
+                or binding.get("worker_protocol")
+                not in {
+                    "hcuopt-stage0-torch-worker-v1",
+                    "hcuopt-m1-allocator-worker-v1",
+                }
             ):
                 raise BW20TelemetryError("invalid managed process binding")
             child = binding["host_measured"]

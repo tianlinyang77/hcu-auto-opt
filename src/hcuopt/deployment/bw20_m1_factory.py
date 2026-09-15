@@ -207,6 +207,7 @@ class BW20M1DeviceTimerFactory:
         target: TargetSpec,
         runner,
         bundle: ControllerBundle,
+        session_registry: BW20M1WorkloadFactory,
         session_budget_seconds: int = 480,
         policy: BW20M1Policy = BW20_M1_POLICY,
     ) -> None:
@@ -214,6 +215,7 @@ class BW20M1DeviceTimerFactory:
         self.target = target.model_copy(deep=True)
         self.runner = runner
         self.bundle = bundle
+        self.session_registry = session_registry
         self.session_budget_seconds = session_budget_seconds
         self.policy = policy
 
@@ -238,7 +240,94 @@ class BW20M1DeviceTimerFactory:
             ),
             budget_seconds=self.session_budget_seconds,
         )
+        with self.session_registry._lock:
+            if self.session_registry._closing:
+                raise BW20M1SessionError("BW20 M1 session registry is closing")
+            self.session_registry.sessions.append(session)
         return DockerTorchEventTimer(session.open())
 
 
-__all__ = ["BW20M1DeviceTimerFactory", "BW20M1WorkloadFactory"]
+class BW20M1Cleaner:
+    """Fence all job-owned sessions, then observe idle auto-policy restoration."""
+
+    def __init__(self, *, factory, telemetry, initial_clock_state) -> None:
+        if (
+            set(initial_clock_state) != {"mode", "sclk_mhz", "mclk_mhz"}
+            or initial_clock_state["mode"] != "auto"
+            or initial_clock_state["sclk_mhz"] <= 0
+            or initial_clock_state["mclk_mhz"] <= 0
+        ):
+            raise ValueError("BW20 M1 requires an observed initial auto clock state")
+        self.factory = factory
+        self.telemetry = telemetry
+        self.initial = dict(initial_clock_state)
+        self.fenced = False
+        self.token = None
+        self.provenance = AdapterProvenance(
+            profile=BW20_MANUAL_CANDIDATE_PROFILE,
+            capability="resource_cleaner",
+            adapter_name=type(self).__name__,
+            adapter_version="1",
+            implementation_kind="real",
+        )
+
+    def fence(self, resource_id, fencing_token):
+        if (
+            resource_id != BW20_M1_POLICY.resource_id
+            or type(fencing_token) is not int
+            or fencing_token < 1
+        ):
+            raise ValueError("BW20 M1 cleanup scope is invalid")
+        sessions = list(self.factory.sessions)
+        if not sessions or any(
+            session.plan.resource_id != resource_id
+            or session.plan.fencing_token != fencing_token
+            for session in sessions
+        ):
+            raise ValueError("BW20 M1 cleanup does not own every session")
+        self.token = fencing_token
+        self.fenced = self.factory.finish()
+        return {
+            "fenced": self.fenced,
+            "resource_id": resource_id,
+            "fencing_token": fencing_token,
+            "scope": "job_owned_exact_container_ids",
+            "clock_mutation_performed": False,
+        }
+
+    def health_check(self, resource_id):
+        if resource_id != BW20_M1_POLICY.resource_id:
+            raise ValueError("BW20 M1 health scope is invalid")
+        healthy = False
+        reason = "session_cleanup_unconfirmed"
+        observation = None
+        if self.fenced:
+            try:
+                snapshot = self.telemetry.collect()
+                observation = self.telemetry.observations[-1]["raw"]
+                device = snapshot["device"]
+                files = observation["files"]
+                healthy = (
+                    not snapshot["background_processes"]
+                    and device["performance_level"] == self.initial["mode"] == "auto"
+                    and int(files["gpu_busy_percent"]) == 0
+                    and 0 <= int(files["mem_info_vram_used"]) <= 4 * 1024 * 1024
+                )
+                reason = "observed_idle_auto_policy" if healthy else "host_state_not_restored"
+            except Exception:
+                reason = "host_health_unknown"
+        return {
+            "resource_id": resource_id,
+            "healthy": healthy,
+            "quarantined": not healthy,
+            "reason": reason,
+            "host_observation": observation,
+            "clock_mutation_performed": False,
+        }
+
+
+__all__ = [
+    "BW20M1Cleaner",
+    "BW20M1DeviceTimerFactory",
+    "BW20M1WorkloadFactory",
+]

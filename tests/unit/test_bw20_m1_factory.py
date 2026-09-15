@@ -136,8 +136,19 @@ def test_factory_wires_staging_session_and_mirror_without_reimplementing_harness
 
 
 def test_device_timer_factory_requires_current_exclusive_job_context(tmp_path) -> None:
+    sessions = factory.BW20M1WorkloadFactory(
+        target=_target(),
+        runner=SimpleNamespace(),
+        bundle=_bundle(tmp_path),
+        local_evidence_root=tmp_path / "evidence",
+        harness_provenance=_provenance(),
+        baseline_module_hash=HASH,
+    )
     value = factory.BW20M1DeviceTimerFactory(
-        target=_target(), runner=SimpleNamespace(), bundle=_bundle(tmp_path)
+        target=_target(),
+        runner=SimpleNamespace(),
+        bundle=_bundle(tmp_path),
+        session_registry=sessions,
     )
     payload = {
         "_job_context": {
@@ -151,3 +162,44 @@ def test_device_timer_factory_requires_current_exclusive_job_context(tmp_path) -
     }
     with pytest.raises(ExecutionSafetyError, match="cross-target"):
         value(payload, tmp_path)
+
+
+def test_m1_cleaner_fences_only_sessions_owned_by_the_same_token() -> None:
+    class Telemetry:
+        observations = [
+            {
+                "raw": {
+                    "files": {
+                        "gpu_busy_percent": "0",
+                        "mem_info_vram_used": "0",
+                    }
+                }
+            }
+        ]
+
+        def collect(self):
+            return {
+                "device": {"performance_level": "auto"},
+                "background_processes": [],
+            }
+
+    sessions = SimpleNamespace(
+        sessions=[
+            SimpleNamespace(
+                plan=SimpleNamespace(
+                    resource_id=BW20_M1_POLICY.resource_id,
+                    fencing_token=9,
+                )
+            )
+        ],
+        finish=lambda: True,
+    )
+    cleaner = factory.BW20M1Cleaner(
+        factory=sessions,
+        telemetry=Telemetry(),
+        initial_clock_state={"mode": "auto", "sclk_mhz": 600, "mclk_mhz": 1800},
+    )
+    with pytest.raises(ValueError, match="own"):
+        cleaner.fence(BW20_M1_POLICY.resource_id, 10)
+    assert cleaner.fence(BW20_M1_POLICY.resource_id, 9)["fenced"] is True
+    assert cleaner.health_check(BW20_M1_POLICY.resource_id)["healthy"] is True
