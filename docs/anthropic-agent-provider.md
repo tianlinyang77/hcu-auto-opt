@@ -2,11 +2,15 @@
 
 ## 定位
 
-该组件把真实模型调用接到现有 M2b Agent/Apex Proposal 层，默认服务为：
+该组件把真实模型调用接到现有 M2b Agent/Apex Proposal 层。部署配置使用服务基址：
 
 ```text
-https://api.deepseek.com/anthropic/v1/messages
+https://api.deepseek.com/anthropic
 ```
+
+Provider 会把服务基址规范化为 Messages endpoint
+`https://api.deepseek.com/anthropic/v1/messages`。配置也兼容直接传入完整 endpoint；两种写法最终绑定到
+同一个请求地址。
 
 它只负责读取冻结的 Generation Request、热点源码、Profiler Evidence 和 Knowledge Snapshot，
 然后生成待人工审核的 Python/Triton startup-overlay Patch Proposal。它不拥有 HCU、Build、正确性、

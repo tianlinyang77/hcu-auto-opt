@@ -315,6 +315,33 @@ def _worker(
     )
 
 
+def test_provider_accepts_deepseek_service_base_address() -> None:
+    config = AnthropicMessagesProviderConfig(
+        endpoint="https://api.deepseek.com/anthropic",
+        model="deepseek-flash",
+        max_tokens=1_000,
+        timeout_seconds=5,
+        max_response_bytes=128 * 1024,
+    )
+
+    assert config.endpoint == "https://api.deepseek.com/anthropic/v1/messages"
+
+
+def test_provider_resolves_base_address_before_runner_request(tmp_path: Path) -> None:
+    with _server(_anthropic_response(_proposal_output())) as (endpoint, observed):
+        origin = endpoint.removesuffix("/v1/messages")
+        worker, claim = _worker(tmp_path, f"{origin}/anthropic/")
+        result = worker.run_claim(
+            claim,
+            source_files={SOURCE_PATH: SOURCE},
+            profiler_evidence=PROFILER_EVIDENCE,
+            runner_output_dir=tmp_path / "runner",
+        )
+
+    assert result.failure_code is None
+    assert observed["path"] == "/anthropic/v1/messages"
+
+
 @pytest.mark.parametrize("proposal_count", [1, 2])
 def test_real_provider_materializes_bounded_replayable_proposals(
     tmp_path: Path,

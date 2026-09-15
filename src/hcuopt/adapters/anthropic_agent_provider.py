@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from hcuopt.adapters.agent_generator import AgentProposalMaterializer
 from hcuopt.adapters.agent_knowledge import KnowledgeSnapshotStore
@@ -53,6 +54,25 @@ def _safe_source_path(value: str) -> str:
     return value
 
 
+def _messages_endpoint(value: str) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise SourceArtifactError("Anthropic provider service address is invalid")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SourceArtifactError("Anthropic provider service address is invalid")
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1/messages"):
+        path = f"{path}/v1/messages" if path else "/v1/messages"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
 @dataclass(frozen=True, slots=True)
 class AnthropicMessagesProviderConfig:
     endpoint: str
@@ -64,8 +84,7 @@ class AnthropicMessagesProviderConfig:
     thinking_mode: Literal["disabled", "provider_default"] = "disabled"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.endpoint, str) or not self.endpoint.endswith("/v1/messages"):
-            raise SourceArtifactError("Anthropic provider endpoint must end with /v1/messages")
+        object.__setattr__(self, "endpoint", _messages_endpoint(self.endpoint))
         if not isinstance(self.model, str) or not self.model.strip():
             raise SourceArtifactError("Anthropic provider model is required")
         if type(self.max_tokens) is not int or not 1 <= self.max_tokens <= 100_000_000:
