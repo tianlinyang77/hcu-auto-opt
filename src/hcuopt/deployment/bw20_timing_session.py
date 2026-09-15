@@ -10,6 +10,7 @@ are mandatory, and the owning Worker remains responsible for ledger settlement.
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from typing import Protocol
@@ -17,7 +18,12 @@ from typing import Protocol
 from hcuopt.adapters.bw20_execution import IMAGE_ID
 from hcuopt.adapters.execution import FENCING_LABEL, MANAGED_LABEL, RESOURCE_LABEL
 from hcuopt.deployment.bw20_environment import IMAGE
-from hcuopt.deployment.bw20_stage0_runtime import BW20TimingPlan, _start
+from hcuopt.deployment.bw20_stage0_runtime import (
+    GROUP_ASSET,
+    PASSWD_ASSET,
+    BW20TimingPlan,
+    _start,
+)
 from hcuopt.domain.enums import Stage0ProbeType
 from hcuopt.measurement.nmz36_runtime import DockerFormalStage0Workload, DockerTorchEventTimer
 
@@ -53,6 +59,7 @@ def validate_container(raw: Mapping, cid: str, plan: BW20TimingPlan) -> None:
         }
         valid = (raw["Id"] == cid and raw["Name"] == "/" + plan.container_name
                  and raw["Image"] == IMAGE_ID and config["Image"] == IMAGE
+                 and config["User"] == "1002:1002"
                  and labels[MANAGED_LABEL] == "true"
                  and labels[RESOURCE_LABEL] == plan.resource_id
                  and labels[FENCING_LABEL] == str(plan.fencing_token)
@@ -71,9 +78,11 @@ def validate_container(raw: Mapping, cid: str, plan: BW20TimingPlan) -> None:
         valid = valid and sorted(devices) == [
             ("/dev/dri/renderD135", "/dev/dri/renderD135", "rwm"), ("/dev/kfd", "/dev/kfd", "rwm")]
         mounts = [(m["Type"], m["Source"], m["Destination"], m["RW"]) for m in raw["Mounts"]]
-        valid = valid and len(mounts) == 2 and set(mounts) == {
+        valid = valid and len(mounts) == 4 and set(mounts) == {
             ("bind", plan.source_root, "/workspace", False),
-            ("bind", "/opt/hyhal", "/opt/hyhal", False)}
+            ("bind", "/opt/hyhal", "/opt/hyhal", False),
+            ("bind", f"{plan.source_root}/{PASSWD_ASSET}", "/etc/passwd", False),
+            ("bind", f"{plan.source_root}/{GROUP_ASSET}", "/etc/group", False)}
         valid = valid and host["Tmpfs"] == {"/tmp": "rw,nosuid,nodev,noexec,size=1g"}
         env = config["Env"]
         for name, value in (("HIP_VISIBLE_DEVICES", "0"), ("ROCR_VISIBLE_DEVICES", "0"),
@@ -104,6 +113,7 @@ class BW20TimingSession:
         self.channel = None
         self.start_observation = self.exit_observation = None
         self.identity_observations = []
+        self.cache_receipts = []
         self.cleanup_complete = False
         self.create_attempted = False
         self.closed = False
@@ -184,6 +194,33 @@ class BW20TimingSession:
                 raise TimingSessionError("invalid worker response")
             if payload.get("op") != "close":
                 self._binding()
+            if payload.get("op") == "measure":
+                receipt = result.get("cache_receipt")
+                if not isinstance(receipt, Mapping):
+                    raise TimingSessionError("missing measured cache receipt")
+                expected = {
+                    "schema_version": "stage0-allocator-cache-receipt-v1",
+                    "process_id": self.process_id, "sequence": len(self.cache_receipts) + 1,
+                    "method": "torch.cuda.synchronize/empty_cache/synchronize",
+                    "scope": "pytorch_unused_allocator_blocks_only",
+                    "hardware_cache_flushed": False,
+                }
+                start, end = (receipt.get("started_monotonic_ns"),
+                              receipt.get("finished_monotonic_ns"))
+                sample_start = result.get("started_monotonic_ns")
+                if (any(receipt.get(key) != value for key, value in expected.items())
+                        or type(receipt.get("process_id")) is not int
+                        or type(receipt.get("sequence")) is not int
+                        or receipt.get("hardware_cache_flushed") is not False
+                        or type(start) is not int or type(end) is not int
+                        or type(sample_start) is not int or not 0 <= start < end <= sample_start
+                        or result.get("process_id") != self.process_id
+                        or result.get("segment") != payload.get("segment")
+                        or result.get("batch_iterations") != payload.get("iterations")):
+                    raise TimingSessionError("invalid measured cache receipt binding")
+                self.cache_receipts.append({"receipt": dict(receipt),
+                    "request": dict(payload), "sample": dict(result),
+                    "host_binding": self.identity_observations[-1]})
             return result
         except BaseException:
             self.force_close()
@@ -250,14 +287,20 @@ class BW20TimingWorkloadFactory:
         self.session_factory = session_factory
         self.sessions: list[BW20TimingSession] = []
         self._names: set[str] = set()
+        self._lock = threading.RLock()
+        self._closing = False
 
     def _open(self, role: str, restart: int | None) -> BW20TimingSession:
-        session = self.session_factory(role, restart)
-        if session.plan.container_name in self._names or session.create_attempted or session.closed:
-            raise TimingSessionError("each timing process requires a fresh session identity")
-        self._names.add(session.plan.container_name)
-        self.sessions.append(session)
-        return session.open()
+        with self._lock:
+            if self._closing:
+                raise TimingSessionError("job session factory has been closed")
+            session = self.session_factory(role, restart)
+            if (session.plan.container_name in self._names
+                    or session.create_attempted or session.closed):
+                raise TimingSessionError("each timing process requires a fresh session identity")
+            self._names.add(session.plan.container_name)
+            self.sessions.append(session)
+            return session.open()
 
     def timer(self) -> DockerTorchEventTimer:
         return DockerTorchEventTimer(self._open("timer", None))
@@ -265,8 +308,8 @@ class BW20TimingWorkloadFactory:
     def workload(
         self, probe_type: Stage0ProbeType, restart_ordinal: int,
     ) -> DockerFormalStage0Workload:
-        if probe_type not in (Stage0ProbeType.NOISE, Stage0ProbeType.KNOWN_SIGNAL,
-                              Stage0ProbeType.NULL_SIGNAL):
+        if probe_type not in (Stage0ProbeType.TIMER, Stage0ProbeType.NOISE,
+                              Stage0ProbeType.KNOWN_SIGNAL, Stage0ProbeType.NULL_SIGNAL):
             raise ValueError("not a timing workload probe")
         if type(restart_ordinal) is not int or restart_ordinal < 0:
             raise ValueError("restart ordinal must be nonnegative")
@@ -274,6 +317,45 @@ class BW20TimingWorkloadFactory:
             self._open(probe_type.value, restart_ordinal), probe_type=probe_type)
 
     def force_close(self) -> bool:
+        with self._lock:
+            self._closing = True
+            failed = False
+            for session in self.sessions:
+                try:
+                    session.force_close()
+                except Exception:
+                    failed = True
+                    session.cleanup_complete = False
+            return not failed and all(session.cleanup_complete for session in self.sessions)
+
+    def finish(self) -> bool:
+        """Reap live children normally when authority is valid; always clean owned CIDs."""
+        with self._lock:
+            self._closing = True
+            for session in self.sessions:
+                if not session.closed:
+                    try:
+                        session.close()
+                    except Exception:
+                        # Loss of authority/error must not block exact-CID cleanup.
+                        # Missing raw waitpid still prevents D from accepting this run.
+                        # The final sweep below attempts every session independently.
+                        pass
+            return self.force_close()
+
+    def live_bindings(self) -> list[Mapping]:
+        """Refresh host identities at telemetry boundaries; never retain stale PIDs."""
+        with self._lock:
+            return self._live_bindings()
+
+    def _live_bindings(self) -> list[Mapping]:
+        bindings = []
         for session in self.sessions:
-            session.force_close()
-        return all(session.cleanup_complete for session in self.sessions)
+            if session.closed:
+                if not session.cleanup_complete:
+                    raise TimingSessionError("closed session cleanup remains unconfirmed")
+                continue
+            session._guard()
+            session._binding()
+            bindings.append(session.identity_observations[-1])
+        return bindings

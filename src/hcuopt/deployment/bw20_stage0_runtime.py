@@ -24,6 +24,8 @@ from hcuopt.measurement.nmz36_runtime import _proc_start_token
 
 RESOURCE = "bw20-sglang-0.5.12:hcu:7"
 ROOT = "/home/github/hcu-auto-opt-runtime/bw20-stage0"
+PASSWD_ASSET = "src/hcuopt/deployment/assets/bw20-passwd"
+GROUP_ASSET = "src/hcuopt/deployment/assets/bw20-group"
 
 
 class ProcessBindingError(ValueError):
@@ -56,6 +58,7 @@ def build_timing_plan(target: TargetSpec, *, run_id: UUID, fencing_token: int,
         "--label", f"{MANAGED_LABEL}=true", "--label", f"{RESOURCE_LABEL}={RESOURCE}",
         "--label", f"{FENCING_LABEL}={fencing_token}",
         "--network=none", "--ipc=private", "--read-only", "--cap-drop=ALL",
+        "--user=1002:1002",
         "--security-opt=no-new-privileges", "--cpuset-cpus=64-79", "--cpuset-mems=4",
         "--memory=4g", "--memory-swap=4g", "--pids-limit=128", "--shm-size=1g",
         "--device=/dev/kfd", "--device=/dev/dri/renderD135",
@@ -65,6 +68,8 @@ def build_timing_plan(target: TargetSpec, *, run_id: UUID, fencing_token: int,
         "--env", "PYTHONPATH=/workspace/src", "--env", "PYTHONDONTWRITEBYTECODE=1",
         "--mount", f"type=bind,src={source_root},dst=/workspace,readonly",
         "--mount", "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly",
+        "--mount", f"type=bind,src={source_root}/{PASSWD_ASSET},dst=/etc/passwd,readonly",
+        "--mount", f"type=bind,src={source_root}/{GROUP_ASSET},dst=/etc/group,readonly",
         "--workdir", "/workspace", "--entrypoint", "python",
         target.inference_image.immutable_reference,
         "-B", "-m", "hcuopt.deployment.bw20_stage0_worker", "--controller",

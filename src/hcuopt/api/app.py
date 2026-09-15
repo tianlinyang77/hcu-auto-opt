@@ -229,6 +229,7 @@ def create_app(
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
     framework_signoff_authorizer: Callable[[Request, UUID], str | None] | None = None,
+    auto_migrate: bool | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -298,7 +299,11 @@ def create_app(
         else:
             repo = repository
         application.state.repository = repo
-        if os.getenv("HCUOPT_AUTO_MIGRATE", "true").lower() == "true":
+        should_migrate = (
+            auto_migrate if auto_migrate is not None
+            else os.getenv("HCUOPT_AUTO_MIGRATE", "true").lower() == "true"
+        )
+        if should_migrate:
             repo.migrate()
         yield
 
@@ -1201,6 +1206,15 @@ def create_app(
             worker_id, job_id, payload.claim_token, payload.fencing_token
         )
         return {"status": "ok"}
+
+    @application.post("/v1/workers/{worker_id}/jobs/{job_id}/lease-check", status_code=204)
+    def check_live_job_lease(
+        worker_id: str, job_id: UUID, payload: JobHeartbeat, request: Request,
+    ) -> Response:
+        repo(request).assert_live_job_lease(
+            worker_id, job_id, payload.claim_token, payload.fencing_token
+        )
+        return Response(status_code=204)
 
     @application.post("/v1/jobs", status_code=201)
     def enqueue_job(payload: JobCreate, request: Request) -> dict[str, Any]:

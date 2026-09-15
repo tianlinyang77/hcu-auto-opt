@@ -17,7 +17,7 @@ def validate_device(torch) -> dict:
 
 def main(argv=None) -> int:
     # Importing this module in the controller does not import torch or initialize HIP.
-    return worker_main(argv, device_validator=validate_device)
+    return worker_main(argv, device_validator=validate_device, cache_receipts=True)
 
 
 if __name__ == "__main__":

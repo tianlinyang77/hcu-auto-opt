@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TARGET_PATH = ROOT / "config/targets/bw20-sglang-0.5.12.yaml"
 
 
-def test_bw20_target_is_independent_and_not_measurement_ready():
+def test_bw20_target_is_independent_framework_ready_but_not_measurement_ready():
     target = TargetCatalog(ROOT / "config/targets").load("bw20-sglang-0.5.12")
     old = load_target(ROOT / "config/targets/nmz36-sglang-0.5.12.yaml")
     assert target.stage0_status == "pending"
@@ -40,7 +40,9 @@ def test_bw20_target_is_independent_and_not_measurement_ready():
         "test-only", "real",
         FRAMEWORK_SMOKE_CAPABILITIES | STAGE0_CAPABILITIES | MANUAL_CANDIDATE_CAPABILITIES,
     )
-    for scope in ("framework_smoke", "stage0", "optimization", "release"):
+    profile.validate_target(target, scope="framework_smoke")
+    profile.validate_target(target, scope="stage0")
+    for scope in ("optimization", "release"):
         with pytest.raises(TargetNotReady, match="open blockers"):
             profile.validate_target(target, scope=scope)
     with pytest.raises(ValueError, match="locked to nmz36"):

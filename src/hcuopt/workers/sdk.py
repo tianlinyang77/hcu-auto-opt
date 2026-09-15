@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,15 @@ class ControlPlaneClient:
             },
         )
         response.raise_for_status()
+
+    def check_live_lease(self, worker_id: str, job: dict[str, Any]) -> None:
+        response = self.client.post(
+            f"/v1/workers/{worker_id}/jobs/{job['job_id']}/lease-check",
+            json={"claim_token": job["claim_token"], "fencing_token": job.get("fencing_token")},
+        )
+        response.raise_for_status()
+        if response.status_code != 204:
+            raise RuntimeError("unexpected live lease check response")
 
     def complete(self, job: dict[str, Any], result: dict[str, Any]) -> None:
         response = self.client.post(
@@ -115,9 +125,13 @@ class Worker:
         adapters: AdapterRegistry | None = None,
         handlers: JobHandler | None = None,
         output_dir: Path | None = None,
+        resource_guard: Callable[[str | None], None] | None = None,
     ) -> None:
         if adapters is not None and handlers is not None:
             raise ValueError("pass adapters or handlers, not both")
+        if resource_guard is not None and not callable(resource_guard):
+            raise ValueError("resource guard must be a deployment-owned callable")
+        self.resource_guard = resource_guard
         self.worker_id = worker_id
         self.worker_type = worker_type
         self.capabilities = dict(capabilities or {})
@@ -145,17 +159,35 @@ class Worker:
 
     def run_once(self) -> bool:
         try:
+            self._assert_resource_safe(self.capabilities.get("resource_id"))
             if not self.registered:
                 self.register()
             job = self.client.claim(self.worker_id)
         except Exception:
-            LOGGER.exception("worker %s could not contact the control plane", self.worker_id)
+            LOGGER.exception(
+                "worker %s not ready or could not contact control plane", self.worker_id
+            )
             return False
         if job is None:
             return False
         heartbeat_stop = threading.Event()
         lease_lost = threading.Event()
         payload = dict(job["payload"])
+        # Process-local capability, never taken from the incoming JSON payload.
+        # The server checks active state/expiry; this does not renew or release.
+        lease_job = {key: job.get(key) for key in ("job_id", "claim_token", "fencing_token")}
+
+        def assert_live_lease():
+            if lease_lost.is_set() or heartbeat_stop.is_set() or self.stop_event.is_set():
+                raise RuntimeError("job stopped or lease already lost")
+            try:
+                self.client.check_live_lease(self.worker_id, lease_job)
+            except Exception:
+                lease_lost.set()
+                raise
+            if lease_lost.is_set() or heartbeat_stop.is_set() or self.stop_event.is_set():
+                raise RuntimeError("job stopped or lease lost during authority check")
+
         payload["_job_context"] = {
             "job_id": job["job_id"],
             "attempt_number": job["attempts"],
@@ -164,6 +196,7 @@ class Worker:
             "fencing_token": job.get("fencing_token"),
             "lease_scope": job.get("lease_scope"),
             "lease_lost_event": lease_lost,
+            "assert_live_lease": assert_live_lease,
         }
         heartbeat = threading.Thread(
             target=self._heartbeat_loop,
@@ -173,6 +206,9 @@ class Worker:
         try:
             self.client.heartbeat(self.worker_id, job)
             heartbeat.start()
+            # Check again after claim; the durable state may have changed while
+            # contacting the control plane. Never accept a payload-supplied guard.
+            self._assert_resource_safe(job.get("resource_id"))
             result = self.handlers.handle(job["job_type"], payload)
             if lease_lost.is_set():
                 raise RuntimeError("job lease was lost while the handler was running")
@@ -202,6 +238,7 @@ class Worker:
             if lease_lost.is_set():
                 raise RuntimeError("job lease was lost before completion")
             self.client.heartbeat(self.worker_id, job)
+            self._assert_resource_safe(job.get("resource_id"))
             self.client.complete(job, result)
         except Exception as exc:
             LOGGER.exception("worker %s failed job %s", self.worker_id, job["job_id"])
@@ -239,16 +276,37 @@ class Worker:
     ) -> dict[str, Any]:
         cleanup = getattr(self.handlers, "cleanup", None)
         if not callable(cleanup):
-            return {}
+            return self._guard_cleanup(job, {})
         try:
-            result = cleanup(job["job_type"], payload)
+            result = dict(cleanup(job["job_type"], payload))
         except Exception:
             LOGGER.exception("cleanup failed for job %s", job["job_id"])
-            return {
+            result = {
                 "fence": {"fenced": False, "error": "handler cleanup raised"},
                 "health": {"healthy": False, "quarantined": True},
             }
-        return dict(result)
+        return self._guard_cleanup(job, result)
+
+    def _assert_resource_safe(self, resource_id: str | None) -> None:
+        if self.resource_guard is not None and self.resource_guard(resource_id) is not None:
+            raise RuntimeError("resource safety guard did not confirm readiness")
+
+    def _guard_cleanup(self, job, evidence):
+        if self.resource_guard is None:
+            return evidence
+        try:
+            self._assert_resource_safe(job.get("resource_id"))
+        except Exception as exc:
+            # Preserve process-fencing evidence but never release a resource
+            # with unresolved device state, even if handler cleanup says healthy.
+            health = evidence.get("health")
+            return {
+                **evidence,
+                "health": {**(health if isinstance(health, dict) else {}),
+                           "healthy": False, "quarantined": True},
+                "resource_guard": {"clear": False, "error_type": type(exc).__name__},
+            }
+        return {**evidence, "resource_guard": {"clear": True}}
 
     def _report_cleanup_after_handler_exit(
         self,
@@ -263,7 +321,7 @@ class Worker:
             self.client.report_cleanup(
                 resource_id,
                 int(fencing_token),
-                cleanup_evidence,
+                self._guard_cleanup(job, cleanup_evidence),
             )
         except Exception:
             LOGGER.exception(

@@ -9,7 +9,11 @@ import pytest
 from hcuopt.adapters.bw20_execution import IMAGE_ID
 from hcuopt.adapters.execution import FENCING_LABEL, MANAGED_LABEL, RESOURCE_LABEL
 from hcuopt.deployment.bw20_environment import IMAGE
-from hcuopt.deployment.bw20_stage0_runtime import build_timing_plan
+from hcuopt.deployment.bw20_stage0_runtime import (
+    GROUP_ASSET,
+    PASSWD_ASSET,
+    build_timing_plan,
+)
 from hcuopt.deployment.bw20_timing_session import (
     BW20TimingSession,
     BW20TimingWorkloadFactory,
@@ -38,7 +42,8 @@ def raw_container():
     return {
         "Id": CID, "Name": "/" + PLAN.container_name, "Image": IMAGE_ID,
         "State": {"Running": False},
-        "Config": {"Image": IMAGE, "Entrypoint": ["python"], "Cmd": list(PLAN.argv[-4:]),
+        "Config": {"Image": IMAGE, "User": "1002:1002",
+                   "Entrypoint": ["python"], "Cmd": list(PLAN.argv[-4:]),
                    "Labels": {MANAGED_LABEL: "true", RESOURCE_LABEL: PLAN.resource_id,
                               FENCING_LABEL: "7"},
                    "Env": [PLAN.argv[i + 1] for i, v in enumerate(PLAN.argv) if v == "--env"]},
@@ -54,7 +59,11 @@ def raw_container():
         "Mounts": [{"Type": "bind", "Source": PLAN.source_root,
                     "Destination": "/workspace", "RW": False},
                    {"Type": "bind", "Source": "/opt/hyhal", "Destination": "/opt/hyhal",
-                    "RW": False}],
+                    "RW": False},
+                   {"Type": "bind", "Source": PLAN.source_root + "/" + PASSWD_ASSET,
+                    "Destination": "/etc/passwd", "RW": False},
+                   {"Type": "bind", "Source": PLAN.source_root + "/" + GROUP_ASSET,
+                    "Destination": "/etc/group", "RW": False}],
     }
 
 
@@ -303,3 +312,105 @@ def test_factory_connects_original_workload_and_preserves_cleanup_failure():
     assert workload.process_identity().pid == 2
     transport.remove_failure = True
     assert factory.force_close() is False
+
+
+def test_timer_probe_is_a_supported_segmented_workload():
+    session, transport = make_session()
+    factory = BW20TimingWorkloadFactory(lambda role, restart: session)
+    workload = factory.workload(Stage0ProbeType.TIMER, 0)
+    assert workload.probe_type is Stage0ProbeType.TIMER
+    assert len(factory.live_bindings()) == 1
+    factory.force_close()
+    assert factory.live_bindings() == []
+
+
+def test_telemetry_does_not_ignore_unconfirmed_closed_session():
+    session, transport = make_session()
+    factory = BW20TimingWorkloadFactory(lambda role, restart: session)
+    factory.timer()
+    transport.remove_failure = True
+    factory.force_close()
+    with pytest.raises(TimingSessionError, match="unconfirmed"):
+        factory.live_bindings()
+
+
+def test_no_session_can_start_after_job_cleanup():
+    factory = BW20TimingWorkloadFactory(lambda *args: pytest.fail("created after cleanup"))
+    assert factory.force_close()
+    with pytest.raises(TimingSessionError, match="closed"):
+        factory.timer()
+
+
+@pytest.mark.parametrize("failure", [None, "bad_reap", "lost_lease"])
+def test_factory_finish_reaps_calibration_or_retains_missing_exit(failure):
+    session, transport = make_session()
+    factory = BW20TimingWorkloadFactory(lambda *args: session)
+    factory.timer()
+    if failure == "bad_reap":
+        transport.channel.close_status = 256
+    elif failure == "lost_lease":
+        session.assert_lease = lambda: (_ for _ in ()).throw(RuntimeError("lease expired"))
+    assert factory.finish()
+    assert session.closed and session.cleanup_complete and not transport.exists
+    assert ("remove", CID) in transport.calls
+    if failure is None:
+        assert session.exit_observation["wait_status"] == 0
+        assert session.exit_observation["waitpid_result_pid"] == 2
+    else:
+        assert session.exit_observation is None
+    with pytest.raises(TimingSessionError, match="closed"):
+        factory.timer()
+
+
+def test_factory_finish_attempts_every_cleanup_after_one_session_raises():
+    class BrokenSession:
+        closed = False
+        cleanup_complete = False
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+        def force_close(self):
+            raise RuntimeError("cleanup failed")
+
+    session, transport = make_session()
+    factory = BW20TimingWorkloadFactory(lambda *args: session)
+    factory.timer()
+    factory.sessions.insert(0, BrokenSession())
+    assert factory.finish() is False
+    assert session.cleanup_complete and not transport.exists
+    assert session.exit_observation["wait_status"] == 0
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "pid", "sequence", "clock", "flush"])
+def test_measure_cache_receipt_bound_to_request_and_process(damage):
+    session, transport = make_session()
+    session.open()
+    receipt = dict(schema_version="stage0-allocator-cache-receipt-v1", process_id=2, sequence=1,
+        method="torch.cuda.synchronize/empty_cache/synchronize",
+        scope="pytorch_unused_allocator_blocks_only", hardware_cache_flushed=False,
+        started_monotonic_ns=100, finished_monotonic_ns=110)
+    if damage == "pid":
+        receipt["process_id"] = 3
+    elif damage == "sequence":
+        receipt["sequence"] = True
+    elif damage == "clock":
+        receipt["finished_monotonic_ns"] = 130
+    elif damage == "flush":
+        receipt["hardware_cache_flushed"] = True
+    result = dict(protocol=READY["protocol"], process_id=2, segment="noise", batch_iterations=100,
+                  started_monotonic_ns=120, cache_receipt=receipt)
+    if damage == "missing":
+        del result["cache_receipt"]
+    transport.channel.request = lambda *args: result
+    request = dict(op="measure", probe_type="noise", segment="noise", iterations=100)
+    if damage:
+        with pytest.raises(TimingSessionError, match="cache receipt"):
+            session.request(request)
+        assert not session.cache_receipts and session.cleanup_complete
+    else:
+        assert session.request(request) == result
+        assert session.cache_receipts[0]["request"] == request
+        # Replaying the exact same receipt is not a second measurement.
+        with pytest.raises(TimingSessionError):
+            session.request(request)

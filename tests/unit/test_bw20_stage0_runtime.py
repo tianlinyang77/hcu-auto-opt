@@ -80,7 +80,15 @@ def test_command_is_pure_single_device_private_namespace(monkeypatch):
     assert "--pids-limit=128" in args
     assert args[-3:] == ("-m", "hcuopt.deployment.bw20_stage0_worker", "--controller")
     mounts = [args[i + 1] for i, item in enumerate(args) if item == "--mount"]
-    assert len(mounts) == 2 and all(item.endswith(",readonly") for item in mounts)
+    assert len(mounts) == 4 and all(item.endswith(",readonly") for item in mounts)
+    assert (
+        f"type=bind,src={result.source_root}/{runtime.PASSWD_ASSET},"
+        "dst=/etc/passwd,readonly"
+    ) in mounts
+    assert (
+        f"type=bind,src={result.source_root}/{runtime.GROUP_ASSET},"
+        "dst=/etc/group,readonly"
+    ) in mounts
     assert TARGET.stage0_status == "pending" and TARGET.automatic_release_allowed is False
 
 

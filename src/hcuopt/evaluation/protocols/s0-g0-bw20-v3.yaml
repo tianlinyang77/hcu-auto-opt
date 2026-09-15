@@ -1,0 +1,55 @@
+protocol_version: s0-g0-bw20-v3
+# Allocator maintenance is not hardware-cache flushing or a cold-cache claim.
+cache_policy: allocator_reset_per_batch_v1
+# Host and Event timestamps are captured together inside the measured child.
+calibration_capture_mode: measurement_process_atomic_v1
+raw_evidence_schema_version: measurement-evidence-v2
+timing_metric_name: kernel_elapsed
+timing_unit: ns
+
+sampling:
+  restart_count: 10
+  warmup_count: 10
+  # Every warmup is one complete measurement-sized batch.  This is explicit
+  # evidence because fleet auto mode may otherwise stabilize during sampling.
+  warmup_batch_iterations: 5000
+  batch_iterations: 5000
+  noise_samples_per_restart: 30
+  signal_segment_order: [A1, B1, B2, A2]
+  signal_samples_per_segment: 10
+
+statistics:
+  alpha: 0.05
+  power: 0.80
+  bootstrap_resamples: 10000
+  bootstrap_method: percentile
+  bootstrap_seed_source: input_evidence_sha256
+  multiple_comparison_method: bonferroni
+  corrected_signal_alpha: 0.025
+
+measurement_gates:
+  max_cv_ratio: 0.02
+  max_mde_ratio: 0.03
+  known_signal_direction: slowdown
+  known_signal_min_effect_ratio: 0.10
+  known_signal_ci_floor_ratio: 0.03
+  null_equivalence_margin_ratio: 0.03
+
+environment_gates:
+  max_temperature_c: 85.0
+  max_temperature_delta_c: 5.0
+  clock_tolerance_ratio: 0.02
+  required_performance_level: auto
+  clock_validation_mode: performance_level_only
+  power_gate_enabled: false
+
+timer_gates:
+  comparison_basis: raw_batch_interval
+  max_resolution_to_mean_ratio: 0.01
+  max_residual_to_mean_ratio: 0.01
+
+outliers:
+  method: hampel_mad
+  hampel_sigma: 3.0
+  remove_flagged_samples: false
+  max_flagged_ratio: 0.05

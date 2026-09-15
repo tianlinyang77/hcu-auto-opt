@@ -140,6 +140,7 @@ class Stage0MeasurementProbeAdapter:
             adapter_provenance=(self._raw_provenance(),),
             output_dir=output_dir,
             job_context=dict(payload.get("_job_context", {})),
+            calibration_capture_mode=protocol.protocol.calibration_capture_mode,
         )
         if probe_type is Stage0ProbeType.TIMER:
             summary: dict[str, Any] = {
@@ -271,6 +272,8 @@ class Stage0MeasurementProbeAdapter:
         return MeasurementPlanV2(
             restart_count=sampling.restart_count,
             warmup_count=sampling.warmup_count,
+            warmup_batch_iterations=sampling.warmup_batch_iterations,
+            workload_elements=sampling.workload_elements,
             batch_iterations=sampling.batch_iterations,
             segment_order=segment_order,
             samples_per_segment=samples_per_segment,

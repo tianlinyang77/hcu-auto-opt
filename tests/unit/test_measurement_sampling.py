@@ -12,6 +12,7 @@ from hcuopt.measurement.timers import (
     DeviceTimerUnavailableError,
     TorchCudaEventTimer,
     calibrate_device_timer,
+    calibrate_device_timer_v2,
 )
 
 
@@ -156,6 +157,79 @@ def test_device_timer_calibration_rejects_non_monotonic_ticks() -> None:
             ScriptedDeviceTimer([5, 5]),
             sample_count=2,
         )
+
+
+def test_atomic_calibration_uses_only_measurement_process_inputs() -> None:
+    class AtomicTimer:
+        def read_ticks(self):
+            pytest.fail("atomic capture must not use controller RPC ticks")
+
+        def sample_resolution_ticks(self, sample_count):
+            pytest.fail("atomic capture must not use controller RPC resolution")
+
+        def capture_calibration_inputs(self, sample_count, resolution_sample_count):
+            assert (sample_count, resolution_sample_count) == (3, 4)
+            return {
+                "points": [
+                    {
+                        "point_ordinal": ordinal,
+                        "device_ticks": 100 + ordinal * 10,
+                        "host_started_monotonic_ns": 1000 + ordinal * 10,
+                        "host_finished_monotonic_ns": 1002 + ordinal * 10,
+                    }
+                    for ordinal in range(3)
+                ],
+                "resolution_tick_deltas": [1, 1, 1, 1],
+            }
+
+    class NoControllerClock:
+        def now_ns(self):
+            pytest.fail("atomic capture must not use the controller host clock")
+
+    calibration = calibrate_device_timer_v2(
+        NoControllerClock(),
+        AtomicTimer(),
+        device_index=7,
+        sample_count=3,
+        resolution_sample_count=4,
+        synchronize=lambda: pytest.fail("atomic capture must synchronize in-process"),
+        capture_mode="measurement_process_atomic_v1",
+    )
+    assert calibration.ns_per_tick == 1.0
+    assert calibration.timer_resolution_ns == 1.0
+    assert calibration.max_residual_ns == 1.0
+
+
+def test_spaced_calibration_requires_the_distinct_measurement_process_capture() -> None:
+    class SpacedTimer:
+        def capture_calibration_inputs(self, sample_count, resolution_sample_count):
+            pytest.fail("v4 must not silently reuse the back-to-back capture")
+
+        def capture_spaced_calibration_inputs(self, sample_count, resolution_sample_count):
+            assert (sample_count, resolution_sample_count) == (3, 4)
+            return {
+                "points": [
+                    {
+                        "point_ordinal": ordinal,
+                        "device_ticks": 100 + ordinal * 10_000,
+                        "host_started_monotonic_ns": 1000 + ordinal * 10_000,
+                        "host_finished_monotonic_ns": 1002 + ordinal * 10_000,
+                    }
+                    for ordinal in range(3)
+                ],
+                "resolution_tick_deltas": [1, 1, 1, 1],
+            }
+
+    calibration = calibrate_device_timer_v2(
+        ScriptedClock([]),
+        SpacedTimer(),
+        device_index=7,
+        sample_count=3,
+        resolution_sample_count=4,
+        capture_mode="measurement_process_spaced_v2",
+    )
+    assert calibration.ns_per_tick == 1.0
+    assert calibration.timer_resolution_ns == 1.0
 
 
 def test_torch_cuda_event_timer_exposes_a_monotonic_device_time_axis() -> None:

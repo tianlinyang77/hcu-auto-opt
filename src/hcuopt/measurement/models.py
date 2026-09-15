@@ -204,6 +204,10 @@ class ProcessLifecycleRecordV2(StrictMeasurementModel):
 class MeasurementPlanV2(StrictMeasurementModel):
     restart_count: int = Field(ge=1, le=MAX_PLAN_COUNT)
     warmup_count: int = Field(ge=0, le=MAX_PLAN_COUNT)
+    # None is the legacy v1/v2 contract: each warmup call executes one
+    # operation.  Successor protocols record an explicit full-batch size.
+    warmup_batch_iterations: int | None = Field(default=None, ge=1, le=MAX_PLAN_COUNT)
+    workload_elements: int | None = Field(default=None, ge=1, le=1 << 26)
     batch_iterations: int = Field(ge=1, le=MAX_PLAN_COUNT)
     segment_order: tuple[Stage0Segment, ...] = Field(min_length=1)
     samples_per_segment: int = Field(ge=1, le=MAX_PLAN_COUNT)

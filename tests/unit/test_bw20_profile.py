@@ -36,13 +36,13 @@ def parts(tmp_path, profile=PROFILE):
     return build, registry
 
 
-def test_opt_in_profile_does_not_silently_clear_target(tmp_path):
+def test_opt_in_profile_still_requires_operator_pinned_admission(tmp_path):
     build, registry = parts(tmp_path)
     profile = compose_framework_profile(build_handler=build, gpu_registry=registry)
     profile.require_framework_smoke()
     with pytest.raises(AdapterUnavailable, match="not registered"):
         AdapterProfileCatalog().require(PROFILE)
-    with pytest.raises(TargetNotReady, match="open blockers"):
+    with pytest.raises(TargetNotReady, match="operator-pinned admission evidence"):
         profile.validate_target(TARGET)
     with pytest.raises(TargetNotReady, match="cannot grant"):
         profile.validate_target(TARGET, scope="stage0")
@@ -62,7 +62,7 @@ def test_fake_registry_cannot_register_real_profile(tmp_path):
         compose_framework_profile(build_handler=build, gpu_registry=AdapterRegistry.fake())
 
 
-def test_real_api_refuses_open_target_without_repository_mutation(tmp_path):
+def test_real_api_refuses_missing_admission_evidence_without_repository_mutation(tmp_path):
     from fastapi.testclient import TestClient
 
     from hcuopt.api.app import create_app
@@ -84,4 +84,4 @@ def test_real_api_refuses_open_target_without_repository_mutation(tmp_path):
             "adapter_profile": PROFILE, "idempotency_key": str(uuid4())})
     assert response.status_code == 409
     assert response.json()["code"] == "target_not_ready"
-    assert "source_runtime_equivalence_unverified" in response.json()["message"]
+    assert "operator-pinned admission evidence" in response.json()["message"]

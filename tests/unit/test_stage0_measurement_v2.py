@@ -100,8 +100,8 @@ class SegmentedWorkload:
     def synchronize(self) -> None:
         return None
 
-    def warmup_segment(self, segment: str) -> None:
-        self.segments.append(f"warmup:{segment}")
+    def warmup_segment(self, segment: str, iterations: int) -> None:
+        self.segments.append(f"warmup:{segment}:{iterations}")
 
     def measure_segment_batch(
         self,

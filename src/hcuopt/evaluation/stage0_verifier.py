@@ -35,6 +35,7 @@ from hcuopt.domain.enums import (
     Stage0RunMode,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.bw20_stage0_receipts import verify_bw20_diagnostics
 from hcuopt.evaluation.evidence_reader import (
     EvidenceReadError as Stage0EvidenceError,
 )
@@ -414,6 +415,9 @@ class Stage0Verifier:
         references: tuple[Stage0ProbeEvidenceReference, ...] | list[Stage0ProbeEvidenceReference],
     ) -> Stage0VerificationResult:
         context = _snapshot_context(context)
+        if (self.protocol.cache_policy is not None
+                and context.target.target_id != "bw20-sglang-0.5.12"):
+            raise Stage0EvidenceError("cache_policy_scope", "allocator receipts require BW20")
         by_type = self._index_references(references)
         reference_resources = {reference.resource_id for reference in by_type.values()}
         if reference_resources != {context.expected_resource_id}:
@@ -483,6 +487,18 @@ class Stage0Verifier:
         self._verify_measurement_plan(Stage0ProbeType.KNOWN_SIGNAL, known)
         self._verify_measurement_plan(Stage0ProbeType.NULL_SIGNAL, null)
         lifecycle_evidence: list[tuple[str, RawEvidenceFileV2]] = []
+        if context.target.target_id == "bw20-sglang-0.5.12":
+            for probe in (
+                Stage0ProbeType.FINGERPRINT,
+                Stage0ProbeType.TIMER,
+                Stage0ProbeType.NOISE,
+                Stage0ProbeType.KNOWN_SIGNAL,
+                Stage0ProbeType.NULL_SIGNAL,
+            ):
+                link = verify_bw20_diagnostics(
+                    parsed[probe], by_type[probe], self.reader, start_token=_proc_start_token
+                )
+                lifecycle_evidence.append((f"{probe.value}:bw20-diagnostics", link))
         for label, evidence in (
             ("timer", timer),
             ("noise", noise),
@@ -883,6 +899,10 @@ class Stage0Verifier:
             mismatches.append("restart_count")
         if plan.warmup_count != sampling.warmup_count:
             mismatches.append("warmup_count")
+        if plan.warmup_batch_iterations != sampling.warmup_batch_iterations:
+            mismatches.append("warmup_batch_iterations")
+        if plan.workload_elements != sampling.workload_elements:
+            mismatches.append("workload_elements")
         if plan.batch_iterations != sampling.batch_iterations:
             mismatches.append("batch_iterations")
         if probe_type is Stage0ProbeType.NOISE:
@@ -913,6 +933,7 @@ class Stage0Verifier:
         gate = self.protocol.environment_gates
         accelerator = target.execution_host.accelerator
         temperatures: dict[str, float] = {}
+        reference_clocks = None
         for observation in evidence.observations:
             telemetry = observation.telemetry
             temperature = max(
@@ -927,22 +948,50 @@ class Stage0Verifier:
                 )
             if observation.phase in {"before_run", "after_run"}:
                 temperatures[observation.phase] = temperature
-            for name, actual, expected in (
-                ("sclk", telemetry.device.sclk_mhz, accelerator.expected_sclk_mhz),
-                ("mclk", telemetry.device.mclk_mhz, accelerator.expected_mclk_mhz),
-            ):
-                if abs(actual - expected) / expected > gate.clock_tolerance_ratio:
-                    result.append(
-                        (
-                            f"{name}_drift_exceeded",
-                            f"{name.upper()} differs from Target expectation",
-                        )
+            if gate.clock_validation_mode == "observed_stable":
+                if reference_clocks is None:
+                    reference_clocks = (
+                        telemetry.device.sclk_mhz,
+                        telemetry.device.mclk_mhz,
                     )
+                expected_clocks = reference_clocks
+                clock_expectation = "run baseline"
+            elif gate.clock_validation_mode == "target_fixed":
+                expected_clocks = (
+                    accelerator.expected_sclk_mhz,
+                    accelerator.expected_mclk_mhz,
+                )
+                clock_expectation = "Target expectation"
+            else:
+                expected_clocks = None
+            if expected_clocks is not None:
+                for name, actual, expected in (
+                    ("sclk", telemetry.device.sclk_mhz, expected_clocks[0]),
+                    ("mclk", telemetry.device.mclk_mhz, expected_clocks[1]),
+                ):
+                    if abs(actual - expected) / expected > gate.clock_tolerance_ratio:
+                        result.append(
+                            (
+                                f"{name}_drift_exceeded",
+                                f"{name.upper()} differs from {clock_expectation}",
+                            )
+                        )
             if telemetry.device.performance_level != gate.required_performance_level:
-                result.append(("performance_level_mismatch", "performance level is not manual"))
-            if telemetry.cache.state == "unknown":
+                result.append((
+                    "performance_level_mismatch",
+                    "performance level differs from the registered protocol",
+                ))
+            # The BW20 protocol measures allocator-reset batches, not cold hardware
+            # caches. Its sample receipts are mandatory earlier in verify(); do not
+            # turn boundary telemetry into a claim that hardware was flushed.
+            if self.protocol.cache_policy is not None:
+                if telemetry.cache.state != "unknown" or telemetry.cache.cleared_before_sample:
+                    result.append((
+                        "cache_scope_overclaim", "allocator policy cannot attest hardware cache"
+                    ))
+            elif telemetry.cache.state == "unknown":
                 result.append(("cache_state_unknown", "cache state is not auditable"))
-            if not telemetry.cache.cleared_before_sample:
+            if self.protocol.cache_policy is None and not telemetry.cache.cleared_before_sample:
                 result.append(
                     ("cache_not_cleared", "cache was not cleared according to the protocol")
                 )
@@ -1489,7 +1538,8 @@ def _valid_source_and_artifact_chain(
             candidate.clean,
             candidate.parent_snapshot_id == baseline.snapshot_id,
             candidate.repository == baseline.repository,
-            candidate.commit == baseline.commit,
+            candidate.commit != baseline.commit,
+            candidate.tree_hash != baseline.tree_hash,
             candidate.source_hash != baseline.source_hash,
             not artifact_manifest.synthetic,
             artifact_manifest.candidate_id is not None,
