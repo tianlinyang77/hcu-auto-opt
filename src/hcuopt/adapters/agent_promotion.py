@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import os
 import re
@@ -524,6 +525,69 @@ def apply_single_file_unified_patch(
     if candidate == baseline:
         raise SourceArtifactError("Candidate Patch does not change the Baseline source")
     return candidate
+
+
+def build_single_replacement_patch(
+    baseline: bytes,
+    *,
+    expected_path: str,
+    old_text: str,
+    new_text: str,
+) -> bytes:
+    """Build a canonical diff from one uniquely matched, line-aligned model edit.
+
+    The model supplies source text, never line numbers or hunk counts.  C owns the
+    exact Baseline match and verifies the generated diff through the normal strict
+    applier before it can become Proposal bytes.
+    """
+
+    try:
+        baseline_text = baseline.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise SourceArtifactError("Candidate promotion accepts strict UTF-8 source only") from error
+    if (
+        not old_text
+        or not new_text
+        or old_text == new_text
+        or "\x00" in old_text
+        or "\x00" in new_text
+        or "\r" in old_text
+        or "\r" in new_text
+        or not old_text.endswith("\n")
+        or not new_text.endswith("\n")
+    ):
+        raise SourceArtifactError(
+            "Candidate structured edit must be distinct LF-terminated UTF-8 text"
+        )
+    if len(old_text.encode("utf-8")) > 256_000 or len(new_text.encode("utf-8")) > 256_000:
+        raise SourceArtifactError("Candidate structured edit exceeds its source limit")
+    if baseline_text.count(old_text) != 1:
+        raise SourceArtifactError(
+            "Candidate structured edit does not uniquely match the Baseline source"
+        )
+    start = baseline_text.index(old_text)
+    if start and baseline_text[start - 1] != "\n":
+        raise SourceArtifactError("Candidate structured edit must start at a line boundary")
+    candidate_text = baseline_text[:start] + new_text + baseline_text[start + len(old_text) :]
+    patch_text = "".join(
+        difflib.unified_diff(
+            baseline_text.splitlines(keepends=True),
+            candidate_text.splitlines(keepends=True),
+            fromfile=f"a/{expected_path}",
+            tofile=f"b/{expected_path}",
+            n=3,
+        )
+    )
+    patch = patch_text.encode("utf-8")
+    if not patch or len(patch) > 1_000_000:
+        raise SourceArtifactError("Candidate structured edit produced an invalid Patch size")
+    if apply_single_file_unified_patch(
+        baseline,
+        patch,
+        expected_path=expected_path,
+    ) != candidate_text.encode("utf-8"):
+        raise SourceArtifactError("Candidate structured edit did not round-trip through C")
+    return patch
 
 
 @dataclass(frozen=True, slots=True)

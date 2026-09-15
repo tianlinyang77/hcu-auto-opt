@@ -1,5 +1,28 @@
 # Codex 项目本地已知问题
 
+## DeepSeek Messages 可成功返回但 unified diff 元数据不稳定
+
+- Scope: project-local；2026-09-15。
+- Symptom: 对冻结的 BW20 `PagedTokenToKVPoolAllocator.free` 源文件执行四个相互独立、
+  有上限的真实 Messages 探针，HTTP/Runner 均成功，但 C 全部拒绝 Proposal；首个回复的
+  hunk 行数不一致，后三个回复的 hunk 起始位置或上下文与 Baseline 不一致。
+- Evidence: 每次均保留独立 input、Runner Receipt、原始回复和失败报告；累计没有创建
+  Candidate、没有执行补丁、没有访问 HCU，也没有性能结论。具体证据保存在部署方仓库外
+  `bw20-agent-live-results/source-probe/deepseek-20260915-v1..v4`，不提交模型原始内容。
+- Cause: 已确认是模型生成的 unified diff 定位/计数不符合严格解析器；不是网络、模型名、
+  token 用量、Runner 清理或密钥注入失败。语义建议是否值得优化尚未评测。
+- Proven workaround: 保留 failed Batch/Receipt 语义，并支持结构化单片段编辑：模型返回唯一
+  `old_text/new_text`，C 在冻结 Baseline 上唯一匹配后确定性生成 diff，再交给原严格 Patch
+  解析器回放。不得直接修补模型 diff 后冒充原始 Proposal，也不得放宽路径、上下文或 hunk
+  计数校验。
+- Validation: v1-v4 Runner cleanup 均为 verified，原始回复全部 fail closed；v5 使用新格式
+  形成 `applicable_unreviewed_patch`，Patch Hash 为
+  `sha256:62d3719f3e8d45ff7b06036062ef49688397fc8aea6c7a00a2cfadf3eea092d9`。
+  v5 仍因调用未定义 helper 而必须在人工代码审核处拒绝；没有 Candidate、HCU 访问或性能结论。
+- Applies to: 当前 DeepSeek Anthropic-compatible `deepseek-flash` 单文件候选生成器。
+- Do not repeat: 不要对同一输入无限重试，不要手改原始模型回复或禁用严格 Patch 门禁。
+- Last updated: 2026-09-15
+
 ## Messages 与 D 衔接必须保留原生安全读取及失败 Batch 语义
 
 - Scope: project-local；2026-09-07。

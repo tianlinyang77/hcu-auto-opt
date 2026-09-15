@@ -248,6 +248,44 @@ def test_ingest_replays_and_preserves_synthetic_identity(setup):
     )
 
 
+def test_ingest_accepts_unique_structured_replacement(setup):
+    proposal = {
+        "optimization_intent": "remove redundant work",
+        "rationale": "A proposal only, independently test later.",
+        "risk_summary": "Correctness is not measured.",
+        "old_text": "return value\n",
+        "new_text": "return value + 1\n",
+    }
+
+    stored, _ = _ingest(setup, _response([proposal]))
+
+    assert stored.batch.status == "succeeded"
+    assert len(stored.batch.proposals) == 1
+    patch = file_uri_to_path(stored.batch.proposals[0].patch_uri).read_bytes()
+    assert b"-return value\n+return value + 1\n" in patch
+
+
+@pytest.mark.parametrize("mode", ["both", "old_only", "new_only"])
+def test_invalid_structured_replacement_fails_without_publishing_patch(setup, mode):
+    proposal = {
+        "optimization_intent": "remove redundant work",
+        "rationale": "A proposal only, independently test later.",
+        "risk_summary": "Correctness is not measured.",
+    }
+    if mode in {"both", "old_only"}:
+        proposal["old_text"] = "return value\n"
+    if mode in {"both", "new_only"}:
+        proposal["new_text"] = "return value + 1\n"
+    if mode == "both":
+        proposal["patch"] = PATCH.decode()
+
+    stored, _ = _ingest(setup, _response([proposal]))
+
+    assert stored.batch.status == "failed"
+    assert stored.batch.proposals == ()
+    assert not setup["patches"].root.exists()
+
+
 @pytest.mark.parametrize(
     "mode",
     [

@@ -10,7 +10,7 @@ import math
 from datetime import timedelta
 from uuid import uuid5
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from hcuopt.adapters.agent_generator import (
     CandidateProposalBatchStore,
@@ -22,6 +22,7 @@ from hcuopt.adapters.agent_promotion import (
     BaselineOverlaySource,
     CandidateSourcePackagePublisher,
     apply_single_file_unified_patch,
+    build_single_replacement_patch,
 )
 from hcuopt.adapters.agent_runner import AgentInputFile
 from hcuopt.adapters.agent_runner_receipt import RunnerExecutionReceiptStore
@@ -77,7 +78,17 @@ class _ProposalText(ContractModel):
     optimization_intent: str = Field(min_length=1, max_length=2000)
     rationale: str = Field(min_length=1, max_length=10_000)
     risk_summary: str = Field(min_length=1, max_length=4000)
-    patch: str = Field(min_length=1, max_length=1_000_000)
+    patch: str | None = Field(default=None, min_length=1, max_length=1_000_000)
+    old_text: str | None = Field(default=None, min_length=1, max_length=256_000)
+    new_text: str | None = Field(default=None, min_length=1, max_length=256_000)
+
+    @model_validator(mode="after")
+    def require_one_edit_encoding(self) -> _ProposalText:
+        patch_mode = self.patch is not None
+        replacement_mode = self.old_text is not None and self.new_text is not None
+        if patch_mode == replacement_mode or (self.old_text is None) != (self.new_text is None):
+            raise ValueError("Proposal must use exactly one supported edit encoding")
+        return self
 
 
 class _ProposalsText(ContractModel):
@@ -313,7 +324,16 @@ class MessagesProposalIngestor:
             proposals = []
             patches = []
             for ordinal, item in enumerate(parsed.proposals):
-                patch = item.patch.encode("utf-8", errors="strict")
+                patch = (
+                    item.patch.encode("utf-8", errors="strict")
+                    if item.patch is not None
+                    else build_single_replacement_patch(
+                        context["source"].encode("utf-8"),
+                        expected_path=context["source_path"],
+                        old_text=item.old_text or "",
+                        new_text=item.new_text or "",
+                    )
+                )
                 # Reuse C's existing no-execution parser and baseline applicability check.
                 apply_single_file_unified_patch(
                     context["source"].encode("utf-8"),

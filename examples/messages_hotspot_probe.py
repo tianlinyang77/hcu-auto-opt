@@ -18,7 +18,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from hcuopt.adapters.agent_generator import _publish_once
-from hcuopt.adapters.agent_promotion import apply_single_file_unified_patch
+from hcuopt.adapters.agent_promotion import (
+    apply_single_file_unified_patch,
+    build_single_replacement_patch,
+)
 from hcuopt.adapters.agent_runner import (
     AgentDeploymentCredential,
     AgentInputFile,
@@ -199,7 +202,16 @@ def finalize_probe(root: Path) -> int:
             if len(parsed.proposals) > 1:
                 raise ValueError("too many proposals")
             for item_proposal in parsed.proposals:
-                patch = item_proposal.patch.encode("utf-8")
+                patch = (
+                    item_proposal.patch.encode("utf-8")
+                    if item_proposal.patch is not None
+                    else build_single_replacement_patch(
+                        source,
+                        expected_path=context["source_path"],
+                        old_text=item_proposal.old_text or "",
+                        new_text=item_proposal.new_text or "",
+                    )
+                )
                 apply_single_file_unified_patch(source, patch, expected_path=context["source_path"])
                 _publish_once(root / "suggestion.diff", patch)
                 _publish_once(root / "suggestion.json", canonical_json_bytes(item_proposal))

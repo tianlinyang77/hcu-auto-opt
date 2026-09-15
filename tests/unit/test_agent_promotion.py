@@ -23,6 +23,7 @@ from hcuopt.adapters.agent_promotion import (
     ProposalPromotionService,
     ProposalReviewAuthority,
     apply_single_file_unified_patch,
+    build_single_replacement_patch,
 )
 from hcuopt.adapters.business_candidate_family import BusinessCandidateFamilyVerifier
 from hcuopt.agent.authority import (
@@ -410,6 +411,49 @@ def test_single_file_patch_applies_and_rejects_baseline_or_path_drift() -> None:
             BASELINE,
             _patch(1),
             expected_path="sglang/runtime/other.py",
+        )
+
+
+def test_structured_replacement_builds_a_replayable_canonical_patch() -> None:
+    patch = build_single_replacement_patch(
+        BASELINE,
+        expected_path=BASELINE_PATH,
+        old_text="    return value\n",
+        new_text="    return value + 1\n",
+    )
+
+    assert patch.startswith(
+        f"--- a/{BASELINE_PATH}\n+++ b/{BASELINE_PATH}\n".encode()
+    )
+    assert apply_single_file_unified_patch(
+        BASELINE,
+        patch,
+        expected_path=BASELINE_PATH,
+    ) == b"def forward(value):\n    return value + 1\n"
+
+
+@pytest.mark.parametrize(
+    ("baseline", "old_text", "new_text", "match"),
+    [
+        (b"return value\nreturn value\n", "return value\n", "return changed\n", "uniquely"),
+        (BASELINE, "return value\n", "return changed\n", "line boundary"),
+        (BASELINE, "    return value\n", "    return value\n", "distinct"),
+        (BASELINE, "    return value\r\n", "    return changed\n", "distinct"),
+        (BASELINE, "    return value\n", "    return \x00changed\n", "distinct"),
+    ],
+)
+def test_structured_replacement_rejects_ambiguous_or_unsafe_edits(
+    baseline: bytes,
+    old_text: str,
+    new_text: str,
+    match: str,
+) -> None:
+    with pytest.raises(SourceArtifactError, match=match):
+        build_single_replacement_patch(
+            baseline,
+            expected_path=BASELINE_PATH,
+            old_text=old_text,
+            new_text=new_text,
         )
 
 
