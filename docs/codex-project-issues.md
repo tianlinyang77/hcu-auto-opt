@@ -249,3 +249,37 @@
 - Applies to: target-specific onboarding that reuses code named by an existing Formal Readiness manifest.
 - Do not repeat: do not update a historical audit hash merely to accommodate a new target; isolate the new target behind a wrapper or versioned entrypoint.
 - Last updated: 2026-09-15
+
+# BW20 deployment checkout has no noninteractive GitHub HTTPS credential
+
+- Scope: project-local
+- Symptom: `git clone https://github.com/tianlinyang77/hcu-auto-opt.git` on
+  `github-bw20` invoked `gnome-ssh-askpass` without a display and failed before checkout.
+- Evidence: the clone destination contained no files; the existing PostgreSQL and unrelated
+  containers were unchanged.
+- Cause: the remote `github` account has no usable noninteractive credential for this HTTPS
+  remote. This is a deployment transport limitation, not a repository or branch failure.
+- Proven workaround: generate `git archive` from the locally verified commit, retain its SHA256,
+  upload it to a new target-specific directory, and verify the same digest before extraction.
+- Validation: commit `c7f81ac9258f1e031666074faeba85fea6c737fe` was exported with archive
+  SHA256 `1fa1bd2dcd1cacd0f4ac810d392a1484a930b107b91f26138bd41e28574b0881`;
+  the remote digest matched before extraction.
+- Applies to: branch deployment on `github-bw20` while no deploy key or GitHub token is installed.
+- Do not repeat: do not retry interactive HTTPS clone from automation and do not put credentials
+  in the command line; use a verified archive or separately provision an approved deploy key.
+- Last updated: 2026-09-15
+
+# Remote CPU container UID must match the BW20 deployment owner
+
+- Scope: project-local
+- Symptom: a dependency-only container using UID/GID `1000:1000` could download packages but
+  failed to publish them into the host-mounted directory with `PermissionError`.
+- Cause: the BW20 `github` deployment owner is UID/GID `1002:1002`.
+- Proven workaround: verify `id -u` and `id -g` before container creation and run the bounded
+  dependency container as `1002:1002`; do not widen directory permissions.
+- Validation: the second run installed `psycopg 3.3.5`, and a network-disabled read-only check
+  imported both `psycopg` and `hcuopt` from the pinned Python 3.10 image/source deployment.
+- Applies to: host-write mounts under `/home/github/hcu-auto-opt-runtime` on `github-bw20`.
+- Do not repeat: do not assume the first non-root user is UID 1000 and do not solve ownership
+  mismatches with world-writable directories.
+- Last updated: 2026-09-15
