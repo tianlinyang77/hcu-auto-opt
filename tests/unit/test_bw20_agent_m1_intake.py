@@ -72,9 +72,7 @@ class Repository:
 
     def create_manual_hotspot_intake(self, _task_id, request):
         self.hotspot = request
-        return {
-            "hotspot_id": uuid5(NAMESPACE_URL, f"hcuopt:m1-hotspot:{HOTSPOT_KEY}")
-        }
+        return {"hotspot_id": uuid5(NAMESPACE_URL, f"hcuopt:m1-hotspot:{request.idempotency_key}")}
 
 
 class Coordinator:
@@ -134,9 +132,7 @@ def test_bootstrap_binds_real_authority_but_stops_before_candidate(tmp_path: Pat
     assert result["hcu_accessed"] is False
     assert result["performance_conclusion"] == "not_measured"
     assert repository.hotspot.share_ratio == 0.0
-    assert repository.hotspot.meta["historical_evidence_role"] == (
-        "transferred_hypothesis_only"
-    )
+    assert repository.hotspot.meta["historical_evidence_role"] == ("transferred_hypothesis_only")
     assert repository.start.request.hotspot_id == uuid5(
         NAMESPACE_URL, f"hcuopt:m1-hotspot:{HOTSPOT_KEY}"
     )
@@ -208,3 +204,63 @@ def test_bootstrap_creates_independent_generation_for_corrected_advisory(
     assert envelope["context"]["hotspot_summary"] == advisory
     assert "repeated adjacent values" in envelope["context"]["hotspot_summary"]
     assert "non-monotonic" in envelope["context"]["hotspot_summary"]
+
+
+def test_bootstrap_can_start_a_new_formal_task_after_invalid_infrastructure_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "baseline"
+    allocator = source / "python/sglang/srt/mem_cache/allocator.py"
+    allocator.parent.mkdir(parents=True)
+    allocator.write_text("def free(self):\n    return None\n", encoding="utf-8")
+    _git(source, "init")
+    _git(source, "config", "core.autocrlf", "false")
+    _git(source, "add", ".")
+    _git(
+        source,
+        "-c",
+        "user.name=HCU Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "test(source): add baseline",
+    )
+    _git(source, "remote", "add", "origin", "git@github.com:HYGON-AI/sglang-das.git")
+    snapshot = SourceSnapshot(
+        kind="baseline",
+        repository="git@github.com:HYGON-AI/sglang-das.git",
+        commit=_git(source, "rev-parse", "HEAD"),
+        tree_hash=_git(source, "rev-parse", "HEAD^{tree}"),
+        source_hash=canonical_source_hash(source),
+        worktree_uri=source.as_uri(),
+        clean=True,
+    )
+    snapshot_file = tmp_path / "baseline.json"
+    snapshot_file.write_text(snapshot.model_dump_json(), encoding="utf-8")
+    repository = Repository(snapshot)
+    task_key = "bw20-m1-agent-allocator-free-v2"
+    hotspot_key = "bw20-m1-agent-allocator-free-hotspot-v2"
+
+    result = bootstrap(
+        repository,
+        source_root=ROOT,
+        baseline_snapshot_file=snapshot_file,
+        evidence_root=tmp_path / "evidence",
+        generation_root=tmp_path / "generation",
+        base_url="https://api.example.invalid/anthropic",
+        model="test-model",
+        task_key=task_key,
+        hotspot_key=hotspot_key,
+        generation_key="bw20-m1-agent-allocator-free-generation-v7",
+        coordinator=Coordinator(),
+    )
+
+    assert repository.task_request.idempotency_key == task_key
+    assert repository.hotspot.idempotency_key == hotspot_key
+    assert repository.start.request.hotspot_id == uuid5(
+        NAMESPACE_URL, f"hcuopt:m1-hotspot:{hotspot_key}"
+    )
+    assert result["candidate_created"] is False

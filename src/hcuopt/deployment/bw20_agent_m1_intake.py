@@ -80,9 +80,7 @@ HISTORICAL_PROFILER_URI = (
     "traces/1787646066.6493704/"
     "m1-prefill-v2-1787646066.6515782-TP-0.trace.json.gz"
 )
-HISTORICAL_PROFILER_HASH = (
-    "sha256:17ff2c0aa23a5365ab7478f0b1cb0756d11509c135b5cf2ddb48baa20b77392a"
-)
+HISTORICAL_PROFILER_HASH = "sha256:17ff2c0aa23a5365ab7478f0b1cb0756d11509c135b5cf2ddb48baa20b77392a"
 
 
 def _sha256(payload: bytes) -> str:
@@ -189,6 +187,8 @@ def bootstrap(
     generation_root: Path,
     base_url: str,
     model: str,
+    task_key: str = TASK_KEY,
+    hotspot_key: str = HOTSPOT_KEY,
     generation_key: str = GENERATION_KEY,
     hotspot_summary: str = DEFAULT_HOTSPOT_SUMMARY,
     created_at: datetime = CREATED_AT,
@@ -201,7 +201,7 @@ def bootstrap(
     evidence_root = evidence_root.resolve()
     generation_root = generation_root.resolve()
 
-    hotspot_id = uuid5(NAMESPACE_URL, f"hcuopt:m1-hotspot:{HOTSPOT_KEY}")
+    hotspot_id = uuid5(NAMESPACE_URL, f"hcuopt:m1-hotspot:{hotspot_key}")
     correctness = build_m1_allocator_hotspot_spec(str(hotspot_id))
     correctness_artifact = _publish(evidence_root, "correctness-spec", correctness)
     if correctness_artifact.sha256 != m1_hotspot_spec_sha256(correctness):
@@ -240,7 +240,7 @@ def bootstrap(
             workload_id=WORKLOAD_ID,
             workload_hash=workload_artifact.sha256,
             configuration_hash=configuration_artifact.sha256,
-            idempotency_key=TASK_KEY,
+            idempotency_key=task_key,
             budget={"max_wall_seconds": 7200, "max_samples": 400},
         )
     )
@@ -277,8 +277,7 @@ def bootstrap(
                 "formal_performance_conclusion": None,
             },
             implementation_location=(
-                "python/sglang/srt/mem_cache/allocator.py:"
-                "PagedTokenToKVPoolAllocator.free"
+                "python/sglang/srt/mem_cache/allocator.py:PagedTokenToKVPoolAllocator.free"
             ),
             replacement_point=ALLOCATOR_REPLACEMENT_POINT,
             call_path=(
@@ -305,7 +304,7 @@ def bootstrap(
             actor="bw20-agent-m1-bootstrap",
             adapter_provenance=[profiler],
             synthetic=False,
-            idempotency_key=HOTSPOT_KEY,
+            idempotency_key=hotspot_key,
         ),
     )
     if UUID(str(hotspot["hotspot_id"])) != hotspot_id:
@@ -421,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generation-root", type=Path, required=True)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--task-key", default=TASK_KEY)
+    parser.add_argument("--hotspot-key", default=HOTSPOT_KEY)
     parser.add_argument("--generation-key", default=GENERATION_KEY)
     parser.add_argument("--hotspot-summary-file", type=Path)
     parser.add_argument(
@@ -446,6 +447,8 @@ def main(argv: list[str] | None = None) -> int:
         generation_root=args.generation_root,
         base_url=args.base_url,
         model=args.model,
+        task_key=args.task_key,
+        hotspot_key=args.hotspot_key,
         generation_key=args.generation_key,
         hotspot_summary=hotspot_summary,
         created_at=created_at,
