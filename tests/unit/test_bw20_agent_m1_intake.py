@@ -183,8 +183,9 @@ def test_bootstrap_creates_independent_generation_for_corrected_advisory(
     repository = Repository(snapshot)
     generation_key = "bw20-m1-agent-allocator-free-generation-v2"
     advisory = (
-        "page-contiguous means tokens from each page are adjacent. Page indices are "
-        "non-decreasing and contain repeated values; they are not strictly increasing."
+        "page-contiguous means all token indices from one page occur in one adjacent group. "
+        "The derived page-id sequence contains repeated adjacent values, while the order of "
+        "different page groups can be non-monotonic; do not require strict or non-decreasing order."
     )
 
     result = bootstrap(
@@ -205,4 +206,5 @@ def test_bootstrap_creates_independent_generation_for_corrected_advisory(
     assert repository.start.request.generation_run_id == repository.start.plan.generation_run_id
     envelope = json.loads(file_uri_to_path(result["input_uri"]).read_text(encoding="utf-8"))
     assert envelope["context"]["hotspot_summary"] == advisory
-    assert "not strictly increasing" in envelope["context"]["hotspot_summary"]
+    assert "repeated adjacent values" in envelope["context"]["hotspot_summary"]
+    assert "non-monotonic" in envelope["context"]["hotspot_summary"]
