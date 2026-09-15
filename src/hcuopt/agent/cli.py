@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -14,6 +15,7 @@ from psycopg import Error as DatabaseError
 from pydantic import ValidationError
 
 from hcuopt.agent.authority import AgentAuthorityError, ApexGenerationCoordinator
+from hcuopt.agent.identity import verify_candidate_proposal_review_record
 from hcuopt.contracts.agent_v1 import GenerationRunStartRequest
 from hcuopt.domain.errors import ContractError
 from hcuopt.evaluation.agent_generation_read_model import (
@@ -30,6 +32,8 @@ AGENT_GENERATION_COMMANDS = {
     "agent-messages-run-once",
     "agent-messages-recover",
     "agent-messages-prepare-inspection",
+    "agent-proposal-review",
+    "agent-generation-close-rejected",
 }
 
 
@@ -88,6 +92,34 @@ def configure_agent_generation_parsers(
             command.add_argument("--task-id", type=UUID, required=True)
             command.add_argument("--target-id", required=True)
 
+    review = subparsers.add_parser(
+        "agent-proposal-review",
+        help="reread one retained Proposal and publish a deployment-owned review",
+    )
+    review.add_argument("generation_run_id", type=UUID)
+    review.add_argument("proposal_id", type=UUID)
+    review.add_argument("--database-url")
+    review.add_argument("--store-root", type=Path, required=True)
+    review.add_argument("--decision", choices=("approved", "rejected"), required=True)
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--reason-file", type=Path, required=True)
+    review.add_argument("--evidence-file", type=Path, required=True)
+    review.add_argument("--idempotency-key", required=True)
+    review.add_argument(
+        "--reviewed-at",
+        required=True,
+        help="fixed timezone-aware ISO-8601 timestamp used for idempotent replay",
+    )
+
+    close_rejected = subparsers.add_parser(
+        "agent-generation-close-rejected",
+        help="terminally close a Run after every retained Proposal was rejected",
+    )
+    close_rejected.add_argument("generation_run_id", type=UUID)
+    close_rejected.add_argument("--database-url")
+    close_rejected.add_argument("--store-root", type=Path, required=True)
+    close_rejected.add_argument("--review-id", type=UUID, action="append", required=True)
+
 
 def run_agent_generation_command(
     args: argparse.Namespace,
@@ -104,7 +136,79 @@ def run_agent_generation_command(
     coordinator = ApexGenerationCoordinator()
     try:
         repository = repository_factory(database_url)
-        if args.command.startswith("agent-messages-"):
+        if args.command in {"agent-proposal-review", "agent-generation-close-rejected"}:
+            from hcuopt.adapters.agent_promotion import (
+                ProposalDecisionStore,
+                ProposalReviewAuthority,
+            )
+            from hcuopt.agent.messages_worker import MessagesGenerationWorker
+            from hcuopt.measurement.evidence import canonical_json_bytes
+
+            worker = MessagesGenerationWorker(args.store_root)
+            decisions = ProposalDecisionStore(args.store_root / "decisions")
+            authority = ProposalReviewAuthority(
+                patch_store=worker.patches,
+                batch_store=worker.batches,
+                decision_store=decisions,
+            )
+            status = repository.generation_run_status(args.generation_run_id)
+            if args.command == "agent-proposal-review":
+                reason = args.reason_file.read_text(encoding="utf-8").strip()
+                evidence = args.evidence_file.read_bytes()
+                reviewed_at = datetime.fromisoformat(args.reviewed_at.replace("Z", "+00:00"))
+                result = authority.review(
+                    status,
+                    args.proposal_id,
+                    decision=args.decision,
+                    reviewer=args.reviewer,
+                    reason=reason,
+                    review_evidence=evidence,
+                    idempotency_key=args.idempotency_key,
+                    reviewed_at=reviewed_at,
+                )
+            else:
+                retained = {
+                    item.proposal_id
+                    for item in status.proposals
+                    if item.disposition == "retained"
+                }
+                reviews = tuple(decisions.load_review(review_id) for review_id in args.review_id)
+                if len(reviews) != len(args.review_id) or {
+                    item.proposal_id for item in reviews
+                } != retained:
+                    raise ValueError("rejected closure requires one review per retained Proposal")
+                for review in reviews:
+                    if review.decision != "rejected":
+                        raise ValueError("rejected closure cannot contain an approved review")
+                    resolved = authority.resolve(status, review.proposal_id)
+                    verify_candidate_proposal_review_record(
+                        status.run.request,
+                        resolved.proposal,
+                        resolved.raw_patch,
+                        review,
+                    )
+                aggregate = decisions.publish_evidence(
+                    "generation-review",
+                    canonical_json_bytes(
+                        {
+                            "schema_version": "m2b-rejected-generation-review-v1",
+                            "generation_run_id": str(args.generation_run_id),
+                            "review_ids": [str(item.review_id) for item in reviews],
+                            "decisions": [item.decision for item in reviews],
+                            "promotion_ids": [],
+                            "candidate_created": False,
+                            "hcu_accessed": False,
+                            "performance_conclusion": "not_measured",
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                )
+                result = repository.complete_generation_review(
+                    args.generation_run_id,
+                    review_evidence_uri=aggregate.uri,
+                    review_evidence_hash=aggregate.content_hash,
+                )
+        elif args.command.startswith("agent-messages-"):
             from hcuopt.adapters.agent_runner import AgentInputFile
             from hcuopt.agent.messages_dispatch import MessagesDispatchService
             from hcuopt.agent.messages_worker import MessagesGenerationWorker
@@ -178,7 +282,11 @@ def run_agent_generation_command(
         TypeError,
     ) as exc:
         # Provider/deployment input validation may carry source or credentials.
-        detail = type(exc).__name__ if args.command.startswith("agent-messages-") else str(exc)
+        redact = args.command.startswith("agent-messages-") or args.command in {
+            "agent-proposal-review",
+            "agent-generation-close-rejected",
+        }
+        detail = type(exc).__name__ if redact else str(exc)
         print(f"Agent Generation command failed: {detail}", file=sys.stderr)
         return 2
     print(result.model_dump_json(indent=2))

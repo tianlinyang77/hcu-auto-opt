@@ -57,6 +57,43 @@ def test_agent_generation_cli_exposes_start_status_and_reconcile() -> None:
         ).command
         == "agent-generation-evidence"
     )
+    assert (
+        parser.parse_args(
+            [
+                "agent-proposal-review",
+                "61000000-0000-0000-0000-000000000001",
+                "61000000-0000-0000-0000-000000000002",
+                "--store-root",
+                ".",
+                "--decision",
+                "rejected",
+                "--reviewer",
+                "reviewer",
+                "--reason-file",
+                "reason.txt",
+                "--evidence-file",
+                "evidence.json",
+                "--idempotency-key",
+                "review-key-v1",
+                "--reviewed-at",
+                "2026-09-15T09:00:00Z",
+            ]
+        ).command
+        == "agent-proposal-review"
+    )
+    assert (
+        parser.parse_args(
+            [
+                "agent-generation-close-rejected",
+                "61000000-0000-0000-0000-000000000001",
+                "--store-root",
+                ".",
+                "--review-id",
+                "61000000-0000-0000-0000-000000000002",
+            ]
+        ).command
+        == "agent-generation-close-rejected"
+    )
 
 
 def test_agent_generation_status_cli_is_read_only_and_reports_safety(
