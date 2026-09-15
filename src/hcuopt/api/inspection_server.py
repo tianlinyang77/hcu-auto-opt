@@ -128,7 +128,9 @@ def create_inspection_app(*, repository, evidence_root: Path, access: FileRunRea
 def app_from_environment() -> FastAPI:
     if os.name != "posix":
         raise ValueError("inspection deployment requires native POSIX evidence reads")
-    if os.getenv("HCUOPT_MODEL_API_KEY"):
+    if os.getenv("HCUOPT_MODEL_API_KEY") or os.getenv(
+        "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    ):
         raise ValueError("do not inject the model credential into the read-only service")
     url = os.environ["HCUOPT_INSPECTION_DATABASE_URL"]
     root = Path(os.environ["HCUOPT_AGENT_INSPECTION_ROOT"])

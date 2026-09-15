@@ -34,16 +34,20 @@ claim/reconcile/settle、B Runner、C 源码包、D 独立验证仍是各自唯�
 - 前端新增 `?agentInspection=<run-id>` 直达入口，只调用 inspection API，不回退演示数据；
   零有效提案仍展示 Attempt、用量、失败原因和权限边界。
 
-仍待完成：持久部署注册与受控密钥注入、真实模型结果的人工 Review/Promotion，以及独立
+仍待完成：持久部署注册、真实模型结果的人工 Review/Promotion，以及独立
 授权下的 HCU 正确性和性能验收。Linux PostgreSQL → D/API 模拟模型整链已通过；这不能
 称为真实 Agent 多轮自动优化已完成。
 
 ## 服务配置与预算
 
-非秘密示例见 `config/m2/messages-internal.example.json`，对应项目所有者指定的内部入口。
-它显式允许 HTTP，仅限本次指定的受信网络服务；这不等于链路加密或来源认证，后续应迁移
-HTTPS。API Key 由部署进程提供给 `execute_claim(..., api_key=...)`，只传给固定的可信 Wrapper，
-不放入输入文件、Plan、数据库、日志、命令参数或模型上下文。不要提交 `.env` 或截图中的密钥。
+非秘密示例见 `config/m2/messages-internal.example.json`，对应当前冻结的 DeepSeek Anthropic
+入口。服务基址 `https://api.deepseek.com/anthropic` 会规范化为
+`https://api.deepseek.com/anthropic/v1/messages`；模型固定为 `deepseek-flash`，MVP 默认显式
+发送 `thinking={"type":"disabled"}`，并要求响应中的模型名与 Plan 绑定模型完全一致。
+API Key 只由部署进程从私有文件读取，再作为内存中的 `deployment_credential` 交给 Worker。
+Runner 为单次 Attempt 建立临时 `0700` 目录和 `0600` 文件，只把该临时路径交给固定 Wrapper；
+密钥和值、部署源路径均不放入 AgentRunRequest、输入、Plan、数据库、日志、argv 或模型上下文。
+不要提交 `.env`、密钥文件或包含密钥的截图。
 
 初始建议为单 generator、单 attempt、单 Proposal、120 秒 HTTP timeout、150 秒冻结总预算，
 145 秒 Runner timeout、150 秒 Claim lease、45,000 总 token 上限、4,096 输出 token 上限。
@@ -65,12 +69,16 @@ input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_to
 2. 将 `messages_profile_for_input(input)` 和生成器文件 SHA256 写入现有 `GeneratorPlanEntry`，
    再通过现有 Coordinator/Repository 建 Run。保存原始输入，重试不得重新拼接不同内容。
 3. `MessagesDispatchService.run_once()` 校验输入与 Plan；A 按冻结 timeout 领取 Claim。
-4. 将 Claim 和精确输入交给 Worker，key 由部署侧注入。Worker 必须在无 HCU、无 Holdout、
+4. 将 Claim 和精确输入交给 Worker，key 由部署侧私有文件注入。Worker 必须在无 HCU、无 Holdout、
 无生产凭据的专用执行域；LocalCommand Runner 不是任意不可信代码的通用安全沙箱。
 5. A 用返回的 Receipt/Batch 调用原有结算接口，不增加第二套调度状态机：
 
 ```python
-result = worker.execute_claim(claim, prepared_input, api_key=deployment_key)
+result = worker.execute_claim(
+    claim,
+    prepared_input,
+    deployment_credential=deployment_key_bytes,
+)
 repository.settle_generation_attempt(
     claim.attempt.attempt_id,
     claim.attempt.claim_token,
@@ -101,7 +109,9 @@ hcuopt agent-messages-recover <generation-run-id> \
   --attempt-id <attempt-id> --store-root <同一个持久目录>
 ```
 
-数据库地址使用 `HCUOPT_DATABASE_URL`；执行密钥只从 `HCUOPT_MODEL_API_KEY` 读取。
+数据库地址使用 `HCUOPT_DATABASE_URL`；执行密钥文件路径只从
+`HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE` 读取。文件内容有 64 KiB 上限，不接受 NUL；
+路径和值不会进入持久 Agent Request。不要把密钥直接写入环境变量或命令历史。
 默认 lease 等于冻结 timeout，可显式设小但必须保留完整调用和结算余量；不可设大。
 本版本有意限定一个 generator、一次领取，不自动循环或新建重试，不支持任意命令。
 返回 JSON 是现有 Generation Run Status：必须检查 Attempt 和 Run 状态，命令退出 0
@@ -326,8 +336,9 @@ Windows 相关单测：**22 passed、4 POSIX-only skipped，5.41 秒**。
 
 ## 手动源文件级试跑
 
-在独立的 Python 3.10 环境安装项目依赖，从仓库根目录运行。事先在进程环境设置
-`HCUOPT_MODEL_API_KEY`，不要把真实值写到脚本或 shell 历史；下面没有任何真实密钥：
+在独立的 Python 3.10 环境安装项目依赖，从仓库根目录运行。事先创建仅部署用户可读的
+临时密钥文件，并把其路径设置到 `HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE`；不要把真实值
+写到脚本、环境变量或 shell 历史。下面没有任何真实密钥：
 
 ```text
 python examples/messages_hotspot_probe.py \
@@ -335,8 +346,8 @@ python examples/messages_hotspot_probe.py \
   --source-path python/sglang/srt/mem_cache/allocator.py \
   --source-commit <已验证的固定Commit> \
   --hotspot <人工选定的热点说明> \
-  --base-url http://itokens.sourcefind.cn:10087 \
-  --model mmm1-yx-claude-opus-4-7 --allow-http \
+  --base-url https://api.deepseek.com/anthropic \
+  --model deepseek-flash \
   --output <不存在的新输出目录>
 ```
 

@@ -222,7 +222,7 @@ def _execute(case):
         case["start"].request.generation_run_id,
         case["item"],
         worker_id="messages-postgres-test",
-        api_key="test-only-not-a-secret",
+        deployment_credential=b"test-only-not-a-secret",
         lease_seconds=15,
     )
 
@@ -401,7 +401,7 @@ def test_incompatible_input_refused_before_database_claim(dispatch_case):
             run_id,
             AgentInputFile(path=anthropic_messages.INPUT_NAME, content=b"{}"),
             worker_id="test",
-            api_key="test-only",
+            deployment_credential=b"test-only",
             lease_seconds=60,
         )
     assert case["repository"].generation_run_status(run_id) == before
@@ -448,7 +448,7 @@ def test_lease_larger_than_frozen_budget_is_rejected_before_claim(dispatch_case)
             run_id,
             case["item"],
             worker_id="test",
-            api_key="test-only",
+            deployment_credential=b"test-only",
             lease_seconds=60,
         )
     assert case["repository"].generation_run_status(run_id).attempts[0].state == "pending"

@@ -20,6 +20,7 @@ from uuid import uuid4
 from hcuopt.adapters.agent_generator import _publish_once
 from hcuopt.adapters.agent_promotion import apply_single_file_unified_patch
 from hcuopt.adapters.agent_runner import (
+    AgentDeploymentCredential,
     AgentInputFile,
     AgentRunLimits,
     AgentRunRequest,
@@ -88,9 +89,13 @@ def main() -> int:
         timeout_seconds=120,
     )
     program.messages_url(settings.base_url, allow_http=settings.allow_http)
-    api_key = os.environ.get("HCUOPT_MODEL_API_KEY", "")
-    if not api_key:
-        parser.error("set HCUOPT_MODEL_API_KEY in the process environment")
+    credential_path = os.environ.get(program.CREDENTIAL_ENVIRONMENT_NAME, "")
+    if not credential_path:
+        parser.error(f"set {program.CREDENTIAL_ENVIRONMENT_NAME} to a private file")
+    try:
+        deployment_credential = Path(credential_path).read_bytes()
+    except OSError:
+        parser.error("deployment credential file is unreadable")
     context = {
         "source_path": args.source_path,
         "source": source.decode("utf-8"),
@@ -130,7 +135,6 @@ def main() -> int:
         generator_artifact_hash=digest(artifact.read_bytes()),
         argv=(str(artifact),),
         input_files=(item,),
-        environment=(("HCUOPT_MODEL_API_KEY", api_key),),
         limits=AgentRunLimits(
             attempt_number=1,
             timeout_seconds=150.0,
@@ -143,7 +147,12 @@ def main() -> int:
     runner = LocalCommandAgentRunner(
         allowed_executables=(Path(sys.executable),),
         allowed_argv_prefixes=((str(artifact),),),
-        allowed_environment_names=frozenset({"HCUOPT_MODEL_API_KEY"}),
+        deployment_credentials=(
+            AgentDeploymentCredential(
+                environment_name=program.CREDENTIAL_ENVIRONMENT_NAME,
+                content=deployment_credential,
+            ),
+        ),
     )
     result = runner.run(request, root / "work")
     receipt = RunnerExecutionReceiptStore(root / "runner").publish(result)
@@ -181,7 +190,11 @@ def finalize_probe(root: Path) -> int:
                 raise ValueError("saved response content changed")
             reply = program.strict_json(raw)
             parsed = _ProposalsText.model_validate(
-                program.strict_json(program.proposal_text(reply))
+                program.strict_json(
+                    program.proposal_text(
+                        reply, expected_model=envelope["provider"]["model"]
+                    )
+                )
             )
             if len(parsed.proposals) > 1:
                 raise ValueError("too many proposals")

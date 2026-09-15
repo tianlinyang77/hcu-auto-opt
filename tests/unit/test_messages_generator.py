@@ -17,6 +17,7 @@ import pytest
 from hcuopt.adapters.agent_generator import CandidateProposalBatchStore, ProposalPatchStore
 from hcuopt.adapters.agent_promotion import BaselineOverlaySource
 from hcuopt.adapters.agent_runner import (
+    AgentDeploymentCredential,
     AgentInputFile,
     AgentRunLimits,
     AgentRunRequest,
@@ -259,6 +260,7 @@ def test_ingest_replays_and_preserves_synthetic_identity(setup):
         "truncated",
         "duplicate_json",
         "bad_usage",
+        "model_mismatch",
     ],
 )
 def test_invalid_model_reply_retains_receipt_without_publishing_patches(setup, mode):
@@ -283,6 +285,8 @@ def test_invalid_model_reply_retains_receipt_without_publishing_patches(setup, m
         reply["content"][0]["text"] = '{"proposals": [], "proposals": []}'
     elif mode == "bad_usage":
         reply["usage"]["input_tokens"] = 21
+    elif mode == "model_mismatch":
+        reply["model"] = "different-model"
     stored, ref = _ingest(setup, reply)
     assert stored.batch.status == "failed"
     assert stored.batch.proposals == ()
@@ -360,7 +364,9 @@ def test_worker_respects_lease_and_never_repeats_a_paid_attempt(setup, monkeypat
 
     monkeypatch.setattr(LocalCommandAgentRunner, "run", execute)
     with pytest.raises(SourceArtifactError, match="lease"):
-        worker.execute_claim(claim, setup["item"], api_key="test-only")
+        worker.execute_claim(
+            claim, setup["item"], deployment_credential=b"test-only"
+        )
     assert not calls
     claim = claim.model_copy(
         update={
@@ -379,14 +385,18 @@ def test_worker_respects_lease_and_never_repeats_a_paid_attempt(setup, monkeypat
                 }
             ),
             setup["item"],
-            api_key="test-only",
+            deployment_credential=b"test-only",
         )
     assert not calls
-    result = worker.execute_claim(claim, setup["item"], api_key="test-only")
+    result = worker.execute_claim(
+        claim, setup["item"], deployment_credential=b"test-only"
+    )
     assert result.batch.batch.status == "succeeded"
     assert result.batch.batch.synthetic is True
     with pytest.raises(SourceArtifactError, match="already started"):
-        worker.execute_claim(claim, setup["item"], api_key="test-only")
+        worker.execute_claim(
+            claim, setup["item"], deployment_credential=b"test-only"
+        )
     assert len(calls) == 1
     assert "test-only" not in file_uri_to_path(result.prepared_input_uri).read_text()
 
@@ -441,7 +451,9 @@ def test_messages_client_does_not_forward_keys_in_response():
         def open(self, request, timeout):
             assert request.full_url == "https://example.invalid/v1/messages"
             assert timeout == 5
-            assert "tools" not in json.loads(request.data)
+            payload = json.loads(request.data)
+            assert "tools" not in payload
+            assert payload["thinking"] == {"type": "disabled"}
             return Reply()
 
     with pytest.raises(program.MessagesError, match="contains_credential"):
@@ -453,6 +465,7 @@ def test_messages_client_does_not_forward_keys_in_response():
                     "allow_http": False,
                     "timeout_seconds": 5,
                     "max_output_tokens": 32,
+                    "thinking_mode": "disabled",
                 },
                 "context": {"source": "data only"},
             },
@@ -475,6 +488,21 @@ def test_messages_client_does_not_forward_keys_in_response():
 def test_unsafe_url_refused(url):
     with pytest.raises(program.MessagesError):
         program.messages_url(url, allow_http=False)
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://api.deepseek.com/anthropic", "https://api.deepseek.com/anthropic/v1/messages"),
+        ("https://api.deepseek.com/anthropic/v1", "https://api.deepseek.com/anthropic/v1/messages"),
+        (
+            "https://api.deepseek.com/anthropic/v1/messages",
+            "https://api.deepseek.com/anthropic/v1/messages",
+        ),
+    ],
+)
+def test_deepseek_anthropic_base_url_is_normalized(base_url, expected):
+    assert program.messages_url(base_url, allow_http=False) == expected
 
 
 def test_real_runner_to_local_http_stub_to_receipt_and_ingest(setup):
@@ -508,15 +536,16 @@ def test_real_runner_to_local_http_stub_to_receipt_and_ingest(setup):
             ),
             hotspot_summary="test fixture; not a real optimization",
         )
-        request = replace(
-            setup["runner_request"],
-            input_files=(item,),
-            environment=(("HCUOPT_MODEL_API_KEY", "test-only-not-a-secret"),),
-        )
+        request = replace(setup["runner_request"], input_files=(item,))
         runner = LocalCommandAgentRunner(
             allowed_executables=(Path(sys.executable),),
             allowed_argv_prefixes=((str(ARTIFACT),),),
-            allowed_environment_names=frozenset({"HCUOPT_MODEL_API_KEY"}),
+            deployment_credentials=(
+                AgentDeploymentCredential(
+                    environment_name=program.CREDENTIAL_ENVIRONMENT_NAME,
+                    content=b"test-only-not-a-secret",
+                ),
+            ),
         )
         result = runner.run(request, setup["tmp_path"] / "http-run")
         assert result.status == "succeeded", result.evidence.stderr_summary

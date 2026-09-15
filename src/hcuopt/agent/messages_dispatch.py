@@ -33,7 +33,7 @@ class MessagesDispatchService:
         prepared_input: AgentInputFile,
         *,
         worker_id: str,
-        api_key: str,
+        deployment_credential: bytes,
         lease_seconds: int | None = None,
     ) -> GenerationRunStatusView:
         status = self.repository.generation_run_status(generation_run_id)
@@ -65,8 +65,10 @@ class MessagesDispatchService:
             or lease_seconds > min(generator.timeout_seconds, 7200)
             or not worker_id.strip()
             or worker_id.strip() != worker_id
-            or not api_key
-            or any(char in api_key for char in "\r\n\x00")
+            or not isinstance(deployment_credential, bytes)
+            or not deployment_credential
+            or len(deployment_credential) > 64 * 1024
+            or b"\x00" in deployment_credential
         ):
             raise SourceArtifactError("Messages dispatch needs valid budget, lease and credential")
         claim = self.repository.claim_generation_attempt(
@@ -79,7 +81,11 @@ class MessagesDispatchService:
         if claim.run.generation_run_id != generation_run_id:
             raise SourceArtifactError("Messages dispatch received a cross-run Claim")
         _publish_once(self._claim_path(claim.attempt.attempt_id), canonical_json_bytes(claim))
-        result = self.worker.execute_claim(claim, prepared_input, api_key=api_key)
+        result = self.worker.execute_claim(
+            claim,
+            prepared_input,
+            deployment_credential=deployment_credential,
+        )
         return self._settle(claim, result)
 
     def recover(self, generation_run_id: UUID, attempt_id: UUID) -> GenerationRunStatusView:

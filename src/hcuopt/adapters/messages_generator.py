@@ -70,6 +70,7 @@ class MessagesSettings(ContractModel):
     max_output_tokens: int = Field(default=4096, strict=True, ge=1, le=16_384)
     timeout_seconds: int = Field(default=120, strict=True, ge=1, le=300)
     allow_http: bool = Field(default=False, strict=True)
+    thinking_mode: str = Field(default="disabled", pattern="^(disabled|provider_default)$")
 
 
 class _ProposalText(ContractModel):
@@ -295,7 +296,9 @@ class MessagesProposalIngestor:
             reply = strict_json(raw)
             if not isinstance(reply, dict) or usage_tokens(reply) != execution.tokens_consumed:
                 raise MessagesError("provider_usage_binding_mismatch")
-            parsed = _ProposalsText.model_validate(strict_json(proposal_text(reply)))
+            parsed = _ProposalsText.model_validate(
+                strict_json(proposal_text(reply, expected_model=envelope["provider"]["model"]))
+            )
             if not parsed.proposals:
                 return self.batch_store.publish(
                     CandidateProposalBatch(

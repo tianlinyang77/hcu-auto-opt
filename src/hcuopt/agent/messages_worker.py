@@ -18,6 +18,7 @@ from hcuopt.adapters.agent_generator import (
     _publish_once,
 )
 from hcuopt.adapters.agent_runner import (
+    AgentDeploymentCredential,
     AgentInputFile,
     AgentRunLimits,
     AgentRunRequest,
@@ -66,7 +67,7 @@ class MessagesGenerationWorker:
         claim: GenerationAttemptClaim,
         prepared_input: AgentInputFile,
         *,
-        api_key: str,
+        deployment_credential: bytes,
     ) -> MessagesAttemptResult:
         claim = GenerationAttemptClaim.model_validate(claim.model_dump(mode="json"))
         run, attempt, generator = claim.run, claim.attempt, claim.generator
@@ -109,7 +110,12 @@ class MessagesGenerationWorker:
                 "Messages attempt needs sufficient frozen budget and claim lease"
             )
         input_hash = hashlib.sha256(prepared_input.content).hexdigest()
-        if not api_key or any(char in api_key for char in "\r\n\x00"):
+        if (
+            not isinstance(deployment_credential, bytes)
+            or not deployment_credential
+            or len(deployment_credential) > 64 * 1024
+            or b"\x00" in deployment_credential
+        ):
             raise SourceArtifactError("Messages worker requires a valid deployment credential")
         attempt_root = self.root / "attempts" / str(attempt.attempt_id)
         attempt_root.mkdir(parents=True, exist_ok=True)
@@ -137,7 +143,12 @@ class MessagesGenerationWorker:
         runner = LocalCommandAgentRunner(
             allowed_executables=(Path(sys.executable),),
             allowed_argv_prefixes=((str(artifact),),),
-            allowed_environment_names=frozenset({"HCUOPT_MODEL_API_KEY"}),
+            deployment_credentials=(
+                AgentDeploymentCredential(
+                    environment_name=anthropic_messages.CREDENTIAL_ENVIRONMENT_NAME,
+                    content=deployment_credential,
+                ),
+            ),
         )
         request = AgentRunRequest(
             attempt_id=attempt.attempt_id,
@@ -151,7 +162,6 @@ class MessagesGenerationWorker:
             generator_artifact_hash=artifact_hash,
             argv=(str(artifact),),
             input_files=(prepared_input,),
-            environment=(("HCUOPT_MODEL_API_KEY", api_key),),
             limits=AgentRunLimits(
                 attempt_number=attempt.attempt_number,
                 timeout_seconds=float(runner_timeout),

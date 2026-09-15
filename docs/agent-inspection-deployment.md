@@ -54,7 +54,8 @@ Proposal/Receipt。修改配置必须继续维持 0600。已交付给读者的�
 | `HCUOPT_AGENT_INSPECTION_ROOT` | 原 Worker Store、审核前快照及终态报告引用的受保护只读根目录 |
 | `HCUOPT_INSPECTION_ACCESS_FILE` | 本用户私有的 access.json 绝对路径 |
 
-**不要设置 `HCUOPT_MODEL_API_KEY`**；环境工厂发现该值会拒绝启动，模型密钥属于另一个 Worker。
+**不要设置 `HCUOPT_MODEL_API_KEY` 或 `HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE`**；环境工厂
+发现任一值都会拒绝启动，模型密钥属于另一个 Worker。
 API 用户可读证据但应通过文件系统只读挂载/ACL 防止写入。URI 根目录必须与原始证据一致，
 不能随意搬迁后修改 Receipt 的路径或 Hash。
 
