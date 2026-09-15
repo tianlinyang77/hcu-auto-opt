@@ -262,6 +262,11 @@ SSH、Docker、数据库写入或复制内部 UUID/Hash。
 Scripted CLI 和 Read Model 稳定后再实现只读 Web。首版只读取 API，不提供写操作；至少覆盖
 任务列表、流程进度、Candidate 家族、结果、Evidence 和 Cleanup。
 
+OX-3 的 Agent inspection 已补充可复用本机入口 `npm run inspection:serve`：在管理员预先
+配置只读后端、Run 凭据和 SSH 隧道后，一条命令提供同源页面与精确只读代理，替代本地
+results 脚本。它不自动创建环境或免除首次部署/授权，不代表 OX-1/OX-2/OX-4 全部完成。
+具体限制和故障引导见 [单用户只读部署](agent-inspection-deployment.md)。
+
 ### OX-4：受控创建与签核
 
 在 M2 Signoff Intent/Outbox、鉴权和故障恢复通过后，才开放 Web 创建、Cancel 和 Signoff。

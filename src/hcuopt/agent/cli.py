@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from psycopg import Error as DatabaseError
 from pydantic import ValidationError
 
 from hcuopt.agent.authority import AgentAuthorityError, ApexGenerationCoordinator
@@ -26,6 +27,9 @@ AGENT_GENERATION_COMMANDS = {
     "agent-generation-status",
     "agent-generation-reconcile",
     "agent-generation-evidence",
+    "agent-messages-run-once",
+    "agent-messages-recover",
+    "agent-messages-prepare-inspection",
 }
 
 
@@ -64,6 +68,25 @@ def configure_agent_generation_parsers(
         type=Path,
         default=os.getenv("HCUOPT_AGENT_EVIDENCE_ROOT"),
     )
+    for name in (
+        "agent-messages-run-once",
+        "agent-messages-recover",
+        "agent-messages-prepare-inspection",
+    ):
+        command = subparsers.add_parser(name, help="bounded dev-only Messages dispatch/recovery")
+        command.add_argument("generation_run_id", type=UUID)
+        command.add_argument("--database-url")
+        command.add_argument("--store-root", type=Path, required=True)
+        if name == "agent-messages-run-once":
+            command.add_argument("--input", type=Path, required=True)
+            command.add_argument("--worker-id", required=True)
+            command.add_argument("--lease-seconds", type=int)
+        elif name == "agent-messages-recover":
+            command.add_argument("--attempt-id", type=UUID, required=True)
+        else:
+            command.add_argument("--knowledge-root", type=Path, required=True)
+            command.add_argument("--task-id", type=UUID, required=True)
+            command.add_argument("--target-id", required=True)
 
 
 def run_agent_generation_command(
@@ -78,10 +101,52 @@ def run_agent_generation_command(
         "HCUOPT_DATABASE_URL",
         "postgresql://hcuopt:hcuopt@localhost:5432/hcuopt",
     )
-    repository = repository_factory(database_url)
     coordinator = ApexGenerationCoordinator()
     try:
-        if args.command == "agent-generation-start":
+        repository = repository_factory(database_url)
+        if args.command.startswith("agent-messages-"):
+            from hcuopt.adapters.agent_runner import AgentInputFile
+            from hcuopt.agent.messages_dispatch import MessagesDispatchService
+            from hcuopt.agent.messages_worker import MessagesGenerationWorker
+            from hcuopt.generators.anthropic_messages import (
+                CREDENTIAL_ENVIRONMENT_NAME,
+                INPUT_NAME,
+                MAX_INPUT_BYTES,
+            )
+
+            service = MessagesDispatchService(repository, MessagesGenerationWorker(args.store_root))
+            if args.command == "agent-messages-prepare-inspection":
+                from hcuopt.adapters.agent_knowledge import KnowledgeSnapshotStore
+                from hcuopt.evaluation.agent_generation_inspection import (
+                    AgentGenerationInspectionService,
+                )
+
+                result = AgentGenerationInspectionService(repository, args.store_root).prepare(
+                    args.generation_run_id,
+                    knowledge_store=KnowledgeSnapshotStore(
+                        args.knowledge_root, profile="messages-inspection-reader-v1"
+                    ),
+                    task_id=args.task_id,
+                    target_id=args.target_id,
+                )
+            elif args.command == "agent-messages-recover":
+                result = service.recover(args.generation_run_id, args.attempt_id)
+            else:
+                with args.input.open("rb") as stream:
+                    payload = stream.read(MAX_INPUT_BYTES + 1)
+                credential_path = os.getenv(CREDENTIAL_ENVIRONMENT_NAME)
+                if not credential_path:
+                    raise ValueError("deployment credential file is required")
+                with Path(credential_path).open("rb") as stream:
+                    deployment_credential = stream.read(64 * 1024 + 1)
+                result = service.run_once(
+                    args.generation_run_id,
+                    AgentInputFile(path=INPUT_NAME, content=payload),
+                    worker_id=args.worker_id,
+                    deployment_credential=deployment_credential,
+                    lease_seconds=args.lease_seconds,
+                )
+        elif args.command == "agent-generation-start":
             request = GenerationRunStartRequest.model_validate_json(
                 args.request.read_text(encoding="utf-8")
             )
@@ -92,9 +157,7 @@ def run_agent_generation_command(
             result = coordinator.reconcile(args.generation_run_id, repository)
         else:
             if args.evidence_root is None:
-                raise ValueError(
-                    "--evidence-root or HCUOPT_AGENT_EVIDENCE_ROOT is required"
-                )
+                raise ValueError("--evidence-root or HCUOPT_AGENT_EVIDENCE_ROOT is required")
             service = (
                 evidence_service_factory(repository, args.evidence_root)
                 if evidence_service_factory is not None
@@ -104,8 +167,19 @@ def run_agent_generation_command(
                 )
             )
             result = service.get(args.generation_run_id)
-    except (AgentAuthorityError, ContractError, OSError, ValidationError, ValueError) as exc:
-        print(f"Agent Generation command failed: {exc}", file=sys.stderr)
+    except (
+        AgentAuthorityError,
+        ContractError,
+        OSError,
+        ValidationError,
+        ValueError,
+        DatabaseError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        # Provider/deployment input validation may carry source or credentials.
+        detail = type(exc).__name__ if args.command.startswith("agent-messages-") else str(exc)
+        print(f"Agent Generation command failed: {detail}", file=sys.stderr)
         return 2
     print(result.model_dump_json(indent=2))
     return 0

@@ -67,6 +67,8 @@ export async function loadOperatorAgentProposals(generationRunId) {
   );
 }
 
+export { readInspection as loadOperatorAgentInspection } from './inspection-client.js';
+
 export async function loadOperatorDashboard() {
   const [identity, profiles, workloads, rounds] = await Promise.all([
     request("/v1/operator/identity"),

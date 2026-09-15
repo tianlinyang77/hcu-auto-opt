@@ -304,6 +304,7 @@ class AgentProposalVerifier:
             attempt.state == "failed"
             and execution.status == "succeeded"
             and attempt.error_code != "generation_budget_exceeded"
+            and not (attempt.batch_id is not None and attempt.batch_status == "failed")
         ):
             raise AgentProposalEvidenceError(
                 "runner_status_mismatch",
@@ -631,6 +632,10 @@ class AgentProposalVerifier:
             if attempt.failure_code:
                 failures.add(attempt.failure_code)
             decision_status = "invalid" if not attempt.cleanup_healthy else attempt.status
+            if attempt.cleanup_healthy and authority_attempt.state != "succeeded":
+                # A rejected Batch is not a successful generation merely because
+                # the process/HTTP call succeeded. Keep the Receipt provenance.
+                decision_status = "timed_out" if attempt.status == "timed_out" else "failed"
             attempt_decisions.append(
                 AgentAttemptDecision(
                     attempt_id=attempt.attempt_id,
@@ -715,6 +720,14 @@ class AgentProposalVerifier:
                     raise AgentProposalEvidenceError(
                         "attempt_batch_status_mismatch",
                         "successful Runner Attempt cannot bind a failed Proposal Batch",
+                    )
+                if (
+                    batch.status == "failed"
+                    and authority_attempt.error_code != "generation_budget_exceeded"
+                    and authority_attempt.error_code != (batch.error_code or "generator_failed")
+                ):
+                    raise AgentProposalEvidenceError(
+                        "attempt_batch_error_mismatch", "A failure reason differs from C Batch"
                     )
                 if (
                     receipt is None
@@ -1109,7 +1122,7 @@ class AgentProposalVerifier:
                     "attempt_sequence_invalid",
                     f"Generator {entry.generator_id} Attempt sequence is incomplete",
                 )
-            succeeded = [item for item in members if item.status == "succeeded"]
+            succeeded = [item for item in members if item.authority.state == "succeeded"]
             if len(succeeded) > 1 or (succeeded and succeeded[-1] is not members[-1]):
                 raise AgentProposalEvidenceError(
                     "attempt_sequence_invalid",

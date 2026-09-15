@@ -58,6 +58,12 @@ def main() -> int:
     if args.mode == "environment":
         sys.stdout.write(os.environ.get(args.environment_name or "", "<missing>"))
         return 0
+    if args.mode == "credential":
+        path = Path(os.environ[args.environment_name or ""])
+        secret = path.read_text(encoding="utf-8")
+        sys.stderr.write(f"credential={secret}")
+        sys.stdout.buffer.write(b'{"proposal":"credential was readable"}')
+        return 0
     if args.mode == "readonly-input":
         path = Path(os.environ["HCUOPT_INPUT_ROOT"]) / str(args.input_path)
         original = path.read_bytes()

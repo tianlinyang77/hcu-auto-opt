@@ -8,7 +8,8 @@
     "lint": "eslint . --max-warnings=0",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
-    "test:unit": "node --test tests/plan-preview.test.mjs tests/start-intent.test.mjs tests/candidate-evidence.test.mjs tests/evaluation-evidence.test.mjs tests/agent-proposals.test.mjs tests/framework-smoke.test.mjs",
+    "inspection:serve": "node scripts/serve-inspection.mjs",
+    "test:unit": "node --test tests/plan-preview.test.mjs tests/start-intent.test.mjs tests/candidate-evidence.test.mjs tests/evaluation-evidence.test.mjs tests/agent-proposals.test.mjs tests/framework-smoke.test.mjs tests/inspection-client.test.mjs tests/inspection-preview.test.mjs",
     "test:sites": "node --test tests/sites-worker.test.mjs"
   },
   "dependencies": {

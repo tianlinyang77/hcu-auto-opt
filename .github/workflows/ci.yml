@@ -64,6 +64,9 @@ jobs:
           tests/unit/test_framework_viewer_signing.py
           tests/unit/test_viewer_service.py
           tests/unit/test_worker_completion_heartbeat.py
+          tests/unit/test_messages_generator.py
+          tests/unit/test_agent_generation_inspection.py
+          tests/unit/test_inspection_server.py
           tests/unit/test_m2_business_candidate_family.py
           tests/unit/test_m2a_business_candidate_family_verification.py -v
 

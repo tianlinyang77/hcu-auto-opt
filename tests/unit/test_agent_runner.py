@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from hcuopt.adapters.agent_runner import (
+    AgentDeploymentCredential,
     AgentInputFile,
     AgentRunLimits,
     AgentRunnerAdapter,
@@ -243,6 +245,71 @@ def test_local_runner_constructs_environment_and_never_records_values(
     assert result.proposal_bytes == b"visible-only-to-child"
     assert result.evidence.environment_names == ("SAFE_FLAG",)
     assert "visible-only-to-child" not in repr(result.evidence)
+
+
+def test_deployment_credential_is_private_request_invisible_and_redacted(
+    tmp_path: Path,
+) -> None:
+    secret = "deployment-owned-secret"
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=secret.encode()),
+        )
+    )
+    result = runner.run(
+        _request("credential", options=("--environment-name", name)),
+        tmp_path,
+    )
+
+    assert result.status == "succeeded"
+    assert result.proposal_bytes == b'{"proposal":"credential was readable"}'
+    assert secret not in repr(result.evidence)
+    assert secret not in result.evidence.stderr_summary
+    assert "<redacted-env>" in result.evidence.stderr_summary
+    assert name not in result.evidence.environment_names
+    assert not list(tmp_path.glob("agent-run-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not Windows ACLs")
+def test_deployment_credential_uses_private_posix_permissions(tmp_path: Path) -> None:
+    observed: dict[str, int] = {}
+
+    def inspect_then_remove(attempt_dir: Path) -> None:
+        credential_root = attempt_dir / "credentials"
+        credential_path = next(credential_root.iterdir())
+        observed["directory"] = stat.S_IMODE(credential_root.stat().st_mode)
+        observed["file"] = stat.S_IMODE(credential_path.stat().st_mode)
+        shutil.rmtree(attempt_dir)
+
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=b"secret"),
+        ),
+        remove_tree=inspect_then_remove,
+    )
+
+    result = runner.run(
+        _request("credential", options=("--environment-name", name)),
+        tmp_path,
+    )
+
+    assert result.status == "succeeded"
+    assert observed == {"directory": 0o700, "file": 0o600}
+
+
+def test_request_cannot_override_deployment_credential_binding(tmp_path: Path) -> None:
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        allowed_environment_names=frozenset({name}),
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=b"secret"),
+        ),
+    )
+
+    with pytest.raises(AgentRunnerSafetyError, match="forbidden environment"):
+        runner.run(_request(environment=((name, "caller-path"),)), tmp_path)
 
 
 @pytest.mark.parametrize(
