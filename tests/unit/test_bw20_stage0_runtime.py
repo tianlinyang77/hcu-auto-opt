@@ -131,6 +131,16 @@ def test_cpu_protocol_requires_explicit_opt_in(observations):
     assert result["measurement_authorized"] is False
 
 
+def test_m1_protocol_uses_the_same_isolated_host_pid_binding(observations):
+    protocol = "hcuopt-m1-allocator-worker-v1"
+    observations[2]["protocol"] = protocol
+    result = capture(observations, worker_protocol=protocol)
+    assert result["worker_protocol"] == protocol
+    assert result["container_ready"]["process_id"] == 2
+    assert result["host_measured"]["host_pid"] == 101
+    assert result["measurement_authorized"] is False
+
+
 def test_cgroup_v1_membership_supported_without_namespace_changes(observations):
     for pid in (100, 101):
         (observations[0] / str(pid) / "cgroup").write_text(f"8:memory:/docker/{CID}\n")

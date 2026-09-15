@@ -180,7 +180,11 @@ def capture_process_binding(*, plan: BW20TimingPlan, container_id: str,
     """
     if not isinstance(container_id, str) or re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
         raise ProcessBindingError("full container ID required")
-    if worker_protocol not in ("hcuopt-stage0-torch-worker-v1", "hcuopt-stage0-cpu-rehearsal-v1"):
+    if worker_protocol not in (
+        "hcuopt-stage0-torch-worker-v1",
+        "hcuopt-stage0-cpu-rehearsal-v1",
+        "hcuopt-m1-allocator-worker-v1",
+    ):
         raise ProcessBindingError("unsupported process binding protocol")
     child_pid = ready.get("process_id")
     if (ready.get("protocol") != worker_protocol
