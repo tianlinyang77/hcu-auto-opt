@@ -105,7 +105,10 @@ def _reference_file() -> Path:
     return source
 
 
-def _require_target(target: TargetSpec) -> None:
+def _require_target(target: TargetSpec, deployment_policy: Any | None = None) -> None:
+    if deployment_policy is not None:
+        deployment_policy.validate_target(target)
+        return
     if target.target_id != "nmz36-sglang-0.5.12":
         raise ValueError("M1 allocator deployment is locked to nmz36 SGLang 0.5.12")
     accelerator = target.execution_host.accelerator
@@ -117,7 +120,13 @@ def _require_target(target: TargetSpec) -> None:
         raise ValueError("M1 allocator deployment topology differs from the Target Lock")
 
 
-def _job_context(payload: Mapping[str, Any], expected_scope: LeaseScope) -> dict[str, Any]:
+def _job_context(
+    payload: Mapping[str, Any],
+    expected_scope: LeaseScope,
+    deployment_policy: Any | None = None,
+) -> dict[str, Any]:
+    if deployment_policy is not None:
+        return deployment_policy.require_job_context(payload, expected_scope)
     raw = payload.get("_job_context")
     if not isinstance(raw, Mapping):
         raise ExecutionSafetyError("M1 allocator execution requires durable Job context")
@@ -156,6 +165,7 @@ def _base_docker_argv(
     resource_id: str,
     fencing_token: int,
     artifact: ArtifactManifest | None,
+    deployment_policy: Any | None = None,
 ) -> list[str]:
     accelerator = target.execution_host.accelerator
     argv = [
@@ -172,23 +182,35 @@ def _base_docker_argv(
         f"{RESOURCE_LABEL}={resource_id}",
         "--label",
         f"{FENCING_LABEL}={fencing_token}",
-        "--security-opt",
-        "no-new-privileges",
-        "--pid=host",
-        "--cpuset-cpus",
-        accelerator.cpu_affinity,
-        "--cpuset-mems",
-        str(accelerator.numa_node),
-        "--device",
-        "/dev/kfd",
-        "--device",
-        "/dev/dri",
-        "--group-add",
-        "video",
-        "--env",
-        f"HIP_VISIBLE_DEVICES={accelerator.device_index}",
-        "--env",
-        "PYTHONPATH=/workspace/src",
+    ]
+    if deployment_policy is None:
+        argv.extend(
+            (
+                "--security-opt",
+                "no-new-privileges",
+                "--pid=host",
+                "--cpuset-cpus",
+                accelerator.cpu_affinity,
+                "--cpuset-mems",
+                str(accelerator.numa_node),
+                "--device",
+                "/dev/kfd",
+                "--device",
+                "/dev/dri",
+                "--group-add",
+                "video",
+                "--env",
+                f"HIP_VISIBLE_DEVICES={accelerator.device_index}",
+                "--env",
+                "PYTHONPATH=/workspace/src",
+            )
+        )
+    else:
+        argv.extend(deployment_policy.docker_resource_arguments())
+        for item in deployment_policy.container_environment():
+            argv.extend(("--env", item))
+    argv.extend(
+        (
         "--mount",
         f"type=bind,src={source_root},dst=/workspace,readonly",
         "--mount",
@@ -197,7 +219,8 @@ def _base_docker_argv(
         f"type=bind,src={cache_dir},dst=/cache",
         "--mount",
         "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly",
-    ]
+        )
+    )
     if artifact is not None:
         argv.extend(
             (
@@ -237,6 +260,7 @@ class _M1AllocatorContainerProcess:
         workload_seed: int,
         registry: ManagedProcessRegistry,
         baseline_module_hash: str,
+        deployment_policy: Any | None = None,
     ) -> None:
         self.arm = arm
         self.evidence_dir = evidence_dir.resolve(strict=True)
@@ -254,6 +278,7 @@ class _M1AllocatorContainerProcess:
             resource_id=resource_id,
             fencing_token=fencing_token,
             artifact=candidate_artifact,
+            deployment_policy=deployment_policy,
         )
         argv.extend(
             (
@@ -488,8 +513,9 @@ class Nmz36M1AllocatorWorkloadFactory(M1WorkloadFactory):
         harness_provenance: AdapterProvenance,
         registry: ManagedProcessRegistry | None = None,
         workload_seed: int = 20260825,
+        deployment_policy: Any | None = None,
     ) -> None:
-        _require_target(target)
+        _require_target(target, deployment_policy)
         if harness_provenance.capability != "measurement_harness":
             raise ValueError("M1 allocator factory requires Measurement Harness provenance")
         self.target = target
@@ -497,6 +523,7 @@ class Nmz36M1AllocatorWorkloadFactory(M1WorkloadFactory):
         self.harness_provenance = harness_provenance
         self.registry = registry or ManagedProcessRegistry()
         self.workload_seed = workload_seed
+        self.deployment_policy = deployment_policy
         baseline = Path(target.source_baseline.clean_checkout) / ALLOCATOR_RELATIVE_PATH
         self.baseline_module_hash = _sha256(baseline.resolve(strict=True))
 
@@ -507,7 +534,7 @@ class Nmz36M1AllocatorWorkloadFactory(M1WorkloadFactory):
         payload: Mapping[str, Any],
         output_dir: Path,
     ) -> Nmz36M1AllocatorPairedWorkload:
-        context = _job_context(payload, LeaseScope.EXCLUSIVE)
+        context = _job_context(payload, LeaseScope.EXCLUSIVE, self.deployment_policy)
         target = TargetSpec.model_validate(payload["target"])
         if target != self.target or payload.get("target_fingerprint") != target_fingerprint(target):
             raise ExecutionSafetyError("M1 allocator performance Target binding drifted")
@@ -534,6 +561,7 @@ class Nmz36M1AllocatorWorkloadFactory(M1WorkloadFactory):
             workload_seed=self.workload_seed,
             registry=self.registry,
             baseline_module_hash=self.baseline_module_hash,
+            deployment_policy=self.deployment_policy,
         )
         return Nmz36M1AllocatorPairedWorkload(
             process,
@@ -551,14 +579,16 @@ class Nmz36M1DeviceTimerFactory:
         target: TargetSpec,
         source_root: Path,
         registry: ManagedProcessRegistry | None = None,
+        deployment_policy: Any | None = None,
     ) -> None:
-        _require_target(target)
+        _require_target(target, deployment_policy)
         self.target = target
         self.source_root = source_root.resolve(strict=True)
         self.registry = registry or ManagedProcessRegistry()
+        self.deployment_policy = deployment_policy
 
     def __call__(self, payload: Mapping[str, Any], output_dir: Path):  # type: ignore[no-untyped-def]
-        context = _job_context(payload, LeaseScope.EXCLUSIVE)
+        context = _job_context(payload, LeaseScope.EXCLUSIVE, self.deployment_policy)
         factory = Nmz36WorkloadFactory(
             target=self.target,
             source_root=self.source_root,
@@ -578,12 +608,14 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         source_root: Path,
         protocol: LoadedM1Protocol,
         cleaner: ContainerResourceCleaner,
+        deployment_policy: Any | None = None,
     ) -> None:
-        _require_target(target)
+        _require_target(target, deployment_policy)
         self.target = target
         self.source_root = source_root.resolve(strict=True)
         self.protocol = protocol
         self.cleaner = cleaner
+        self.deployment_policy = deployment_policy
         self.provenance = AdapterProvenance(
             profile=cleaner.provenance.profile,
             capability="correctness_evidence_producer",
@@ -601,7 +633,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         hotspot: M1HotspotCorrectnessSpec,
         output_dir: Path,
     ) -> M1CorrectnessEvidenceSubmission:
-        job = _job_context(payload, LeaseScope.SHARED)
+        job = _job_context(payload, LeaseScope.SHARED, self.deployment_policy)
         target = TargetSpec.model_validate(payload["target"])
         if (
             target != self.target
@@ -767,6 +799,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
             resource_id=context.resource_id,
             fencing_token=context.fencing_token,
             artifact=artifact,
+            deployment_policy=self.deployment_policy,
         )
         argv.extend(
             (

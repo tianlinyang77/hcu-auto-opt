@@ -30,6 +30,7 @@ MANUAL_CANDIDATE_CAPABILITIES = frozenset(
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 REAL_STAGE0_PROFILE = "nmz36-stage0-v2"
 REAL_MANUAL_CANDIDATE_PROFILE = "nmz36-m1-manual-v1"
+BW20_MANUAL_CANDIDATE_PROFILE = "bw20-m1-manual-v1"
 # Compatibility name for S0-B callers. Measurement is an internal delegate of the
 # single public Stage 0 worker profile, not a separately claimable profile.
 REAL_STAGE0_MEASUREMENT_PROFILE = REAL_STAGE0_PROFILE
@@ -139,7 +140,9 @@ class AdapterProfileCatalog:
         return [self._profiles[name].view() for name in sorted(self._profiles)]
 
 
-def real_manual_candidate_profile() -> AdapterProfile:
+def real_manual_candidate_profile(
+    name: str = REAL_MANUAL_CANDIDATE_PROFILE,
+) -> AdapterProfile:
     """Return the opt-in M1 profile after all real adapters are composed.
 
     The default catalog intentionally omits this profile. Deployments may add
@@ -147,8 +150,10 @@ def real_manual_candidate_profile() -> AdapterProfile:
     composition gate.
     """
 
+    if name not in {REAL_MANUAL_CANDIDATE_PROFILE, BW20_MANUAL_CANDIDATE_PROFILE}:
+        raise ValueError(f"unsupported real M1 Adapter Profile: {name}")
     return AdapterProfile(
-        name=REAL_MANUAL_CANDIDATE_PROFILE,
+        name=name,
         implementation_kind="real",
         capabilities=MANUAL_CANDIDATE_CAPABILITIES,
     )
