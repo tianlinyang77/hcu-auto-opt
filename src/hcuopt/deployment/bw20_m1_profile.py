@@ -8,7 +8,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from hcuopt.adapters.profiles import BW20_MANUAL_CANDIDATE_PROFILE
+from hcuopt.adapters.profiles import (
+    BW20_MANUAL_CANDIDATE_PROFILE,
+    real_manual_candidate_profile,
+)
 from hcuopt.adapters.real_profile import build_m1_measurement_registry
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.contracts.platform_v1 import AdapterProvenance, TargetSpec
@@ -34,6 +37,61 @@ class BW20M1MeasurementComposition:
     device_timer_factory: BW20M1DeviceTimerFactory
     telemetry: BW20TelemetryCollector
     cleaner: BW20M1Cleaner
+
+
+def compose_bw20_m1_registry(
+    source_registry: AdapterRegistry,
+    correctness_registry: AdapterRegistry,
+    measurement_registry: AdapterRegistry,
+    adjudication_registry: AdapterRegistry,
+) -> AdapterRegistry:
+    """Compose all BW20 M1 boundaries without changing frozen nmz36 adapters."""
+
+    registries = (
+        source_registry,
+        correctness_registry,
+        measurement_registry,
+        adjudication_registry,
+    )
+    if any(item.profile != BW20_MANUAL_CANDIDATE_PROFILE for item in registries):
+        raise ValueError(
+            f"all BW20 M1 registries must use profile {BW20_MANUAL_CANDIDATE_PROFILE}"
+        )
+    components = {
+        "candidate_builder": source_registry.require("candidate_builder"),
+        "kernel_correctness": correctness_registry.require("kernel_correctness"),
+        "measurement_harness": measurement_registry.require("measurement_harness"),
+        "candidate_adjudicator": adjudication_registry.require("candidate_adjudicator"),
+        "resource_cleaner": measurement_registry.require("resource_cleaner"),
+    }
+    for capability, adapter in components.items():
+        provenance = adapter.provenance
+        if provenance.implementation_kind != "real":
+            raise ValueError(f"BW20 M1 capability {capability} must use a real Adapter")
+        if provenance.capability != capability:
+            raise ValueError(
+                f"BW20 M1 boundary {capability} has provenance capability "
+                f"{provenance.capability}"
+            )
+
+    registry = AdapterRegistry(
+        profile=BW20_MANUAL_CANDIDATE_PROFILE,
+        candidate_builder=components["candidate_builder"],
+        candidate_runtime=source_registry.candidate_runtime,
+        kernel_correctness=components["kernel_correctness"],
+        measurement_harness=components["measurement_harness"],
+        candidate_adjudicator=components["candidate_adjudicator"],
+        resource_cleaner=components["resource_cleaner"],
+        executor=source_registry.executor,
+        source_manager=source_registry.source_manager,
+        artifact_store=source_registry.artifact_store,
+    )
+    declared_profile = real_manual_candidate_profile(BW20_MANUAL_CANDIDATE_PROFILE)
+    declared_profile.require_manual_candidate()
+    missing = sorted(declared_profile.capabilities - set(registry.available()))
+    if missing:
+        raise ValueError(f"composed BW20 M1 registry is incomplete: {', '.join(missing)}")
+    return registry
 
 
 def compose_bw20_m1_measurement(
@@ -102,4 +160,8 @@ def compose_bw20_m1_measurement(
     )
 
 
-__all__ = ["BW20M1MeasurementComposition", "compose_bw20_m1_measurement"]
+__all__ = [
+    "BW20M1MeasurementComposition",
+    "compose_bw20_m1_measurement",
+    "compose_bw20_m1_registry",
+]

@@ -12,9 +12,10 @@ from hcuopt.adapters.profiles import (
     REAL_MANUAL_CANDIDATE_PROFILE,
     AdapterProfileCatalog,
 )
-from hcuopt.adapters.real_profile import compose_m1_registry, compose_nmz36_m1_registry
+from hcuopt.adapters.real_profile import compose_nmz36_m1_registry
 from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.deployment.bw20_m1_profile import compose_bw20_m1_registry
 from hcuopt.domain.errors import AdapterUnavailable
 
 
@@ -82,14 +83,11 @@ def test_bw20_m1_profile_is_opt_in_and_requires_one_complete_real_registry() -> 
     with pytest.raises(AdapterUnavailable, match="not registered"):
         AdapterProfileCatalog().require(BW20_MANUAL_CANDIDATE_PROFILE)
 
-    registry = compose_m1_registry(
-        *_registries(BW20_MANUAL_CANDIDATE_PROFILE),
-        profile=BW20_MANUAL_CANDIDATE_PROFILE,
-    )
+    registry = compose_bw20_m1_registry(*_registries(BW20_MANUAL_CANDIDATE_PROFILE))
     assert registry.profile == BW20_MANUAL_CANDIDATE_PROFILE
     assert MANUAL_CANDIDATE_CAPABILITIES.issubset(registry.available())
 
 
-def test_generic_m1_composition_rejects_an_undeclared_profile() -> None:
-    with pytest.raises(ValueError, match="unsupported real M1"):
-        compose_m1_registry(*_registries(), profile="unreviewed-m1-profile")
+def test_bw20_m1_composition_rejects_another_profile() -> None:
+    with pytest.raises(ValueError, match="all BW20 M1 registries"):
+        compose_bw20_m1_registry(*_registries())

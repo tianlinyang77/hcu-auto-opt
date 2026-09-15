@@ -19,7 +19,6 @@ from hcuopt.adapters.manual_candidate import (
 )
 from hcuopt.adapters.noop_builder import NoopBuilder
 from hcuopt.adapters.profiles import (
-    BW20_MANUAL_CANDIDATE_PROFILE,
     REAL_FRAMEWORK_SMOKE_PROFILE,
     REAL_MANUAL_CANDIDATE_PROFILE,
     REAL_STAGE0_MEASUREMENT_PROFILE,
@@ -219,35 +218,14 @@ def compose_nmz36_m1_registry(
     creation.
     """
 
-    return compose_m1_registry(
-        source_registry,
-        correctness_registry,
-        measurement_registry,
-        adjudication_registry,
-        profile=REAL_MANUAL_CANDIDATE_PROFILE,
-    )
-
-
-def compose_m1_registry(
-    source_registry: AdapterRegistry,
-    correctness_registry: AdapterRegistry,
-    measurement_registry: AdapterRegistry,
-    adjudication_registry: AdapterRegistry,
-    *,
-    profile: str,
-) -> AdapterRegistry:
-    """Compose one target-specific M1 deployment without weakening its profile gate."""
-
-    if profile not in {REAL_MANUAL_CANDIDATE_PROFILE, BW20_MANUAL_CANDIDATE_PROFILE}:
-        raise ValueError(f"unsupported real M1 Adapter Profile: {profile}")
     registries = (
         source_registry,
         correctness_registry,
         measurement_registry,
         adjudication_registry,
     )
-    if any(item.profile != profile for item in registries):
-        raise ValueError(f"all M1 registries must use profile {profile}")
+    if any(item.profile != REAL_MANUAL_CANDIDATE_PROFILE for item in registries):
+        raise ValueError(f"all M1 registries must use profile {REAL_MANUAL_CANDIDATE_PROFILE}")
     components = {
         "candidate_builder": source_registry.require("candidate_builder"),
         "kernel_correctness": correctness_registry.require("kernel_correctness"),
@@ -265,7 +243,7 @@ def compose_m1_registry(
             )
 
     registry = AdapterRegistry(
-        profile=profile,
+        profile=REAL_MANUAL_CANDIDATE_PROFILE,
         candidate_builder=components["candidate_builder"],
         candidate_runtime=source_registry.candidate_runtime,
         kernel_correctness=components["kernel_correctness"],
@@ -276,9 +254,9 @@ def compose_m1_registry(
         source_manager=source_registry.source_manager,
         artifact_store=source_registry.artifact_store,
     )
-    declared_profile = real_manual_candidate_profile(profile)
-    declared_profile.require_manual_candidate()
-    missing = sorted(declared_profile.capabilities - set(registry.available()))
+    profile = real_manual_candidate_profile()
+    profile.require_manual_candidate()
+    missing = sorted(profile.capabilities - set(registry.available()))
     if missing:
         raise ValueError(f"composed M1 registry is incomplete: {', '.join(missing)}")
     return registry

@@ -237,3 +237,15 @@
 - Cause: 尚未确认；不能归因于 Messages 生成器或数据库，也不能计为测试通过。
 - Validation: 定向 Windows/Linux CPU 和 Linux PostgreSQL 联验已另有记录；全仓交由 PR CI。
 - Do not repeat: 不把中止的补跑报成全量通过，不为此更改共享 Git 配置或真实源码基线。
+
+# Frozen readiness evidence must remain target-isolated
+
+- Scope: project-local
+- Symptom: extending a shared adapter module for BW20 changed one file hash frozen by the historical nmz36 M2a Formal Readiness manifest, reducing verified evidence from 32 to 31.
+- Evidence: `formal_measurement_adapter` reported `hash_mismatch` for `src/hcuopt/adapters/real_profile.py` in PR #154 CI.
+- Cause: BW20 composition logic was added directly to a module used as immutable evidence by a prior target-specific audit.
+- Proven workaround: restore the audited nmz36 module byte-for-byte and place BW20 composition in `src/hcuopt/deployment/bw20_m1_profile.py`.
+- Validation: the repository readiness test must continue to report 32 verified evidence items without changing the old manifest or its expected count.
+- Applies to: target-specific onboarding that reuses code named by an existing Formal Readiness manifest.
+- Do not repeat: do not update a historical audit hash merely to accommodate a new target; isolate the new target behind a wrapper or versioned entrypoint.
+- Last updated: 2026-09-15
