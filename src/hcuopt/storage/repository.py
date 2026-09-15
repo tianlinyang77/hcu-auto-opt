@@ -6115,6 +6115,12 @@ class PostgresRepository(
         target_snapshot: Mapping[str, Any],
         records: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        # Evidence mode is the outer authority boundary.  Reject Dry Run input
+        # before applying Formal-only resource identity requirements so callers
+        # receive the authoritative failure reason and cannot mistake a Dry Run
+        # for malformed Formal evidence.
+        if run.get("mode") != Stage0RunMode.FORMAL.value:
+            raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
         try:
             target = TargetSpec.model_validate(target_snapshot["specification"])
             expected_resource_id = PostgresRepository._stage0_expected_resource_id(
