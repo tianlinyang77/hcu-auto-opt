@@ -18,10 +18,13 @@
 2. 使用 `m2b-messages-input-v1` 输入封装；完整输入 manifest Hash 编入既有 Plan 的
    `adapter_profile`，生成器程序另由 Artifact Hash 固定。模型、地址、源码或知识发生变化
    就必须重新建 Plan。知识只提供文本参考，不加载 Skills 代码，不读取 Holdout。
-3. 密钥仅由部署环境注入固定 Wrapper，不进入 Request、Plan、DB、argv 或证据。模型只可
+3. 密钥仅由部署环境的私有文件交给 Runner；Runner 为单次 Attempt 复制到临时 `0700`
+   目录和 `0600` 文件，并只把临时路径交给固定 Wrapper。密钥和值、源路径均不进入
+   Request、Plan、DB、argv 或证据。模型只可
    返回意图、理由、风险和单文件 diff；权威 ID、Hash、URI、用量结算由系统负责。
-   禁止工具调用、生成代码执行、自动跳转和继承代理。指定 HTTP 服务不具备传输加密，
-   仅可在已批准的受信网络内使用，不扩展为通用公网服务配置。
+   禁止工具调用、生成代码执行、自动跳转和继承代理。当前 DeepSeek Anthropic Profile
+   使用 HTTPS，服务基址 `/anthropic` 规范化为 `/anthropic/v1/messages`，默认显式关闭
+   thinking，并校验响应模型仍等于冻结 Plan 绑定模型。
 4. Claim lease 不超过冻结 timeout；Worker 在该预算内预留清理/结算时间。API 输出 token
    上限是请求约束，总 token 上限是事后接纳约束，不是保证不超支的货币限额。
 5. 调用前独占创建 started marker，持久保存 Claim、输入和 Receipt。相同 Attempt 不能再调

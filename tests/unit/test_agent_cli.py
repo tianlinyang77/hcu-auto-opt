@@ -142,7 +142,7 @@ def test_messages_cli_recovery_needs_no_credential(tmp_path, monkeypatch, capsys
             str(tmp_path),
         ]
     )
-    monkeypatch.delenv("HCUOPT_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE", raising=False)
     calls = []
 
     def recover(self, actual_run, actual_attempt):
@@ -153,6 +153,44 @@ def test_messages_cli_recovery_needs_no_credential(tmp_path, monkeypatch, capsys
     assert run_agent_generation_command(args, repository_factory=_StatusRepository) == 0
     assert calls == [(run_id, attempt_id)]
     assert "false" in capsys.readouterr().out
+
+
+def test_messages_cli_reads_deployment_credential_file(
+    tmp_path, monkeypatch, capsys
+):
+    from hcuopt.agent.messages_dispatch import MessagesDispatchService
+    from hcuopt.generators.anthropic_messages import CREDENTIAL_ENVIRONMENT_NAME
+
+    run_id = UUID(int=300)
+    input_path = tmp_path / "generation-input.json"
+    input_path.write_bytes(b"{}")
+    credential_path = tmp_path / "provider.key"
+    credential_path.write_bytes(b"deployment-test-credential\n")
+    monkeypatch.setenv(CREDENTIAL_ENVIRONMENT_NAME, str(credential_path))
+    args = build_parser().parse_args(
+        [
+            "agent-messages-run-once",
+            str(run_id),
+            "--input",
+            str(input_path),
+            "--worker-id",
+            "test-worker",
+            "--store-root",
+            str(tmp_path / "store"),
+        ]
+    )
+    calls = []
+
+    def run_once(self, actual_run, prepared_input, **kwargs):
+        calls.append((actual_run, prepared_input, kwargs))
+        return _JsonResult()
+
+    monkeypatch.setattr(MessagesDispatchService, "run_once", run_once)
+    assert run_agent_generation_command(args, repository_factory=_StatusRepository) == 0
+    assert calls[0][0] == run_id
+    assert calls[0][1].content == b"{}"
+    assert calls[0][2]["deployment_credential"] == b"deployment-test-credential\n"
+    assert "deployment-test-credential" not in capsys.readouterr().out
 
 
 def test_messages_cli_redacts_database_errors(tmp_path, capsys):

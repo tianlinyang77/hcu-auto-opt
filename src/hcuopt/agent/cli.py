@@ -108,7 +108,11 @@ def run_agent_generation_command(
             from hcuopt.adapters.agent_runner import AgentInputFile
             from hcuopt.agent.messages_dispatch import MessagesDispatchService
             from hcuopt.agent.messages_worker import MessagesGenerationWorker
-            from hcuopt.generators.anthropic_messages import INPUT_NAME, MAX_INPUT_BYTES
+            from hcuopt.generators.anthropic_messages import (
+                CREDENTIAL_ENVIRONMENT_NAME,
+                INPUT_NAME,
+                MAX_INPUT_BYTES,
+            )
 
             service = MessagesDispatchService(repository, MessagesGenerationWorker(args.store_root))
             if args.command == "agent-messages-prepare-inspection":
@@ -130,11 +134,16 @@ def run_agent_generation_command(
             else:
                 with args.input.open("rb") as stream:
                     payload = stream.read(MAX_INPUT_BYTES + 1)
+                credential_path = os.getenv(CREDENTIAL_ENVIRONMENT_NAME)
+                if not credential_path:
+                    raise ValueError("deployment credential file is required")
+                with Path(credential_path).open("rb") as stream:
+                    deployment_credential = stream.read(64 * 1024 + 1)
                 result = service.run_once(
                     args.generation_run_id,
                     AgentInputFile(path=INPUT_NAME, content=payload),
                     worker_id=args.worker_id,
-                    api_key=os.getenv("HCUOPT_MODEL_API_KEY", ""),
+                    deployment_credential=deployment_credential,
                     lease_seconds=args.lease_seconds,
                 )
         elif args.command == "agent-generation-start":
