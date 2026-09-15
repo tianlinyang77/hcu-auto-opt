@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, Protocol, runtime_checkable
 from uuid import UUID
@@ -54,12 +54,40 @@ RESERVED_ENVIRONMENT_NAMES = frozenset(
         "WINDIR",
     )
 )
+DEPLOYMENT_CREDENTIAL_NAME_PATTERN = re.compile(
+    r"^HCUOPT_DEPLOYMENT_[A-Z][A-Z0-9_]{2,80}_FILE$"
+)
+MAX_DEPLOYMENT_CREDENTIAL_BYTES = 64 * 1024
 
 AgentRunStatus = RunnerExecutionStatus
 
 
 class AgentRunnerSafetyError(ValueError):
     """The dev-only Agent runner refused to expand its execution authority."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDeploymentCredential:
+    """Deployment-owned secret staged as a private file for one attempt.
+
+    This object is intentionally absent from ``AgentRunRequest`` so a caller cannot
+    choose, replace, or observe provider credentials through the durable request.
+    """
+
+    environment_name: str
+    content: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not DEPLOYMENT_CREDENTIAL_NAME_PATTERN.fullmatch(self.environment_name):
+            raise AgentRunnerSafetyError(
+                "deployment credential environment name must use the reserved file namespace"
+            )
+        if not isinstance(self.content, bytes) or not self.content:
+            raise AgentRunnerSafetyError("deployment credential content must be non-empty bytes")
+        if len(self.content) > MAX_DEPLOYMENT_CREDENTIAL_BYTES:
+            raise AgentRunnerSafetyError("deployment credential exceeds its size limit")
+        if b"\x00" in self.content:
+            raise AgentRunnerSafetyError("deployment credential contains NUL")
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -317,6 +345,7 @@ def _evidence(
     process_tree_cleanup: Literal["not_needed", "terminated", "killed", "failed"],
     cleanup_status: Literal["verified", "failed"] = "verified",
     cleanup_summary: str = "adapter-owned attempt directory removed",
+    sensitive_values: Iterable[str] = (),
 ) -> RunnerExecutionRecord:
     _executable, argv_hash, _paths = _request_identity(request)
     return RunnerExecutionRecord(
@@ -345,10 +374,18 @@ def _evidence(
         stdout_hash=_sha256_bytes(stdout),
         stderr_hash=_sha256_bytes(stderr),
         stdout_summary=_redacted_summary(
-            stdout, sensitive_values=(value for _name, value in request.environment)
+            stdout,
+            sensitive_values=(
+                *(value for _name, value in request.environment),
+                *sensitive_values,
+            ),
         ),
         stderr_summary=_redacted_summary(
-            stderr, sensitive_values=(value for _name, value in request.environment)
+            stderr,
+            sensitive_values=(
+                *(value for _name, value in request.environment),
+                *sensitive_values,
+            ),
         ),
         environment_names=tuple(sorted(name for name, _value in request.environment)),
         termination_reason=termination_reason,
@@ -665,6 +702,7 @@ class LocalCommandAgentRunner:
         allowed_executables: Iterable[Path],
         allowed_argv_prefixes: Iterable[tuple[str, ...]],
         allowed_environment_names: frozenset[str] = frozenset(),
+        deployment_credentials: Iterable[AgentDeploymentCredential] = (),
         forbidden_host_paths: tuple[Path, ...] | None = None,
         path_exists: Callable[[Path], bool] = Path.exists,
         remove_tree: Callable[[Path], None] = _remove_attempt_tree,
@@ -691,6 +729,16 @@ class LocalCommandAgentRunner:
         self.allowed_executables = frozenset(resolved)
         self.allowed_argv_prefixes = prefixes
         self.allowed_environment_names = frozenset(allowed_environment_names)
+        self.deployment_credentials = tuple(deployment_credentials)
+        credential_names = [
+            credential.environment_name.casefold()
+            for credential in self.deployment_credentials
+        ]
+        if len(credential_names) != len(set(credential_names)):
+            raise AgentRunnerSafetyError("deployment credentials contain a duplicate name")
+        self.reserved_environment_names = RESERVED_ENVIRONMENT_NAMES | frozenset(
+            credential_names
+        )
         self.forbidden_host_paths = (
             forbidden_host_paths
             if forbidden_host_paths is not None
@@ -715,7 +763,13 @@ class LocalCommandAgentRunner:
         started = time.monotonic()
         result: AgentRunResult | None = None
         try:
-            input_root, work_dir, usage_path = self._prepare_attempt(attempt_dir, request)
+            (
+                input_root,
+                work_dir,
+                usage_path,
+                credential_environment,
+                sensitive_values,
+            ) = self._prepare_attempt(attempt_dir, request)
             result = self._execute(
                 request,
                 input_root,
@@ -723,6 +777,8 @@ class LocalCommandAgentRunner:
                 usage_path,
                 started,
                 executable_hash,
+                credential_environment,
+                sensitive_values,
             )
         finally:
             try:
@@ -771,7 +827,7 @@ class LocalCommandAgentRunner:
         for name, value in request.environment:
             if not ENVIRONMENT_NAME_PATTERN.fullmatch(name):
                 raise AgentRunnerSafetyError("Agent environment name is invalid")
-            if name.casefold() in RESERVED_ENVIRONMENT_NAMES:
+            if name.casefold() in self.reserved_environment_names:
                 raise AgentRunnerSafetyError("Agent request contains a forbidden environment name")
             if name not in self.allowed_environment_names:
                 raise AgentRunnerSafetyError("Agent environment name is not allowlisted")
@@ -781,8 +837,9 @@ class LocalCommandAgentRunner:
                 raise AgentRunnerSafetyError("Agent environment value contains NUL")
         return _sha256_file(executable)
 
-    @staticmethod
-    def _prepare_attempt(attempt_dir: Path, request: AgentRunRequest) -> tuple[Path, Path, Path]:
+    def _prepare_attempt(
+        self, attempt_dir: Path, request: AgentRunRequest
+    ) -> tuple[Path, Path, Path, dict[str, str], tuple[str, ...]]:
         input_root = attempt_dir / "inputs"
         work_dir = attempt_dir / "work"
         input_root.mkdir()
@@ -792,8 +849,47 @@ class LocalCommandAgentRunner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(item.content)
             path.chmod(stat.S_IREAD)
+        credential_environment: dict[str, str] = {}
+        sensitive_values: list[str] = []
+        if self.deployment_credentials:
+            credential_root = attempt_dir / "credentials"
+            credential_root.mkdir(mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            if os.name != "nt":
+                credential_root.chmod(
+                    stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                )
+                if stat.S_IMODE(credential_root.stat().st_mode) & 0o077:
+                    raise AgentRunnerSafetyError(
+                        "Agent credential directory permissions are not private"
+                    )
+            for ordinal, credential in enumerate(self.deployment_credentials):
+                path = credential_root / f"credential-{ordinal:02d}"
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    stat.S_IRUSR | stat.S_IWUSR,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(credential.content)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if os.name != "nt":
+                    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+                        raise AgentRunnerSafetyError(
+                            "Agent credential file permissions are not private"
+                        )
+                credential_environment[credential.environment_name] = str(path)
+                decoded = credential.content.decode("utf-8", errors="ignore")
+                sensitive_values.extend((decoded, decoded.strip()))
         usage_path = work_dir / "usage.json"
-        return input_root, work_dir, usage_path
+        return (
+            input_root,
+            work_dir,
+            usage_path,
+            credential_environment,
+            tuple(value for value in sensitive_values if value),
+        )
 
     def _execute(
         self,
@@ -803,8 +899,15 @@ class LocalCommandAgentRunner:
         usage_path: Path,
         started: float,
         executable_hash: str,
+        credential_environment: dict[str, str],
+        sensitive_values: tuple[str, ...],
     ) -> AgentRunResult:
-        environment = self._environment(request, input_root, usage_path)
+        environment = self._environment(
+            request,
+            input_root,
+            usage_path,
+            credential_environment,
+        )
         command = (str(request.executable.resolve()), *request.argv)
         kwargs: dict[str, object] = {
             "stdin": subprocess.DEVNULL,
@@ -940,6 +1043,7 @@ class LocalCommandAgentRunner:
                 if process_tree_cleanup != "failed"
                 else "adapter-owned process tree cleanup could not be verified"
             ),
+            sensitive_values=sensitive_values,
         )
         return AgentRunResult(
             proposal_bytes=stdout_bytes if status == "succeeded" else None,
@@ -948,7 +1052,10 @@ class LocalCommandAgentRunner:
 
     @staticmethod
     def _environment(
-        request: AgentRunRequest, input_root: Path, usage_path: Path
+        request: AgentRunRequest,
+        input_root: Path,
+        usage_path: Path,
+        credential_environment: dict[str, str],
     ) -> dict[str, str]:
         environment: dict[str, str] = {
             "HCUOPT_INPUT_ROOT": str(input_root),
@@ -959,6 +1066,7 @@ class LocalCommandAgentRunner:
             for name in ("SystemRoot", "WINDIR"):
                 if name in os.environ:
                     environment[name] = os.environ[name]
+        environment.update(credential_environment)
         environment.update(request.environment)
         return environment
 
