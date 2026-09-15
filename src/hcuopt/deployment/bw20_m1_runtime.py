@@ -160,6 +160,10 @@ def build_m1_container_plan(
             "/evidence",
             "--workload-seed",
             "20260825",
+            "--expected-device-pci",
+            policy.pci_address,
+            "--expected-device-architecture",
+            policy.architecture,
         )
     )
     if artifact_hash is not None:

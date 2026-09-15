@@ -206,11 +206,35 @@ def _require_one_hcu(torch) -> None:
     torch.cuda.set_device(0)
 
 
+def _validate_expected_device(torch, args: argparse.Namespace) -> dict[str, object] | None:
+    expected = (args.expected_device_pci, args.expected_device_architecture)
+    if expected == (None, None):
+        return None
+    if None in expected:
+        raise RuntimeError("M1 device attestation requires both PCI and architecture")
+    properties = torch.cuda.get_device_properties(0)
+    pci = (
+        properties.pci_domain_id,
+        properties.pci_bus_id,
+        properties.pci_device_id,
+    )
+    actual_pci = f"{pci[0]:04x}:{pci[1]:02x}:{pci[2]:02x}.0"
+    architecture = properties.gcnArchName.split(":")[0]
+    if actual_pci != expected[0] or architecture != expected[1]:
+        raise RuntimeError("M1 physical PCI or architecture differs from deployment pin")
+    return {
+        "pci": actual_pci,
+        "architecture": architecture,
+        "logical_device_index": 0,
+    }
+
+
 def _correctness_child(args: argparse.Namespace) -> int:
     torch, allocator_type, module_path, module_hash = _load_allocator(
         args.expected_artifact_hash
     )
     _require_one_hcu(torch)
+    device_identity = _validate_expected_device(torch, args)
     spec = M1HotspotCorrectnessSpec.model_validate_json(args.spec.read_bytes())
     if any(case.inputs[0].name != "free_index" for case in spec.cases):
         raise RuntimeError("allocator correctness spec has an unexpected input contract")
@@ -231,6 +255,7 @@ def _correctness_child(args: argparse.Namespace) -> int:
             "process_id": os.getpid(),
             "module_path": str(module_path),
             "module_hash": module_hash,
+            **({"device_identity": device_identity} if device_identity is not None else {}),
         },
     )
     return 0
@@ -244,6 +269,7 @@ def _performance_child(args: argparse.Namespace, command_fd: int, response_fd: i
             args.expected_artifact_hash
         )
         _require_one_hcu(torch)
+        device_identity = _validate_expected_device(torch, args)
         if any(args.cache_namespace.iterdir()):
             raise RuntimeError("M1 acquisition cache namespace is not empty")
         identity_stat = _proc_stat(os.getpid())
@@ -293,6 +319,11 @@ def _performance_child(args: argparse.Namespace, command_fd: int, response_fd: i
                 "cache_sha256": cache_record.sha256,
                 "import_uri": None if import_record is None else import_record.uri,
                 "import_sha256": None if import_record is None else import_record.sha256,
+                **(
+                    {"device_identity": device_identity}
+                    if device_identity is not None
+                    else {}
+                ),
             },
         )
         sample_ordinal = 0
@@ -563,6 +594,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--harness-version", default="1")
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--expected-artifact-hash")
+    parser.add_argument("--expected-device-pci")
+    parser.add_argument("--expected-device-architecture")
     parser.add_argument("--cache-namespace", required=True, type=Path)
     parser.add_argument("--cache-namespace-id", required=True)
     parser.add_argument("--evidence-dir", required=True, type=Path)
