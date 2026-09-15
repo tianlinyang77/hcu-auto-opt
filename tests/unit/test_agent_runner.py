@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from hcuopt.adapters.agent_runner import (
+    AgentDeploymentCredential,
     AgentInputFile,
     AgentRunLimits,
     AgentRunnerAdapter,
@@ -243,6 +244,43 @@ def test_local_runner_constructs_environment_and_never_records_values(
     assert result.proposal_bytes == b"visible-only-to-child"
     assert result.evidence.environment_names == ("SAFE_FLAG",)
     assert "visible-only-to-child" not in repr(result.evidence)
+
+
+def test_deployment_credential_is_private_request_invisible_and_redacted(
+    tmp_path: Path,
+) -> None:
+    secret = "deployment-owned-secret"
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=secret.encode()),
+        )
+    )
+    result = runner.run(
+        _request("credential", options=("--environment-name", name)),
+        tmp_path,
+    )
+
+    assert result.status == "succeeded"
+    assert result.proposal_bytes == b'{"proposal":"credential was readable"}'
+    assert secret not in repr(result.evidence)
+    assert secret not in result.evidence.stderr_summary
+    assert "<redacted-env>" in result.evidence.stderr_summary
+    assert name not in result.evidence.environment_names
+    assert not list(tmp_path.glob("agent-run-*"))
+
+
+def test_request_cannot_override_deployment_credential_binding(tmp_path: Path) -> None:
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        allowed_environment_names=frozenset({name}),
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=b"secret"),
+        ),
+    )
+
+    with pytest.raises(AgentRunnerSafetyError, match="forbidden environment"):
+        runner.run(_request(environment=((name, "caller-path"),)), tmp_path)
 
 
 @pytest.mark.parametrize(

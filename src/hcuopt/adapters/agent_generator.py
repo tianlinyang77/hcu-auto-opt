@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -17,8 +18,10 @@ from hcuopt.agent.identity import (
     candidate_proposal_batch_hash,
 )
 from hcuopt.agent.patch_identity import normalized_patch_hash_v1, raw_patch_hash_v1
+from hcuopt.contracts.agent_runner_v1 import RunnerExecutionReceipt
 from hcuopt.contracts.agent_v1 import (
     CandidateGenerationRequest,
+    CandidateProposal,
     CandidateProposalBatch,
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
@@ -28,10 +31,24 @@ from hcuopt.source_hash import file_uri_to_path
 
 MAX_PROPOSAL_PATCH_BYTES = 4 * 1024 * 1024
 MAX_PROPOSAL_BATCH_BYTES = 8 * 1024 * 1024
+REAL_PROPOSAL_OUTPUT_SCHEMA = "hcuopt-agent-proposal-output-v1"
 
 
 def _sha256(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("JSON constants are forbidden")
+
+
+def _object_from_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError("duplicate JSON key")
+        result[name] = value
+    return result
 
 
 def _digest_path(root: Path, namespace: str, digest: str, filename: str) -> Path:
@@ -189,6 +206,169 @@ class CandidateProposalBatchStore:
         )
 
 
+class AgentProposalMaterializer:
+    """Convert exact successful Runner output into C-owned Proposal artifacts."""
+
+    def __init__(
+        self,
+        *,
+        profile: str,
+        patch_store: ProposalPatchStore,
+        batch_store: CandidateProposalBatchStore,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.patch_store = patch_store
+        self.batch_store = batch_store
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.provenance = AdapterProvenance(
+            profile=profile,
+            capability="candidate_proposal_generation",
+            adapter_name=type(self).__name__,
+            adapter_version="1.0.0",
+            implementation_kind="real",
+        )
+
+    @staticmethod
+    def _parse(raw_output: bytes) -> tuple[dict[str, object], ...]:
+        if len(raw_output) > MAX_PROPOSAL_BATCH_BYTES:
+            raise SourceArtifactError("Agent raw Proposal output exceeds its size limit")
+        try:
+            payload = json.loads(
+                raw_output,
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_object_from_pairs,
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+            raise SourceArtifactError("Agent raw Proposal output is not strict JSON") from error
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"schema_version", "proposals"}
+            or payload.get("schema_version") != REAL_PROPOSAL_OUTPUT_SCHEMA
+        ):
+            raise SourceArtifactError("Agent raw Proposal output Contract is invalid")
+        proposals = payload.get("proposals")
+        if not isinstance(proposals, list) or not 1 <= len(proposals) <= 8:
+            raise SourceArtifactError("Agent raw Proposal output has an invalid Proposal count")
+        required = {
+            "optimization_intent",
+            "rationale",
+            "risk_summary",
+            "touched_paths",
+            "patch",
+        }
+        if any(not isinstance(item, dict) or set(item) != required for item in proposals):
+            raise SourceArtifactError("Agent raw Proposal member Contract is invalid")
+        return tuple(proposals)
+
+    def materialize(
+        self,
+        *,
+        request: CandidateGenerationRequest,
+        receipt: RunnerExecutionReceipt,
+        raw_output: bytes,
+    ) -> CandidateProposalBatch:
+        execution = receipt.execution
+        request_hash = candidate_generation_request_hash(request)
+        if (
+            execution.status != "succeeded"
+            or execution.cleanup_status != "verified"
+            or receipt.raw_output_uri is None
+            or receipt.raw_output_hash is None
+            or receipt.raw_output_bytes != len(raw_output)
+            or receipt.raw_output_hash != _sha256(raw_output)
+            or execution.stdout_hash != receipt.raw_output_hash
+            or execution.synthetic
+        ):
+            raise SourceArtifactError("Runner Receipt does not bind successful raw Proposal bytes")
+        if (
+            execution.request_id != request.request_id
+            or execution.generation_run_id != request.generation_run_id
+            or execution.request_hash != request_hash
+        ):
+            raise SourceArtifactError("Runner Receipt does not bind the Generation Request")
+        if execution.tokens_consumed is None:
+            raise SourceArtifactError("Runner Receipt omitted authoritative token usage")
+
+        members = self._parse(raw_output)
+        if len(members) > request.max_proposals:
+            raise SourceArtifactError("Agent Proposal output exceeds the Request limit")
+
+        prepared: list[tuple[bytes, CandidateProposal]] = []
+        for ordinal, member in enumerate(members):
+            patch_value = member["patch"]
+            touched_paths = member["touched_paths"]
+            if not isinstance(patch_value, str) or not isinstance(touched_paths, list):
+                raise SourceArtifactError("Agent raw Proposal member Contract is invalid")
+            raw_patch = patch_value.encode("utf-8")
+            try:
+                patch_hash = raw_patch_hash_v1(raw_patch)
+                normalized_hash = normalized_patch_hash_v1(raw_patch)
+            except ValueError as error:
+                raise SourceArtifactError(
+                    "Agent raw Proposal Patch is invalid"
+                ) from error
+            proposal_id = uuid5(
+                execution.attempt_id,
+                f"hcuopt:m2b-real-proposal:{ordinal}:{patch_hash}:{normalized_hash}",
+            )
+            try:
+                proposal = CandidateProposal(
+                    proposal_id=proposal_id,
+                    request_id=request.request_id,
+                    request_hash=request_hash,
+                    generation_run_id=request.generation_run_id,
+                    generator_id=execution.generator_id,
+                    ordinal=ordinal,
+                    optimization_intent=member["optimization_intent"],
+                    rationale=member["rationale"],
+                    risk_summary=member["risk_summary"],
+                    patch_uri="pending:///proposal.diff",
+                    patch_hash=patch_hash,
+                    normalized_patch_hash=normalized_hash,
+                    touched_paths=tuple(touched_paths),
+                    replacement_point=request.replacement_point,
+                )
+            except (TypeError, ValueError) as error:
+                raise SourceArtifactError(
+                    "Agent raw Proposal member Contract is invalid"
+                ) from error
+            prepared.append((raw_patch, proposal))
+
+        proposals: list[CandidateProposal] = []
+        for raw_patch, proposal in prepared:
+            stored_patch = self.patch_store.publish(raw_patch)
+            proposals.append(proposal.model_copy(update={"patch_uri": stored_patch.uri}))
+
+        finished_at = self.clock()
+        if finished_at.tzinfo is None or finished_at.utcoffset() is None:
+            raise SourceArtifactError("Agent Proposal materialization clock is timezone-naive")
+        batch_id = uuid5(
+            execution.attempt_id,
+            f"hcuopt:m2b-real-batch:{receipt.raw_output_hash}",
+        )
+        batch = CandidateProposalBatch(
+            batch_id=batch_id,
+            request_id=request.request_id,
+            request_hash=request_hash,
+            generation_run_id=request.generation_run_id,
+            generator_id=execution.generator_id,
+            adapter_provenance=self.provenance,
+            status="succeeded",
+            proposals=tuple(proposals),
+            raw_output_uri=receipt.raw_output_uri,
+            raw_output_hash=receipt.raw_output_hash,
+            output_bytes=receipt.raw_output_bytes,
+            token_count=execution.tokens_consumed,
+            attempt_count=execution.attempt_number,
+            wall_seconds=execution.wall_seconds_consumed,
+            started_at=finished_at - timedelta(seconds=execution.wall_seconds_consumed),
+            finished_at=finished_at,
+            synthetic=execution.synthetic,
+        )
+        self.batch_store.publish(batch)
+        return batch
+
+
 class DeterministicCandidateGeneratorAdapter:
     """Synthetic CI generator that still consumes deployment-owned knowledge bytes."""
 
@@ -305,6 +485,7 @@ class DeterministicCandidateGeneratorAdapter:
 
 
 __all__ = [
+    "AgentProposalMaterializer",
     "CandidateProposalBatchStore",
     "DeterministicCandidateGeneratorAdapter",
     "ProposalPatchStore",

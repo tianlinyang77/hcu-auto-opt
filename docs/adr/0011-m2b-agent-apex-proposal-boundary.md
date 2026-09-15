@@ -84,6 +84,27 @@ argv/input Hash、脱敏摘要、进程树终止和临时目录清理状态，�
 Record。timeout、输出/token 超限、非零退出、usage 畸形或 cleanup 未证实均不得返回可用
 Proposal bytes。
 
+真实模型凭据不新增到 `AgentRunRequest.environment` 白名单。部署进程通过
+`AgentDeploymentCredential` 持有 Secret bytes，Runner 为每个 Attempt 写入权限受限的临时文件，
+并只把 Runner 保留的 `HCUOPT_DEPLOYMENT_*_FILE` 路径注入固定 Generator Artifact。调用方不能声明
+或覆盖同名变量；凭据内容、临时路径和值都不能进入 argv、Proposal、Receipt 或 Evidence，且在
+进程树结束后随 Attempt 目录一起验证清理。摘要脱敏除普通调用方环境值外，还必须覆盖部署凭据
+实际值。
+
+第一种真实 Generator Artifact 使用 DeepSeek 官方 Anthropic Messages 兼容入口。部署 Profile
+冻结 endpoint、model、token/response/timeout 上限和 `thinking_mode`，这些配置连同冻结 Request、
+Profiler Evidence、Knowledge Snapshot 与热点源码形成 Runner input manifest。Provider 禁止重定向
+携带凭据，生产 endpoint 必须使用 HTTPS；loopback HTTP 只允许测试显式开启。它只接受
+`stop_reason=end_turn/stop_sequence` 和严格 `hcuopt-agent-proposal-output-v1` JSON，拒绝 NaN、重复
+key、缺失 usage、超限响应、不完整 completion、越界 Python 路径和畸形 Patch。DeepSeek
+`deepseek-flash` 的首个 MVP Profile 使用 `thinking_mode=disabled` 保证结构化输出稳定；若部署方
+改用 provider 默认推理行为，必须扩大冻结 token 预算，截断输出仍失败关闭。
+
+C 的 `AgentProposalMaterializer` 只消费 B Store 中成功、已清理、非 synthetic 且与完整 Generation
+Request Hash 一致的 `RunnerExecutionReceipt`，重读 exact raw output 后生成内容绑定 Proposal ID、
+发布 Patch/Batch，再交回 A settle。它不能把 successful Receipt 之外的临时 stdout 或模型自报
+Hash 直接转换为 Proposal。
+
 #### A/B/C/D 共享 Runner Execution Receipt
 
 B 的部署侧 `RunnerExecutionReceiptStore` 把成功原始输出和 `RunnerExecutionRecord` 分别按内容

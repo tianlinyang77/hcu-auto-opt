@@ -6,10 +6,17 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from hcuopt.adapters.agent_generator import AgentProposalMaterializer
     from hcuopt.adapters.agent_runner import (
+        AgentDeploymentCredential,
         AgentRunnerAdapter,
         DeterministicAgentRunner,
         LocalCommandAgentRunner,
+    )
+    from hcuopt.adapters.anthropic_agent_provider import (
+        AgentProviderAttemptResult,
+        AnthropicMessagesGenerationWorker,
+        AnthropicMessagesProviderConfig,
     )
     from hcuopt.adapters.execution import ContainerExecutionAdapter, SSHExecutionAdapter
     from hcuopt.adapters.real_profile import (
@@ -27,6 +34,9 @@ if TYPE_CHECKING:
     from hcuopt.adapters.resource_cleaner import ContainerResourceCleaner
 
 __all__ = [
+    "AgentDeploymentCredential",
+    "AgentProposalMaterializer",
+    "AgentProviderAttemptResult",
     "AgentRunnerAdapter",
     "AdapterRegistry",
     "ContainerExecutionAdapter",
@@ -34,6 +44,8 @@ __all__ = [
     "SSHExecutionAdapter",
     "DeterministicAgentRunner",
     "LocalCommandAgentRunner",
+    "AnthropicMessagesGenerationWorker",
+    "AnthropicMessagesProviderConfig",
     "build_m1_adjudication_registry",
     "build_m1_correctness_registry",
     "build_m1_source_artifact_registry",
@@ -46,6 +58,9 @@ __all__ = [
 ]
 
 _EXPORT_MODULES = {
+    "AgentDeploymentCredential": "hcuopt.adapters.agent_runner",
+    "AgentProposalMaterializer": "hcuopt.adapters.agent_generator",
+    "AgentProviderAttemptResult": "hcuopt.adapters.anthropic_agent_provider",
     "AgentRunnerAdapter": "hcuopt.adapters.agent_runner",
     "AdapterRegistry": "hcuopt.adapters.registry",
     "ContainerExecutionAdapter": "hcuopt.adapters.execution",
@@ -53,6 +68,8 @@ _EXPORT_MODULES = {
     "SSHExecutionAdapter": "hcuopt.adapters.execution",
     "DeterministicAgentRunner": "hcuopt.adapters.agent_runner",
     "LocalCommandAgentRunner": "hcuopt.adapters.agent_runner",
+    "AnthropicMessagesGenerationWorker": "hcuopt.adapters.anthropic_agent_provider",
+    "AnthropicMessagesProviderConfig": "hcuopt.adapters.anthropic_agent_provider",
     "build_m1_adjudication_registry": "hcuopt.adapters.real_profile",
     "build_m1_correctness_registry": "hcuopt.adapters.real_profile",
     "build_m1_source_artifact_registry": "hcuopt.adapters.real_profile",
