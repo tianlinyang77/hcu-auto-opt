@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -268,6 +269,34 @@ def test_deployment_credential_is_private_request_invisible_and_redacted(
     assert "<redacted-env>" in result.evidence.stderr_summary
     assert name not in result.evidence.environment_names
     assert not list(tmp_path.glob("agent-run-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not Windows ACLs")
+def test_deployment_credential_uses_private_posix_permissions(tmp_path: Path) -> None:
+    observed: dict[str, int] = {}
+
+    def inspect_then_remove(attempt_dir: Path) -> None:
+        credential_root = attempt_dir / "credentials"
+        credential_path = next(credential_root.iterdir())
+        observed["directory"] = stat.S_IMODE(credential_root.stat().st_mode)
+        observed["file"] = stat.S_IMODE(credential_path.stat().st_mode)
+        shutil.rmtree(attempt_dir)
+
+    name = "HCUOPT_DEPLOYMENT_PROVIDER_API_KEY_FILE"
+    runner = _runner(
+        deployment_credentials=(
+            AgentDeploymentCredential(environment_name=name, content=b"secret"),
+        ),
+        remove_tree=inspect_then_remove,
+    )
+
+    result = runner.run(
+        _request("credential", options=("--environment-name", name)),
+        tmp_path,
+    )
+
+    assert result.status == "succeeded"
+    assert observed == {"directory": 0o700, "file": 0o600}
 
 
 def test_request_cannot_override_deployment_credential_binding(tmp_path: Path) -> None:

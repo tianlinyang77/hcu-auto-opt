@@ -91,6 +91,7 @@ def _proposal_output(*, count: int = 1, touched_path: str = SOURCE_PATH) -> dict
 def _anthropic_response(
     output: object,
     *,
+    model: str = "deepseek-flash",
     input_tokens: int = 11,
     output_tokens: int = 13,
     include_usage: bool = True,
@@ -98,6 +99,7 @@ def _anthropic_response(
 ) -> bytes:
     payload: dict[str, Any] = {
         "content": [{"type": "text", "text": json.dumps(output)}],
+        "model": model,
         "stop_reason": stop_reason,
     }
     if include_usage:
@@ -380,6 +382,7 @@ def test_real_provider_materializes_bounded_replayable_proposals(
         (_anthropic_response("not-json"), "failed"),
         (_anthropic_response(_proposal_output(), include_usage=False), "failed"),
         (_anthropic_response(_proposal_output(), stop_reason="max_tokens"), "failed"),
+        (_anthropic_response(_proposal_output(), model="unexpected-model"), "failed"),
         (b'{"error":"unavailable"}', "failed"),
     ],
 )

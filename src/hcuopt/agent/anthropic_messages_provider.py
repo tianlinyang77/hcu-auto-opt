@@ -255,6 +255,11 @@ def _extract_usage(response: dict[str, Any]) -> int:
     return sum(values)
 
 
+def _verify_response_model(response: dict[str, Any], expected_model: str) -> None:
+    if response.get("model") != expected_model:
+        raise ProviderError("provider_model_mismatch")
+
+
 def _extract_model_output(response: dict[str, Any]) -> dict[str, Any]:
     if response.get("stop_reason") not in {"end_turn", "stop_sequence"}:
         raise ProviderError("provider_completion_incomplete")
@@ -331,6 +336,7 @@ def run() -> bytes:
     config = _load_request(Path(raw_input_root))
     api_key = _load_api_key()
     response = _request_provider(config, api_key)
+    _verify_response_model(response, config["model"])
     usage = _extract_usage(response)
     output = _extract_model_output(response)
     _write_usage(usage)

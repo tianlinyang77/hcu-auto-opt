@@ -61,8 +61,9 @@ A 原子领取 GenerationAttemptClaim
 ```
 
 Provider 禁止 HTTP 外发、禁止重定向携带凭据；仅测试时可显式允许 loopback HTTP。网络错误、401、
-超时、非 JSON、重复 JSON key、NaN、缺失 token usage、响应超限、越界源码路径或 Patch Contract
-错误都会失败关闭，不产生可审 Batch。
+超时、非 JSON、重复 JSON key、NaN、返回模型与计划不一致、缺失 token usage、响应超限、越界源码
+路径或 Patch Contract 错误都会失败关闭，不产生可审 Batch。Linux 部署还会验证单次 Attempt 的凭据
+目录和文件权限分别为 `0700`、`0600`，无法建立私有权限时不启动 Provider。
 
 ## 当前验收范围
 

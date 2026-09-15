@@ -853,18 +853,32 @@ class LocalCommandAgentRunner:
         sensitive_values: list[str] = []
         if self.deployment_credentials:
             credential_root = attempt_dir / "credentials"
-            credential_root.mkdir()
-            try:
-                credential_root.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-            except OSError:
-                pass
+            credential_root.mkdir(mode=stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            if os.name != "nt":
+                credential_root.chmod(
+                    stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+                )
+                if stat.S_IMODE(credential_root.stat().st_mode) & 0o077:
+                    raise AgentRunnerSafetyError(
+                        "Agent credential directory permissions are not private"
+                    )
             for ordinal, credential in enumerate(self.deployment_credentials):
                 path = credential_root / f"credential-{ordinal:02d}"
-                path.write_bytes(credential.content)
-                try:
+                descriptor = os.open(
+                    path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    stat.S_IRUSR | stat.S_IWUSR,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(credential.content)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if os.name != "nt":
                     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                except OSError:
-                    pass
+                    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+                        raise AgentRunnerSafetyError(
+                            "Agent credential file permissions are not private"
+                        )
                 credential_environment[credential.environment_name] = str(path)
                 decoded = credential.content.decode("utf-8", errors="ignore")
                 sensitive_values.extend((decoded, decoded.strip()))
