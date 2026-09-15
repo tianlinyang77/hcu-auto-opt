@@ -6,7 +6,7 @@ import hashlib
 import json
 import selectors
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -59,12 +59,8 @@ from hcuopt.targets import target_fingerprint
 
 WORKER_PROTOCOL = "hcuopt-m1-allocator-worker-v1"
 ALLOCATOR_RELATIVE_PATH = "python/sglang/srt/mem_cache/allocator.py"
-ALLOCATOR_MOUNT_TARGET = (
-    "/usr/local/lib/python3.10/dist-packages/sglang/srt/mem_cache/allocator.py"
-)
-ALLOCATOR_REPLACEMENT_POINT = (
-    "sglang.srt.mem_cache.allocator.PagedTokenToKVPoolAllocator.free"
-)
+ALLOCATOR_MOUNT_TARGET = "/usr/local/lib/python3.10/dist-packages/sglang/srt/mem_cache/allocator.py"
+ALLOCATOR_REPLACEMENT_POINT = "sglang.srt.mem_cache.allocator.PagedTokenToKVPoolAllocator.free"
 
 
 class Nmz36M1AllocatorError(RuntimeError):
@@ -211,14 +207,14 @@ def _base_docker_argv(
             argv.extend(("--env", item))
     argv.extend(
         (
-        "--mount",
-        f"type=bind,src={source_root},dst=/workspace,readonly",
-        "--mount",
-        f"type=bind,src={evidence_dir},dst=/evidence",
-        "--mount",
-        f"type=bind,src={cache_dir},dst=/cache",
-        "--mount",
-        "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly",
+            "--mount",
+            f"type=bind,src={source_root},dst=/workspace,readonly",
+            "--mount",
+            f"type=bind,src={evidence_dir},dst=/evidence",
+            "--mount",
+            f"type=bind,src={cache_dir},dst=/cache",
+            "--mount",
+            "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly",
         )
     )
     if artifact is not None:
@@ -470,9 +466,7 @@ class Nmz36M1AllocatorPairedWorkload(M1PairedWorkload):
             )
         return M1ActivationEvidence(
             arm=self.process.arm,
-            activation_mode=(
-                "startup_overlay" if self.process.arm == "candidate" else "baseline"
-            ),
+            activation_mode=("startup_overlay" if self.process.arm == "candidate" else "baseline"),
             image_digest=self.target.inference_image.registry_digest,
             loaded_artifact_hash=(
                 self.artifact.content_hash if self.process.arm == "candidate" else None
@@ -609,6 +603,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         protocol: LoadedM1Protocol,
         cleaner: ContainerResourceCleaner,
         deployment_policy: Any | None = None,
+        prepare_output_directory: Callable[[Path], None] | None = None,
     ) -> None:
         _require_target(target, deployment_policy)
         self.target = target
@@ -616,6 +611,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         self.protocol = protocol
         self.cleaner = cleaner
         self.deployment_policy = deployment_policy
+        self.prepare_output_directory = prepare_output_directory
         self.provenance = AdapterProvenance(
             profile=cleaner.provenance.profile,
             capability="correctness_evidence_producer",
@@ -694,9 +690,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
             failure = exc
         finally:
             cleanup = {
-                "fence": self.cleaner.fence(
-                    str(job["resource_id"]), int(job["fencing_token"])
-                ),
+                "fence": self.cleaner.fence(str(job["resource_id"]), int(job["fencing_token"])),
                 "health": self.cleaner.health_check(str(job["resource_id"])),
             }
         if failure is not None:
@@ -748,12 +742,8 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
             candidate_source_snapshot=RawEvidenceFileV2(
                 uri=candidate_ref.uri, sha256=candidate_ref.sha256
             ),
-            reference_source=RawEvidenceFileV2(
-                uri=reference_ref.uri, sha256=reference_ref.sha256
-            ),
-            artifact_manifest=RawEvidenceFileV2(
-                uri=manifest_ref.uri, sha256=manifest_ref.sha256
-            ),
+            reference_source=RawEvidenceFileV2(uri=reference_ref.uri, sha256=reference_ref.sha256),
+            artifact_manifest=RawEvidenceFileV2(uri=manifest_ref.uri, sha256=manifest_ref.sha256),
             artifact=RawEvidenceFileV2(uri=artifact_ref.uri, sha256=artifact_ref.sha256),
             executions=tuple(executions),
             adapter_provenance=(self.provenance,),
@@ -766,9 +756,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         )
         published = write_evidence(run_root / "correctness.json", evidence)
         return M1CorrectnessEvidenceSubmission(
-            reference=M1CorrectnessEvidenceReference(
-                uri=published.uri, sha256=published.sha256
-            ),
+            reference=M1CorrectnessEvidenceReference(uri=published.uri, sha256=published.sha256),
             cleanup_evidence=cleanup,
             adapter_provenance=(self.provenance,),
         )
@@ -788,6 +776,9 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         cache_root = run_root / "cache" / variant
         variant_root.mkdir(parents=True)
         cache_root.mkdir(parents=True)
+        if self.prepare_output_directory is not None:
+            self.prepare_output_directory(variant_root)
+            self.prepare_output_directory(cache_root)
         write_evidence_bytes(variant_root / "hotspot-spec.json", spec_bytes)
         container_name = f"hcuopt-m1-correct-{variant}-{uuid4().hex}"
         argv = _base_docker_argv(

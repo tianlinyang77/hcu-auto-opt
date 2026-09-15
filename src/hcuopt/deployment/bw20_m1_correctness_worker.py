@@ -118,6 +118,29 @@ class BW20M1CorrectnessCleaner:
             }
 
 
+class BW20M1OutputAccess:
+    """Grant the fixed non-root container user access to exact Job directories."""
+
+    def __init__(self, root: Path, runner: LocalCommandRunner | None = None) -> None:
+        self.root = root.resolve(strict=True)
+        self.runner = runner or LocalCommandRunner()
+
+    def __call__(self, path: Path) -> None:
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(self.root)
+        except ValueError as exc:
+            raise ExecutionSafetyError("BW20 M1 output ACL escaped its Job root") from exc
+        if resolved.is_symlink() or not resolved.is_dir():
+            raise ExecutionSafetyError("BW20 M1 output ACL target is not a directory")
+        applied = self.runner.run(("setfacl", "-m", "u:65534:rwx", "--", str(resolved)), timeout=10)
+        if applied.returncode != 0:
+            raise ExecutionSafetyError("BW20 M1 output ACL could not be applied")
+        verified = self.runner.run(("getfacl", "-cpn", str(resolved)), timeout=10)
+        if verified.returncode != 0 or b"user:65534:rwx" not in verified.stdout.splitlines():
+            raise ExecutionSafetyError("BW20 M1 output ACL could not be verified")
+
+
 def build_bw20_m1_correctness_registry(
     *,
     target: TargetSpec,
@@ -142,19 +165,26 @@ def build_bw20_m1_correctness_registry(
 
     protocol = load_registered_m1_protocol()
     cleaner = BW20M1CorrectnessCleaner(target, guard)
+    output_access = BW20M1OutputAccess(output)
     producer: M1CorrectnessEvidenceProducer = BW20M1AllocatorCorrectnessEvidenceProducer(
         target=target,
         source_root=source,
         protocol=protocol,
         cleaner=cleaner,
         deployment_policy=BW20_M1_POLICY,
+        prepare_output_directory=output_access,
     )
-    return build_m1_correctness_registry(
+    correctness = build_m1_correctness_registry(
         profile=BW20_MANUAL_CANDIDATE_PROFILE,
         protocol=protocol,
         reader=HashedEvidenceReader(trusted),
         producer=producer,
         evidence_root=output,
+    )
+    return AdapterRegistry(
+        profile=BW20_MANUAL_CANDIDATE_PROFILE,
+        kernel_correctness=correctness.require("kernel_correctness"),
+        resource_cleaner=cleaner,
     )
 
 
