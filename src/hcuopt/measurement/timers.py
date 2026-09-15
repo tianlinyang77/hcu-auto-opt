@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isfinite
 from statistics import fmean
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from hcuopt.measurement.models import (
     ClockCalibration,
@@ -178,35 +178,64 @@ def calibrate_device_timer_v2(
     resolution_sample_count: int = 64,
     synchronize: Callable[[], None] | None = None,
     device_name: str = "device-timer",
+    capture_mode: Literal[
+        "measurement_process_atomic_v1", "measurement_process_spaced_v2"
+    ] | None = None,
 ) -> ClockCalibrationV2:
     """Capture raw calibration inputs and a separately reproducible producer fit."""
 
     if sample_count < 3:
         raise CalibrationError("Formal device timer calibration requires at least three points")
-    points: list[ClockCalibrationPointV2] = []
-    for point_ordinal in range(sample_count):
-        if synchronize is not None:
-            synchronize()
-        started = host_clock.now_ns()
-        ticks = device_timer.read_ticks()
-        finished = host_clock.now_ns()
-        if finished <= started:
-            raise CalibrationError("Formal clock calibration requires positive host intervals")
-        points.append(
-            ClockCalibrationPointV2(
-                point_ordinal=point_ordinal,
-                device_ticks=ticks,
-                host_started_monotonic_ns=started,
-                host_finished_monotonic_ns=finished,
+    if capture_mode in {
+        "measurement_process_atomic_v1",
+        "measurement_process_spaced_v2",
+    }:
+        method_name = (
+            "capture_spaced_calibration_inputs"
+            if capture_mode == "measurement_process_spaced_v2"
+            else "capture_calibration_inputs"
+        )
+        capture = getattr(device_timer, method_name, None)
+        if not callable(capture):
+            raise DeviceTimerUnavailableError(
+                f"{capture_mode} requires measurement-process capture support"
             )
-        )
-
-    sampler = getattr(device_timer, "sample_resolution_ticks", None)
-    if not callable(sampler):
-        raise DeviceTimerUnavailableError(
-            "Formal Stage 0 requires raw device timer resolution tick samples"
-        )
-    resolution_tick_deltas = tuple(sampler(resolution_sample_count))
+        raw = capture(sample_count, resolution_sample_count)
+        if not isinstance(raw, Mapping):
+            raise CalibrationError("atomic calibration returned an invalid envelope")
+        try:
+            points = [ClockCalibrationPointV2.model_validate(point) for point in raw["points"]]
+            resolution_tick_deltas = tuple(raw["resolution_tick_deltas"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CalibrationError("atomic calibration returned invalid raw inputs") from exc
+        if len(points) != sample_count:
+            raise CalibrationError("atomic calibration returned the wrong point count")
+    elif capture_mode is None:
+        points = []
+        for point_ordinal in range(sample_count):
+            if synchronize is not None:
+                synchronize()
+            started = host_clock.now_ns()
+            ticks = device_timer.read_ticks()
+            finished = host_clock.now_ns()
+            if finished <= started:
+                raise CalibrationError("Formal clock calibration requires positive host intervals")
+            points.append(
+                ClockCalibrationPointV2(
+                    point_ordinal=point_ordinal,
+                    device_ticks=ticks,
+                    host_started_monotonic_ns=started,
+                    host_finished_monotonic_ns=finished,
+                )
+            )
+        sampler = getattr(device_timer, "sample_resolution_ticks", None)
+        if not callable(sampler):
+            raise DeviceTimerUnavailableError(
+                "Formal Stage 0 requires raw device timer resolution tick samples"
+            )
+        resolution_tick_deltas = tuple(sampler(resolution_sample_count))
+    else:
+        raise CalibrationError(f"unsupported calibration capture mode: {capture_mode!r}")
     if len(resolution_tick_deltas) < 3:
         raise CalibrationError(
             "Formal device timer calibration requires at least three resolution samples"

@@ -50,6 +50,16 @@ class JobHandlers:
         return handler(payload)
 
     def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if job_type == "stage0_probe" and self.adapters.stage0_probe is not None:
+            probe = self.adapters.require("stage0_probe")
+            cleanup_probe = getattr(probe, "cleanup_probe", None)
+            if callable(cleanup_probe):
+                # Deployment-owned job context also handles heartbeat/lease-loss
+                # cleanup. Do not fall back to a broad resource-wide cleaner.
+                result = dict(cleanup_probe(payload))
+                if not all(isinstance(result.get(key), dict) for key in ("fence", "health")):
+                    raise ExecutionSafetyError("Stage 0 job cleanup response is incomplete")
+                return result
         context = payload.get("_job_context", {})
         resource_id = context.get("resource_id")
         fencing_token = context.get("fencing_token")

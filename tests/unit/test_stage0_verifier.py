@@ -52,6 +52,7 @@ from hcuopt.evaluation.stage0_verifier import (
 )
 from hcuopt.measurement.evidence import canonical_json_bytes, write_evidence
 from hcuopt.measurement.fingerprint import stable_fingerprint
+from hcuopt.measurement.models import MeasurementEvidenceV2
 from hcuopt.runtime_probes.adapter import RuntimeProbeAdapter
 from hcuopt.runtime_probes.evidence import DeploymentContentAddressedEvidencePublisher
 from hcuopt.runtime_probes.overlay import OverlayCapabilityProbe
@@ -366,6 +367,7 @@ def _measurement_evidence(
         "plan": {
             "restart_count": 10,
             "warmup_count": 10,
+            "warmup_batch_iterations": protocol.protocol.sampling.warmup_batch_iterations,
             "batch_iterations": protocol.protocol.sampling.batch_iterations,
             "segment_order": list(segment_order),
             "samples_per_segment": samples_per_segment,
@@ -653,6 +655,7 @@ def _write_capability_auxiliary_evidence(
         **baseline_source,
         "snapshot_id": str(candidate_snapshot_id),
         "kind": "candidate",
+        "commit": "b" * 40,
         "tree_hash": "b" * 40,
         "source_hash": SHA_B,
         "worktree_uri": "file:///home/github/sglang-candidate",
@@ -1093,6 +1096,19 @@ def test_seven_probe_canonical_evidence_is_recomputed_to_full_pass(tmp_path: Pat
     assert any(item["kind"] == "process_lifecycle_record" for item in result.input_evidence)
     assert any(item["kind"] == "artifact" for item in result.input_evidence)
     assert result.verifier_provenance.implementation_kind == "real"
+
+
+def test_bw20_v3_plan_records_and_d_verifies_full_batch_warmup(tmp_path: Path) -> None:
+    suite = _build_suite(tmp_path, protocol_version="s0-g0-bw20-v3")
+    raw = suite.raw[Stage0ProbeType.NOISE]
+    evidence = MeasurementEvidenceV2.model_validate_json(json.dumps(raw))
+    verifier = Stage0Verifier(suite.protocol, _verifier_reader(suite.root))
+
+    verifier._verify_measurement_plan(Stage0ProbeType.NOISE, evidence)
+    raw["plan"]["warmup_batch_iterations"] = 1
+    mismatched = MeasurementEvidenceV2.model_validate_json(json.dumps(raw))
+    with pytest.raises(Stage0EvidenceError, match="warmup_batch_iterations"):
+        verifier._verify_measurement_plan(Stage0ProbeType.NOISE, mismatched)
 
 
 def test_formal_verifier_rejects_modified_thresholds_with_a_registered_name(
@@ -1675,6 +1691,36 @@ def test_hotpatch_process_identity_is_recomputed_from_state_manifest(tmp_path: P
     suite.rewrite(Stage0ProbeType.HOTPATCH)
 
     assert suite.verify().hot_patch is HotPatchCapability.NONE
+
+
+@pytest.mark.parametrize("damage", ["dirty", "same_commit", "same_tree"])
+def test_hotpatch_requires_a_finalized_changed_candidate_snapshot(
+    tmp_path: Path, damage: str
+) -> None:
+    suite = _build_suite(tmp_path)
+    raw = deepcopy(suite.raw[Stage0ProbeType.HOTPATCH])
+    candidate_path = _reference_path(raw["candidate_source"])
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    baseline = json.loads(_reference_path(raw["baseline_source"]).read_text(encoding="utf-8"))
+    if damage == "dirty":
+        candidate["clean"] = False
+    elif damage == "same_commit":
+        candidate["commit"] = baseline["commit"]
+    else:
+        candidate["tree_hash"] = baseline["tree_hash"]
+    raw["candidate_source"] = _raw_file_reference(
+        suite.root / Stage0ProbeType.HOTPATCH.value / f"source-candidate-{damage}.json",
+        canonical_json_bytes(candidate),
+    )
+
+    assert (
+        classify_hotpatch(
+            _parse_hotpatch(raw),
+            _verifier_reader(suite.root),
+            _load_target(),
+        )
+        is HotPatchCapability.NONE
+    )
 
 
 def test_hotpatch_rejects_arbitrary_bytes_as_candidate_snapshot(tmp_path: Path) -> None:

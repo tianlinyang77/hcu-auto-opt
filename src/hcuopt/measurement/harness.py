@@ -58,7 +58,9 @@ class FormalStage0Workload(Protocol):
 
     def synchronize(self) -> None: ...
 
-    def warmup_segment(self, segment: Stage0Segment) -> None: ...
+    def configure_fixture(self, workload_elements: int) -> None: ...
+
+    def warmup_segment(self, segment: Stage0Segment, iterations: int) -> None: ...
 
     def measure_segment_batch(
         self,
@@ -256,6 +258,7 @@ class EvidenceMeasurementHarness:
         calibration_samples: int = 5,
         resolution_samples: int = 64,
         device_timer_name: str = "hcu-device-timer",
+        calibration_capture_mode: str | None = None,
     ) -> FormalHarnessRun:
         """Collect one Formal timing envelope without trusting producer summaries."""
 
@@ -283,6 +286,7 @@ class EvidenceMeasurementHarness:
                 resolution_sample_count=resolution_samples,
                 synchronize=self.synchronize,
                 device_name=device_timer_name,
+                capture_mode=calibration_capture_mode,
             )
             observations: list[DynamicObservationV2] = [self._observe_v2("before_run")]
             samples: list[RawSampleV2] = []
@@ -343,10 +347,15 @@ class EvidenceMeasurementHarness:
                             ),
                         )
                     )
+                    if plan.workload_elements is not None:
+                        workload.configure_fixture(plan.workload_elements)
                     for segment in plan.segment_order:
                         for _ in range(plan.warmup_count):
                             workload.synchronize()
-                            workload.warmup_segment(segment)
+                            workload.warmup_segment(
+                                segment,
+                                plan.warmup_batch_iterations or 1,
+                            )
                         for segment_sample_ordinal in range(plan.samples_per_segment):
                             self._require_live_lease(job_context)
                             timing = FormalWorkloadTimingV2.model_validate(

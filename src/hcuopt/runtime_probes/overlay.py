@@ -358,8 +358,15 @@ class OverlayCapabilityProbe:
     ) -> None:
         if baseline.kind != "baseline" or not baseline.clean:
             raise ValueError("overlay probe requires a clean baseline snapshot")
-        if candidate.kind != "candidate" or candidate.parent_snapshot_id != baseline.snapshot_id:
-            raise ValueError("overlay candidate must be an independent child worktree")
+        if (
+            candidate.kind != "candidate"
+            or not candidate.clean
+            or candidate.parent_snapshot_id != baseline.snapshot_id
+            or candidate.commit == baseline.commit
+            or candidate.tree_hash == baseline.tree_hash
+            or candidate.source_hash == baseline.source_hash
+        ):
+            raise ValueError("overlay candidate must be a finalized changed child worktree")
         baseline_path = file_uri_to_path(baseline.worktree_uri).resolve(strict=True)
         candidate_path = file_uri_to_path(candidate.worktree_uri).resolve(strict=True)
         if baseline_path == candidate_path:

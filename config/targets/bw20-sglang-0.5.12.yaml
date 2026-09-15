@@ -36,11 +36,12 @@ execution_host:
     architecture: gfx936
     numa_node: 4
     cpu_affinity: 64-79
-    # Proposed measurement policy from supported frequency levels, NOT applied
-    # or accepted. Observed preflight was auto / sclk 600 / mclk 1800 MHz.
-    expected_sclk_mhz: 1500
+    # Host policy remains auto. The registered protocol checks observed stability
+    # across a run and never writes clocks. Read-only hy-smi -c on 2026-09-14
+    # reported idle sclk 600 / mclk 1800 MHz on every device.
+    expected_sclk_mhz: 600
     expected_mclk_mhz: 1800
-    expected_performance_level: manual
+    expected_performance_level: auto
   observed_host_environment:
     dtk_version: not_installed
     driver_version: 6.3.31-V1.5.1
@@ -55,7 +56,7 @@ measurement_constraints:
   - physical_hcu_7_is_pci_0000_b1_00_0_and_renderD135
   - single_render_device_container_uses_logical_device_0
   - host_dtk_is_not_installed_use_the_locked_container_runtime
-  - clock_policy_is_proposed_only_no_clock_mutation_is_authorized_by_this_file
+  - host_auto_clock_policy_is_observed_only_and_never_mutated_by_stage0
   - do_not_reuse_nmz36_target_stage0_or_measurement_ids
   - baseline_checkout_must_remain_clean_and_candidates_use_separate_worktrees
   - never_stop_unrelated_containers_or_processes
@@ -70,24 +71,24 @@ blockers:
     detail: Clean detached checkout verified on 2026-09-09 at the configured path; HEAD dad582f28458cd0e11e0be675fbe7fcc7ab65ac1, tree a883d7eb4b4667768c19f0c9b0456d41f52da91c. Runtime equivalence remains a separate gate.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: source_runtime_equivalence_unverified
-    status: open
-    detail: Source is prepared but the image package to source/overlay relationship has not been revalidated on this host.
+    status: accepted
+    detail: Python source/package relationship was revalidated on github-bw20 on 2026-09-14 by the pinned runtime binding receipt. This acceptance is limited to the frozen Python overlay replacement point; native build provenance and candidate activation remain separate runtime evidence requirements.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: workload_not_frozen
-    status: open
-    detail: Model location, input set, candidate family and workload identity must be frozen for this host.
+    status: resolved
+    detail: Workload bw20-sglang-smoke-v1 is frozen to Qwen2.5-0.5B-Instruct, TP1, batch1, input128, output8, fa3 and page-size64; canonical workload hash sha256:c93a74d633377bf2e8c4dd6293832bfe6629864ee2310326af13fa79781d5270.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: deployment_adapter_not_bound
-    status: open
-    detail: Only the bounded environment probe is available. The nmz36-only deployment must not be relabeled or silently enabled for this target.
+    status: resolved
+    detail: The BW20 seven-route profile, prepared-input guard and Worker lifecycle are bound to the target fingerprint through the explicit bootstrap. Measurements use BW20AutoObservationSessionFactory with host_auto_observe_only_v1 and no clock backend.
     blocks: [framework_smoke, stage0, optimization, release]
   - id: measurement_clock_policy_unapproved
-    status: open
-    detail: Proposed 1500/1800 MHz manual policy is supported but unapproved and unapplied; verify and authorize restoration policy before calibration.
+    status: accepted
+    detail: Project owner confirmed on 2026-09-14 that fleet validation remains in host auto mode. Stage0 may read hy-smi/sysfs telemetry but must not set or restore clocks; D checks within-run observed stability and noise before accepting measurements.
     blocks: [stage0, optimization, release]
   - id: device_isolation_not_reserved
-    status: open
-    detail: Environment probe permission was granted, but instantaneous idle readings do not prove a reserved measurement window. Other containers can access devices.
+    status: accepted
+    detail: Project owner accepted the current HCU 7 validation window on 2026-09-14. Every real probe must still hold the control-plane exclusive lease and recheck HCU 7 use, memory and KFD PIDs immediately before execution; this is not a claim of external fleet-wide physical reservation.
     blocks: [stage0, optimization, release]
   - id: stage0_not_measured
     status: open
