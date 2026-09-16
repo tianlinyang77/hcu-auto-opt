@@ -75,7 +75,7 @@ VERIFY_RUN = r"""
 import hashlib,json,os,pathlib,stat,sys,uuid
 run=pathlib.Path(sys.argv[1]); plan_pin=sys.argv[2]
 artifact_path=pathlib.Path(sys.argv[3]); artifact_pin=sys.argv[4]
-model_root=pathlib.Path(sys.argv[5])
+model_target=pathlib.Path(sys.argv[5]); model_root=pathlib.Path(sys.argv[6])
 root=pathlib.Path('/home/github/hcu-auto-opt-runtime/bw20-endpoint-validation')
 if (run.parent!=root or str(uuid.UUID(run.name))!=run.name
         or run.resolve(strict=True)!=run or run.is_symlink()):
@@ -118,7 +118,8 @@ if (plan.get('schema_version')!='bw20-endpoint-staging-plan-v1'
         or plan.get('remote_run_root')!=str(run)
         or plan.get('candidate_artifact_path')!=str(artifact_path)
         or plan.get('candidate_artifact_sha256')!=artifact_pin
-        or plan.get('model_root')!=str(model_root)):
+        or plan.get('model_root')!=str(model_target)
+        or plan.get('staged_model_root')!=str(model_root)):
  raise ValueError('endpoint plan identity mismatch')
 expected=plan.get('input_sha256')
 if not isinstance(expected,dict) or not expected:
@@ -466,6 +467,7 @@ def stage_endpoint_run(
                 prepared.plan_sha256,
                 SIGNED_ARTIFACT_PATH,
                 CANDIDATE_MODULE_HASH,
+                MODEL,
                 f"{prepared.remote_run_root}/model",
             ),
             timeout=180,
