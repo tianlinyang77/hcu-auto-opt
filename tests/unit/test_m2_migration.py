@@ -19,7 +19,16 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[20] == "0020_m2a_formal_evidence_acceptance.sql"
     assert MIGRATIONS[21] == "0021_m2a_formal_evaluation_registration.sql"
     assert MIGRATIONS[22] == "0022_endpoint_validation_control_plane.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 23))
+    assert MIGRATIONS[23] == "0023_endpoint_validation_failure_evidence.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 24))
+
+
+def test_endpoint_failure_migration_preserves_error_and_cleanup_evidence() -> None:
+    sql = migration_sql(23)
+
+    assert "ADD COLUMN failure_error JSONB" in sql
+    assert "ADD COLUMN cleanup_evidence JSONB" in sql
+    assert "VALUES (23, 'endpoint_validation_failure_evidence')" in sql
 
 
 def test_terminal_runner_receipt_binding_migration_freezes_settlement_evidence() -> None:

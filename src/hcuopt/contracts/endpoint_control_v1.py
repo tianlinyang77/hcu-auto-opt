@@ -78,6 +78,8 @@ class EndpointValidationRunView(ReadModel):
     plan_hash: str = Field(pattern=SHA256_PATTERN)
     state: Literal["queued", "running", "provisional_passed", "failed"]
     result: dict | None = None
+    failure_error: dict | None = None
+    cleanup_evidence: dict | None = None
     automatic_release_allowed: Literal[False] = False
     created_at: datetime
     updated_at: datetime

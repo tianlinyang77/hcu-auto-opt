@@ -357,5 +357,70 @@ class EndpointValidationRepositoryMixin:
         assert row is not None
         return row
 
+    def _fail_endpoint_validation_run_after_job_failure(
+        self,
+        connection: Any,
+        job: dict[str, Any],
+        error: dict[str, Any],
+        cleanup_evidence: dict[str, Any] | None = None,
+    ) -> None:
+        """Converge a terminal endpoint Job failure without inventing a verdict."""
+        if job["job_type"] != JobType.ENDPOINT_VALIDATION.value:
+            return
+        run = connection.execute(
+            """
+            SELECT * FROM endpoint_validation_runs
+            WHERE job_id = %s FOR UPDATE
+            """,
+            (job["job_id"],),
+        ).fetchone()
+        if run is None:
+            return
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE task_id = %s FOR UPDATE",
+            (job["task_id"],),
+        ).fetchone()
+        if run["state"] in {"queued", "running"}:
+            connection.execute(
+                """
+                UPDATE endpoint_validation_runs
+                SET state = 'failed', failure_error = %s, cleanup_evidence = %s,
+                    updated_at = now()
+                WHERE endpoint_run_id = %s
+                """,
+                (
+                    Jsonb(error),
+                    Jsonb(cleanup_evidence) if cleanup_evidence is not None else None,
+                    run["endpoint_run_id"],
+                ),
+            )
+        if task is not None and task["state"] == TaskState.ENDPOINT_PROBING.value:
+            transition_task(TaskState(task["state"]), TaskState.REJECTED)
+            connection.execute(
+                """
+                UPDATE tasks SET state = %s, version = version + 1, updated_at = now()
+                WHERE task_id = %s
+                """,
+                (TaskState.REJECTED.value, job["task_id"]),
+            )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, event_type, details)
+            VALUES (%s, 'endpoint_validation_failed', %s)
+            """,
+            (
+                job["task_id"],
+                Jsonb(
+                    {
+                        "endpoint_run_id": str(run["endpoint_run_id"]),
+                        "job_id": str(job["job_id"]),
+                        "error": error,
+                        "cleanup_evidence_recorded": cleanup_evidence is not None,
+                        "automatic_release_allowed": False,
+                    }
+                ),
+            ),
+        )
+
 
 __all__ = ["EndpointValidationRepositoryMixin"]

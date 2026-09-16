@@ -23,6 +23,7 @@ MIGRATIONS = {
     20: "0020_m2a_formal_evidence_acceptance.sql",
     21: "0021_m2a_formal_evaluation_registration.sql",
     22: "0022_endpoint_validation_control_plane.sql",
+    23: "0023_endpoint_validation_failure_evidence.sql",
 }
 
 

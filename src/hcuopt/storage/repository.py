@@ -6882,6 +6882,9 @@ class PostgresRepository(
                 self._reject_manual_candidate_task_after_job_failure(
                     connection, job, error
                 )
+                self._fail_endpoint_validation_run_after_job_failure(
+                    connection, job, error, cleanup_evidence
+                )
         assert row is not None
         return row
 
@@ -7153,6 +7156,9 @@ class PostgresRepository(
                     self._reject_framework_task_after_job_failure(connection, job, error)
                     self._fail_stage0_run_after_job_failure(connection, job, error)
                     self._reject_manual_candidate_task_after_job_failure(
+                        connection, job, error
+                    )
+                    self._fail_endpoint_validation_run_after_job_failure(
                         connection, job, error
                     )
                 recovered.append(job["job_id"])
