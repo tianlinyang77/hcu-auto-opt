@@ -1,5 +1,22 @@
 # Codex 项目本地已知问题
 
+## Registry Digest 运行时必须带完整仓库引用
+
+- Scope: project-local；2026-09-16。
+- Symptom: `docker images --digests` 能找到精确 Registry Digest，但
+  `docker run sha256:<registry-digest>` 报 `No such image`，CPU 验收没有启动。
+- Evidence: 本地清单同时给出仓库名、Registry Digest 和不同的本地 Image ID；失败后没有
+  容器、数据库 schema 或 HCU 状态变化。
+- Cause: Registry manifest Digest 不是 Docker 本地 Image ID，不能脱离仓库名作为镜像引用。
+- Proven workaround: 使用 `<repository>@sha256:<registry-digest>` 启动，并保留 Digest
+  校验；只有确需按本地内容对象寻址时才使用 `docker image inspect` 返回的 Image ID。
+- Validation: 改用完整引用后，同一只读源码、无 HCU CPU 容器完成 PostgreSQL 端点控制面
+  联验，`2 passed`，容器和随机隔离 schema 均已清理。
+- Applies to: BW20 上按已冻结 Registry Digest 启动的 SGLang 临时验收容器。
+- Do not repeat: 不要把 Registry Digest 裁成裸 `sha256:` 传给 `docker run`，也不要改用
+  浮动 Tag 绕过失败。
+- Last updated: 2026-09-16
+
 ## DeepSeek Messages 可成功返回但 unified diff 元数据不稳定
 
 - Scope: project-local；2026-09-15。
