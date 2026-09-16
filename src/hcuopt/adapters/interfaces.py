@@ -111,6 +111,15 @@ class ManualPerformanceMeasurementHarness(Protocol):
     ) -> Any: ...
 
 
+@runtime_checkable
+class EndpointMeasurementRunner(Protocol):
+    provenance: AdapterProvenance
+
+    def run_endpoint_validation(
+        self, payload: Mapping[str, Any], output_dir: Path
+    ) -> Mapping[str, Any]: ...
+
+
 class Stage0ProbeAdapter(Protocol):
     provenance: AdapterProvenance
     target_fingerprint: str

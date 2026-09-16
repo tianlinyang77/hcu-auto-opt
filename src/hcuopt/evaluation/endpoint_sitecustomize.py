@@ -148,4 +148,3 @@ def _publish(path: Path, value: dict[str, Any]) -> None:
 
 if _CONFIGURATION is not None:
     builtins.__import__ = _audited_import
-

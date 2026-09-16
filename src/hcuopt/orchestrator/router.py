@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from hcuopt.domain.enums import JobType
+from hcuopt.orchestrator.endpoint_validation import EndpointValidationCoordinator
 from hcuopt.orchestrator.framework_smoke import FrameworkSmokeCoordinator
 from hcuopt.orchestrator.manual_candidate import ManualCandidateCoordinator
 from hcuopt.orchestrator.stage0 import Stage0Coordinator
@@ -23,6 +24,7 @@ MANUAL_CANDIDATE_JOB_TYPES = frozenset(
         JobType.MANUAL_ADJUDICATE,
     }
 )
+ENDPOINT_VALIDATION_JOB_TYPES = frozenset({JobType.ENDPOINT_VALIDATION})
 
 
 class WorkflowRouter:
@@ -34,6 +36,7 @@ class WorkflowRouter:
         self.framework_smoke = FrameworkSmokeCoordinator(repository)
         self.stage0 = Stage0Coordinator(repository)
         self.manual_candidate = ManualCandidateCoordinator(repository)
+        self.endpoint_validation = EndpointValidationCoordinator(repository)
 
     def start_after_baseline(
         self, task_id: UUID, baseline: Mapping[str, Any]
@@ -49,6 +52,8 @@ class WorkflowRouter:
             self.stage0.advance(materialized)
         elif job_type in MANUAL_CANDIDATE_JOB_TYPES:
             self.manual_candidate.advance(materialized)
+        elif job_type in ENDPOINT_VALIDATION_JOB_TYPES:
+            self.endpoint_validation.advance(materialized)
         else:
             self.walking.advance(materialized)
 

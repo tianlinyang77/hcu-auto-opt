@@ -18,6 +18,10 @@ from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
+from hcuopt.contracts.endpoint_control_v1 import (
+    EndpointValidationRunCreate,
+    EndpointValidationRunView,
+)
 from hcuopt.contracts.formal_evidence_acceptance_v1 import FormalEvidenceAcceptanceReport
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
@@ -107,6 +111,7 @@ from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationEvidenceReadService,
     AgentGenerationReadModelError,
 )
+from hcuopt.evaluation.endpoint_workload import load_endpoint_workload_spec
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.evaluation.formal_evidence_reporting import (
     FormalEvidenceAcceptanceReportError,
@@ -1072,6 +1077,42 @@ def create_app(
         stage0_run_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).finalize_stage0_run(stage0_run_id)
+
+    @application.post(
+        "/v1/endpoint-validation-runs",
+        response_model=EndpointValidationRunView,
+        status_code=201,
+    )
+    def create_endpoint_validation_run(
+        payload: EndpointValidationRunCreate, request: Request
+    ) -> dict[str, Any]:
+        frozen = load_endpoint_workload_spec(
+            Path(__file__).resolve().parents[3]
+            / "config/workloads/bw20-sglang-endpoint-provisional-v1.yaml"
+        )
+        if payload.workload != frozen:
+            raise Conflict("endpoint workload differs from the repository-frozen document")
+        target = targets.load(payload.workload.target_id)
+        profile = profiles.require(payload.adapter_profile)
+        if profile.implementation_kind != "real":
+            raise Conflict("Endpoint Validation requires a real Adapter Profile")
+        profile.validate_target(target, scope="endpoint_validation")
+        return repo(request).create_endpoint_validation_run(payload)
+
+    @application.get(
+        "/v1/endpoint-validation-runs/{endpoint_run_id}",
+        response_model=EndpointValidationRunView,
+    )
+    def get_endpoint_validation_run(
+        endpoint_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).get_endpoint_validation_run(endpoint_run_id)
+
+    @application.get("/v1/endpoint-validation-runs/{endpoint_run_id}/summary")
+    def get_endpoint_validation_summary(
+        endpoint_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).endpoint_validation_summary(endpoint_run_id)
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:

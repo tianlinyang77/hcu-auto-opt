@@ -230,6 +230,7 @@ def _copy_verified(source: Path, destination: Path) -> str:
 def _acquisition_spec(
     *, endpoint: Any, smoke: Any, arm: str, ordinal: int,
     warmup_requests: int, measured_requests: int,
+    ready_timeout_seconds: int, request_timeout_seconds: int,
 ) -> dict[str, Any]:
     smoke_spec = smoke.model_dump(mode="json")
     smoke_spec.update(
@@ -246,6 +247,8 @@ def _acquisition_spec(
         generate_path=endpoint.endpoint_path,
         attention_backend=endpoint.attention_backend,
         page_size=endpoint.page_size,
+        ready_timeout_seconds=float(ready_timeout_seconds),
+        request_timeout_seconds=float(request_timeout_seconds),
     )
     expected_hash = CANDIDATE_MODULE_HASH if arm == "candidate" else BASELINE_MODULE_HASH
     return {
@@ -269,11 +272,14 @@ def _acquisition_spec(
 def prepare_endpoint_run(
     *, repository: Path, destination: Path, run_id: UUID, fencing_token: int,
     target: TargetSpec, warmup_requests: int = 1, measured_requests: int = 2,
+    ready_timeout_seconds: int = 300, request_timeout_seconds: int = 60,
 ) -> PreparedEndpointRun:
     """Freeze one complete provisional ABBA group without remote or HCU access."""
 
     if not 1 <= warmup_requests <= 10_000 or not 1 <= measured_requests <= 100_000:
         raise ValueError("endpoint request budget is outside the protocol range")
+    if not 1 <= ready_timeout_seconds <= 3600 or not 1 <= request_timeout_seconds <= 600:
+        raise ValueError("endpoint timeout budget is outside the protocol range")
     repository = repository.absolute()
     if repository.resolve(strict=True) != repository:
         raise ValueError("redirected endpoint repository")
@@ -311,6 +317,8 @@ def prepare_endpoint_run(
             ordinal=ordinal,
             warmup_requests=warmup_requests,
             measured_requests=measured_requests,
+            ready_timeout_seconds=ready_timeout_seconds,
+            request_timeout_seconds=request_timeout_seconds,
         )
         _write_json(inputs / name, spec)
         hashes[name] = _sha256(inputs / name)
@@ -335,6 +343,8 @@ def prepare_endpoint_run(
         "acquisition_order": list(ACQUISITION_ORDER),
         "warmup_requests": warmup_requests,
         "measured_requests": measured_requests,
+        "ready_timeout_seconds": ready_timeout_seconds,
+        "request_timeout_seconds": request_timeout_seconds,
         "input_sha256": dict(sorted(hashes.items())),
         "candidate_artifact_path": SIGNED_ARTIFACT_PATH,
         "candidate_artifact_sha256": CANDIDATE_MODULE_HASH,

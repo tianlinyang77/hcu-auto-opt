@@ -27,10 +27,14 @@ MANUAL_CANDIDATE_CAPABILITIES = frozenset(
         "resource_cleaner",
     }
 )
+ENDPOINT_VALIDATION_CAPABILITIES = frozenset(
+    {"endpoint_measurement_runner", "resource_cleaner"}
+)
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 REAL_STAGE0_PROFILE = "nmz36-stage0-v2"
 REAL_MANUAL_CANDIDATE_PROFILE = "nmz36-m1-manual-v1"
 BW20_MANUAL_CANDIDATE_PROFILE = "bw20-m1-manual-v1"
+BW20_ENDPOINT_VALIDATION_PROFILE = "bw20-endpoint-provisional-v1"
 # Compatibility name for S0-B callers. Measurement is an internal delegate of the
 # single public Stage 0 worker profile, not a separately claimable profile.
 REAL_STAGE0_MEASUREMENT_PROFILE = REAL_STAGE0_PROFILE
@@ -66,6 +70,14 @@ class AdapterProfile:
                 f"{', '.join(missing)}"
             )
 
+    def require_endpoint_validation(self) -> None:
+        missing = sorted(ENDPOINT_VALIDATION_CAPABILITIES - self.capabilities)
+        if missing:
+            raise AdapterUnavailable(
+                f"adapter profile {self.name} lacks Endpoint Validation capabilities: "
+                f"{', '.join(missing)}"
+            )
+
     def validate_target(
         self,
         target: TargetSpec,
@@ -77,6 +89,8 @@ class AdapterProfile:
             self.require_stage0()
         elif scope == "optimization":
             self.require_manual_candidate()
+        elif scope == "endpoint_validation":
+            self.require_endpoint_validation()
         else:
             self.require_framework_smoke()
         if self.implementation_kind == "real":
@@ -156,4 +170,14 @@ def real_manual_candidate_profile(
         name=name,
         implementation_kind="real",
         capabilities=MANUAL_CANDIDATE_CAPABILITIES,
+    )
+
+
+def bw20_endpoint_validation_profile() -> AdapterProfile:
+    """Opt-in only after the BW20 endpoint Worker passes composition tests."""
+
+    return AdapterProfile(
+        name=BW20_ENDPOINT_VALIDATION_PROFILE,
+        implementation_kind="real",
+        capabilities=ENDPOINT_VALIDATION_CAPABILITIES,
     )

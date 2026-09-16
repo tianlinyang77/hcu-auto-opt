@@ -5,6 +5,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.interfaces import (
+    EndpointMeasurementRunner,
     ManualCandidateAdjudicatorAdapter,
     ManualKernelCorrectnessAdapter,
     ManualPerformanceMeasurementHarness,
@@ -182,6 +183,22 @@ class JobHandlers:
             "M1 performance result",
         )
         return result.model_dump(mode="json")
+
+    def handle_endpoint_validation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runner = self.adapters.require("endpoint_measurement_runner")
+        if not isinstance(runner, EndpointMeasurementRunner):
+            raise AdapterUnavailable(
+                "endpoint_validation requires the endpoint measurement interface"
+            )
+        result = dict(runner.run_endpoint_validation(payload, self.output_dir))
+        provenance = result.get("adapter_provenance")
+        if not isinstance(provenance, list) or runner.provenance.model_dump(
+            mode="json"
+        ) not in provenance:
+            raise ExecutionSafetyError(
+                "endpoint validation result omits the active Runner provenance"
+            )
+        return result
 
     def handle_manual_adjudicate(self, payload: dict[str, Any]) -> dict[str, Any]:
         adjudicator = self.adapters.require("candidate_adjudicator")

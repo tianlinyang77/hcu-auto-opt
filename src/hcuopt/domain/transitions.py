@@ -69,6 +69,9 @@ TASK_TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = {
     TaskState.MANUAL_ADJUDICATING: frozenset(
         {TaskState.AWAITING_SIGNOFF, TaskState.REJECTED, TaskState.CANCELLED}
     ),
+    TaskState.ENDPOINT_PROBING: frozenset(
+        {TaskState.ENDPOINT_PROVISIONAL_PASSED, TaskState.REJECTED, TaskState.CANCELLED}
+    ),
 }
 
 CANDIDATE_TRANSITIONS: Mapping[CandidateState, frozenset[CandidateState]] = {

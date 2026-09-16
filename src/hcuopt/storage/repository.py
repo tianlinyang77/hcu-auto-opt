@@ -151,6 +151,7 @@ from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.operator.start import FrozenScriptedPlans
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.agent_generation import AgentGenerationRepositoryMixin
+from hcuopt.storage.endpoint_validation import EndpointValidationRepositoryMixin
 from hcuopt.storage.formal_evidence_acceptance import FormalEvidenceAcceptanceRepositoryMixin
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
@@ -159,6 +160,7 @@ from hcuopt.targets import target_fingerprint
 class PostgresRepository(
     FormalEvidenceAcceptanceRepositoryMixin,
     AgentGenerationRepositoryMixin,
+    EndpointValidationRepositoryMixin,
 ):
     """Synchronous PostgreSQL boundary shared by API and maintenance commands.
 
@@ -6622,6 +6624,15 @@ class PostgresRepository(
                     job["job_id"],
                 ),
             ).fetchone()
+            if job["job_type"] == JobType.ENDPOINT_VALIDATION.value:
+                connection.execute(
+                    """
+                    UPDATE endpoint_validation_runs
+                    SET state = 'running', updated_at = now()
+                    WHERE job_id = %s AND state = 'queued'
+                    """,
+                    (job["job_id"],),
+                )
             connection.execute(
                 "UPDATE workers SET last_heartbeat_at = now() WHERE worker_id = %s",
                 (worker_id,),
