@@ -402,3 +402,23 @@
 - Do not repeat: do not add a password to the repository, CLI arguments, DSN output, or shell
   history merely to make a standalone operator connect.
 - Last updated: 2026-09-16
+
+# SGLang image import queries HCU identity during Triton import
+
+- Scope: project-local
+- Symptom: a CPU-only capability probe can load the SGLang distribution metadata but
+  `import sglang` fails with `RuntimeError: No HIP GPUs are available` after Triton HCU tuner
+  initialization. Without `/opt/hyhal`, the earlier failure is instead a missing
+  `librocm_smi64.so.2`.
+- Evidence: the pinned SGLang 0.5.12 image contains `bench_serving.py`, its main entrypoint,
+  `--output-file`, `--max-concurrency`, `--warmup-requests`, and TTFT/TPOT/stream support when
+  inspected without importing the package.
+- Cause: this image's Triton package queries `torch.cuda.get_device_name()` at module import time.
+- Proven workaround: for a no-HCU capability probe, inspect `importlib.metadata` and parse the
+  installed source without importing `sglang`. Reserve a leased HCU only for an execution probe.
+- Validation: a network-disabled, no-HCU container returned the exact SGLang distribution version
+  and benchmark CLI capability inventory; the temporary probe and container were removed.
+- Applies to: capability discovery in the pinned BW20 SGLang image.
+- Do not repeat: do not classify CPU import failure as missing SGLang, and do not map an HCU merely
+  to enumerate installed benchmark files.
+- Last updated: 2026-09-16

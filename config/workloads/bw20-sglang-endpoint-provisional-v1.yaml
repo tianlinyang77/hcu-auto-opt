@@ -1,0 +1,23 @@
+schema_version: sglang-endpoint-workload-v1
+workload_id: bw20-sglang-endpoint-provisional-v1
+target_id: bw20-sglang-0.5.12
+framework_version: 0.5.12+das.opt1.dtk2604.torch2100.2606021957.gdad582.hcuopt1
+source_commit: dad582f28458cd0e11e0be675fbe7fcc7ab65ac1
+image_digest: sha256:a959b1d27fa7fada705bcb619331b0bc9a41bd67a7c2462b515a77718f108f1c
+model_path: /public/opendas/DL_DATA/llm-models/qwen2.5/Qwen2.5-0.5B-Instruct
+served_model_name: hcuopt-endpoint-provisional
+endpoint_path: /generate
+tensor_parallel_size: 1
+closed_loop_concurrency: 1
+attention_backend: fa3
+page_size: 64
+prompt: The capital of France is
+expected_prompt_tokens: 5
+expected_completion_tokens: 8
+temperature: 0.0
+sampling_seed: 0
+ignore_eos: true
+stream: false
+cache_policy: fresh_namespace_per_acquisition
+cpu_affinity: 64-79
+numa_node: 4
