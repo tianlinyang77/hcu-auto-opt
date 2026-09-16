@@ -5,6 +5,7 @@ from hcuopt.deployment.bw20_m1_performance_recovery import (
     PERFORMANCE_JOB_ID,
     RESOURCE_ID,
     TASK_ID,
+    _validate_mirror_snapshot,
     _validate_snapshot,
 )
 
@@ -83,3 +84,31 @@ def test_recovery_rejects_any_drift() -> None:
         assert "exact cleaned namespace" in str(exc)
     else:
         raise AssertionError("drifted recovery snapshot must be rejected")
+
+
+def test_exact_cleaned_local_mirror_failure_is_recoverable() -> None:
+    task, candidate, job, jobs, resource = _snapshot()
+    job.update(
+        attempts=4,
+        max_attempts=4,
+        last_error={
+            "code": "CalledProcessError",
+            "message": (
+                "Command ['scp', 'github@10.17.1.20:/home/github/hcu-auto-opt-runtime/"
+                "bw20-m1/run/evidence/cache-namespace.json', '/home/github/"
+                "hcu-auto-opt-runtime/bw20-m1-worker-raw/run/cache-namespace.json'] "
+                "returned non-zero exit status 1."
+            ),
+        },
+    )
+    resource["fencing_token"] = 47
+    _validate_mirror_snapshot(
+        task=task,
+        candidate=candidate,
+        job=job,
+        jobs=jobs,
+        resource=resource,
+        signoff_exists=False,
+        evaluation_count=0,
+        namespace_authorization_count=1,
+    )
