@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,7 @@ def test_sitecustomize_attests_the_module_imported_by_the_real_process(tmp_path:
     assert value["module_name"] == "target_overlay"
     assert value["module_sha256"] == expected
     assert value["process_id"] > 0
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o444
 
 
 def test_sitecustomize_fails_import_when_module_hash_differs(tmp_path: Path) -> None:

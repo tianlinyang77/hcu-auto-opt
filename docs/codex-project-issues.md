@@ -1,5 +1,23 @@
 # Codex 项目本地已知问题
 
+## 容器内发布的激活证据必须显式转换为宿主可读只读文件
+
+- Scope: project-local；2026-09-16。
+- Symptom: SGLang Baseline 第 0 次已经 ready 并完成请求，Worker 在容器退出后读取
+  `activation.json` 时收到 `PermissionError`，因此没有接受该次采集。
+- Evidence: Run `c8e2748a-091c-553d-9ac8-debb2362e166` 使用 fence 54；输出目录和其他
+  evidence 均可读，只有 `activation.json` 为 `0600 nobody:nobody`。失败后清理健康，HCU 7
+  回到 auto/空闲，资源账本 available。
+- Cause: 输出目录的 UID 65534 ACL 只授权容器写入；`tempfile.mkstemp()` 创建的文件默认
+  0600，目录 ACL 不会自动给宿主 Worker 增加文件读取权限。
+- Proven workaround: 只有在原子发布成功，或现有激活证据通过完整稳定身份等价检查后，才把
+  文件模式改为 0444。不得把输出目录或文件改成可写共享权限。
+- Validation: sitecustomize 单测要求正式证据模式为 0444，多进程同身份复用和异身份拒绝
+  用例继续通过；仍需下一次独立 Run 完成宿主实读。
+- Applies to: 容器使用非宿主 UID 生成、宿主 Worker 随后独立读取的 Endpoint 激活证据。
+- Do not repeat: 不要假设目录 ACL 会传播到新文件，也不要用 0777/0666 绕过跨 UID 读取。
+- Last updated: 2026-09-16
+
 ## SGLang 多进程导入不能把动态 PID 差异当成 Overlay 身份漂移
 
 - Scope: project-local；2026-09-16。

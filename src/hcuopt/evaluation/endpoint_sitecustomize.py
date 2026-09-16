@@ -150,8 +150,10 @@ def _publish(path: Path, value: dict[str, Any]) -> None:
         except FileExistsError:
             if not _matches_existing_attestation(path, value):
                 raise RuntimeError("endpoint activation evidence already differs") from None
+            path.chmod(0o444)
         else:
             temporary.unlink()
+            path.chmod(0o444)
     finally:
         temporary.unlink(missing_ok=True)
 
