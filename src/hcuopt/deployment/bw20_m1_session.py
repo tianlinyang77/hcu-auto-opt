@@ -71,7 +71,11 @@ class BW20M1ProcessSession:
         remaining = self.deadline - self.monotonic()
         if remaining <= 0 or self.cancelled():
             raise BW20M1SessionError("lease expired or process cancelled")
-        return min(180.0, remaining)
+        # Every Docker/stdio operation is routed through BW20's bounded
+        # transport, whose per-call safety ceiling is 90 seconds.  The process
+        # session may live for up to 480 seconds, but that total budget must not
+        # be forwarded as one transport timeout.
+        return min(90.0, remaining)
 
     def open(self) -> BW20M1ProcessSession:
         if self.create_attempted or self.closed:

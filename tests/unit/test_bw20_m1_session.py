@@ -103,14 +103,17 @@ class _Transport:
     def __init__(self, channel):
         self.channel = channel
         self.removed = False
+        self.timeouts = []
 
     def create(self, plan, timeout):
         assert timeout > 0
+        self.timeouts.append(("create", timeout))
         self.plan = plan
         return CID
 
     def start(self, cid, timeout):
         assert cid == CID and timeout > 0
+        self.timeouts.append(("start", timeout))
         return self.channel
 
     def inspect(self, cid, timeout):
@@ -160,6 +163,7 @@ def _session(ready=None):
 def test_session_keeps_container_pid_evidence_and_cleans_exact_cid() -> None:
     session, channel, transport = _session()
     session.open()
+    assert all(timeout <= 90 for _, timeout in transport.timeouts)
     assert session.process_id == 2
     assert session.identity_observations[-1]["host_measured"]["host_pid"] == 1002
     assert session.request({"op": "synchronize"})["event"] == "synchronized"

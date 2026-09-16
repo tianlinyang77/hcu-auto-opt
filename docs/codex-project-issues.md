@@ -301,3 +301,20 @@
 - Applies to: Windows checkout to Linux BW20 controller deployments.
 - Do not repeat: do not copy an unconstrained Windows working tree as the formal controller.
 - Last updated: 2026-09-16
+
+# BW20 M1 total session budget is not a transport timeout
+
+- Scope: project-local
+- Symptom: a formal Performance attempt failed before Docker creation with
+  `transport timeout must be within 90 seconds`.
+- Evidence: `BW20M1ProcessSession._guard()` returned up to 180 seconds from the 480-second
+  total session budget, while every Docker/JSON transport call rejects values above 90 seconds.
+  No sample was produced and the failed attempt remains recorded.
+- Cause: the long-lived process budget and per-call transport timeout were conflated.
+- Proven workaround: retain the 480-second total deadline but cap each guarded transport/stdio
+  call at 90 seconds; verify create/start receive only bounded timeouts.
+- Validation: the M1 session unit test now records create/start timeouts and rejects regressions
+  above the transport ceiling.
+- Applies to: BW20 M1 Performance process creation and stdio requests.
+- Do not repeat: do not raise the transport ceiling to match a whole-session budget.
+- Last updated: 2026-09-16
