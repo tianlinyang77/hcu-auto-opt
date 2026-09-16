@@ -29,6 +29,34 @@ def pids():
     if len(entries)>4096 or any(not p.name.isdecimal() for p in entries):
         raise ValueError('invalid KFD inventory')
     return sorted(int(p.name) for p in entries)
+def properties(path):
+    values={}
+    for line in read(path).splitlines():
+        parts=line.split()
+        if len(parts)==2: values[parts[0]]=parts[1]
+    return values
+def topology():
+    root=pathlib.Path('/sys/class/kfd/kfd/topology/nodes')
+    entries=list(root.iterdir())
+    if len(entries)>4096 or any(not p.name.isdecimal() for p in entries):
+        raise ValueError('invalid KFD topology')
+    result=[]
+    for node in sorted(entries,key=lambda p:int(p.name)):
+        values=properties(node/'properties')
+        result.append(dict(node=int(node.name),gpu_id=read(node/'gpu_id',128).strip(),
+                           drm_render_minor=values.get('drm_render_minor'),
+                           location_id=values.get('location_id')))
+    return result
+def queue_gpu_ids(pid):
+    root=pathlib.Path('/sys/class/kfd/kfd/proc')/str(pid)/'queues'
+    before=list(root.iterdir())
+    if len(before)>65536 or any(not p.name.isdecimal() for p in before):
+        raise ValueError('invalid KFD queue inventory')
+    names=sorted((p.name for p in before),key=int)
+    values=[read(root/name/'gpuid',128).strip() for name in names]
+    after=sorted((p.name for p in root.iterdir()),key=int)
+    if names!=after: raise ValueError('KFD queue inventory changed')
+    return values
 def smi(*args):
     p=subprocess.run(('/opt/hyhal/bin/hy-smi',)+args,stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE,timeout=15,check=False)
@@ -44,6 +72,7 @@ if host!='github-bw20' or root.name!='0000:b1:00.0':
     raise ValueError('wrong host or physical device')
 before=pids()
 stats={pid:read('/proc/%d/stat'%pid) for pid in before}
+nodes=topology()
 device=smi('-d','7','--showtemp','--showclocks','--showperflevel','--showpower')
 process_output=smi('--showpids')
 processes=[]
@@ -52,7 +81,7 @@ for pid in before:
     exe=executable(base+'exe')
     processes.append(dict(pid=pid,stat_before=stats[pid],stat_after=read(base+'stat'),
                           executable=exe['value'],executable_status=exe['status'],
-                          comm=read(base+'comm',4000)))
+                          comm=read(base+'comm',4000),queue_gpu_ids=queue_gpu_ids(pid)))
 after=pids()
 if before!=after: raise ValueError('KFD inventory changed during observation')
 files={name:read(root/name,8192) for name in (
@@ -61,7 +90,8 @@ files={name:read(root/name,8192) for name in (
 print(json.dumps(dict(schema_version='bw20-stage0-telemetry-v1',host=host,pci=root.name,
     boot_id=read('/proc/sys/kernel/random/boot_id',128).strip(),files=files,
     smi_device=device,smi_processes=process_output,kfd_before=before,kfd_after=after,
-    processes=processes,scope='non_atomic_readonly_host_observation')))
+    processes=processes,kfd_topology=nodes,
+    scope='non_atomic_readonly_host_observation')))
 """
 
 

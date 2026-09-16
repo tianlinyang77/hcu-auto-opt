@@ -35,6 +35,72 @@ class BW20M1AllocatorCorrectnessEvidenceProducer(Nmz36M1AllocatorCorrectnessEvid
     """Reuse the generic allocator oracle under the explicit BW20 policy."""
 
 
+_EXPECTED_RENDER_MINOR = 135
+_EXPECTED_KFD_GPU_ID = 3004
+
+
+def _resource_background_processes(
+    raw: Mapping[str, Any], snapshot: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Attribute the global KFD inventory to the fixed BW20 HCU 7 resource.
+
+    The complete global inventory remains in ``raw`` and ``snapshot``.  This
+    function only derives the subset that can be proven to own a queue on the
+    accepted renderD135/gpu_id=3004 mapping.  Missing or changing attribution is
+    rejected instead of being treated as idle.
+    """
+
+    topology = raw.get("kfd_topology")
+    processes = raw.get("processes")
+    observed = snapshot.get("background_processes")
+    if not isinstance(topology, list) or not isinstance(processes, list) or not isinstance(
+        observed, list
+    ):
+        raise ExecutionSafetyError("BW20 KFD device attribution is missing")
+
+    known_gpu_ids: set[int] = set()
+    target_nodes: list[Mapping[str, Any]] = []
+    for entry in topology:
+        if not isinstance(entry, Mapping):
+            raise ExecutionSafetyError("BW20 KFD topology entry is invalid")
+        try:
+            gpu_id = int(entry["gpu_id"])
+            render_minor = int(entry["drm_render_minor"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionSafetyError("BW20 KFD topology is incomplete") from exc
+        if gpu_id > 0:
+            if gpu_id in known_gpu_ids:
+                raise ExecutionSafetyError("BW20 KFD topology contains a duplicate GPU id")
+            known_gpu_ids.add(gpu_id)
+        if render_minor == _EXPECTED_RENDER_MINOR:
+            target_nodes.append(entry)
+    if len(target_nodes) != 1 or int(target_nodes[0]["gpu_id"]) != _EXPECTED_KFD_GPU_ID:
+        raise ExecutionSafetyError("BW20 renderD135 to KFD GPU mapping drifted")
+
+    observed_by_pid = {
+        item.get("process_id"): item for item in observed if isinstance(item, Mapping)
+    }
+    if set(observed_by_pid) != {item.get("pid") for item in processes}:
+        raise ExecutionSafetyError("BW20 KFD process attribution is incomplete")
+
+    resource_processes = []
+    for process in processes:
+        if not isinstance(process, Mapping):
+            raise ExecutionSafetyError("BW20 KFD process attribution entry is invalid")
+        queue_ids = process.get("queue_gpu_ids")
+        if not isinstance(queue_ids, list) or not queue_ids:
+            raise ExecutionSafetyError("BW20 KFD process has no attributable device queue")
+        try:
+            gpu_ids = {int(value) for value in queue_ids}
+        except (TypeError, ValueError) as exc:
+            raise ExecutionSafetyError("BW20 KFD queue GPU id is invalid") from exc
+        if not gpu_ids or not gpu_ids.issubset(known_gpu_ids):
+            raise ExecutionSafetyError("BW20 KFD queue references an unknown GPU id")
+        if _EXPECTED_KFD_GPU_ID in gpu_ids:
+            resource_processes.append(dict(observed_by_pid[process["pid"]]))
+    return resource_processes
+
+
 class BW20M1IdleGuard:
     """Read-only pre/post guard for the accepted HCU 7 validation window."""
 
@@ -61,8 +127,17 @@ class BW20M1IdleGuard:
         raw, snapshot = self.observe()
         device = snapshot["device"]
         files = raw["files"]
+        resource_processes = _resource_background_processes(raw, snapshot)
+        self.observations[-1].update(
+            {
+                "target_render_minor": _EXPECTED_RENDER_MINOR,
+                "target_kfd_gpu_id": _EXPECTED_KFD_GPU_ID,
+                "resource_background_processes": resource_processes,
+                "global_kfd_process_count": len(snapshot["background_processes"]),
+            }
+        )
         if (
-            snapshot["background_processes"]
+            resource_processes
             or device["performance_level"] != "auto"
             or int(files["gpu_busy_percent"]) != 0
             or not 0 <= int(files["mem_info_vram_used"]) <= 4 * 1024 * 1024
