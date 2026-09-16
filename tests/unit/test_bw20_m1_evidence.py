@@ -87,6 +87,25 @@ def test_mirror_downloads_one_hash_bound_allowlisted_file(tmp_path, monkeypatch)
     assert mirror.transport.reads == 2
 
 
+def test_local_evidence_copy_is_no_follow_and_receipt_bound(tmp_path) -> None:
+    source = tmp_path / "source.json"
+    destination = tmp_path / "destination.json"
+    source.write_bytes(PAYLOAD)
+    observed = source.stat()
+    receipt = {
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "size": observed.st_size,
+        "mtime_ns": observed.st_mtime_ns,
+    }
+    evidence.copy_local_evidence(source, destination, receipt)
+    assert destination.read_bytes() == PAYLOAD
+
+    drifted = tmp_path / "drifted.json"
+    with pytest.raises(RuntimeError, match="differs"):
+        evidence.copy_local_evidence(source, drifted, {**receipt, "inode": -1})
+
+
 @pytest.mark.parametrize("name", ["../secret", "stdout.log", "device-event-1.json"])
 def test_mirror_rejects_names_outside_evidence_allowlist(tmp_path, monkeypatch, name) -> None:
     mirror = _mirror(tmp_path, monkeypatch)

@@ -7,9 +7,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
 from pathlib import Path
 
+from hcuopt.deployment.bw20_local_runner import BW20LocalCommandRunner
 from hcuopt.deployment.bw20_m1_runtime import BW20M1ContainerPlan
 from hcuopt.deployment.bw20_pair_bridge import BW20Transport
 from hcuopt.measurement.models import RawEvidenceFileV2
@@ -59,9 +63,48 @@ def _sha256(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def copy_local_evidence(
+    source: Path,
+    destination: Path,
+    receipt: dict[str, object],
+) -> None:
+    """Copy a no-follow immutable file when controller and HCU host are identical."""
+
+    source, destination = source.absolute(), destination.absolute()
+    before = source.lstat()
+    if (
+        source.resolve(strict=True) != source
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > 4 * 1024 * 1024
+        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        != (
+            receipt.get("device"),
+            receipt.get("inode"),
+            receipt.get("size"),
+            receipt.get("mtime_ns"),
+        )
+    ):
+        raise RuntimeError("local BW20 M1 evidence differs from its read receipt")
+    descriptor = os.open(
+        source,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
+    with os.fdopen(descriptor, "rb") as reader:
+        opened = os.fstat(reader.fileno())
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("local BW20 M1 evidence changed during open")
+        with destination.open("xb") as writer:
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
+        after = os.fstat(reader.fileno())
+        if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise RuntimeError("local BW20 M1 evidence changed during copy")
+
+
 class BW20M1EvidenceMirror:
     def __init__(self, *, plan: BW20M1ContainerPlan, runner, local_root: Path):
         self.plan = plan
+        self.runner = runner
         self.transport = BW20Transport(runner)
         self.local_root = local_root.resolve()
         self.observations: list[dict[str, object]] = []
@@ -79,7 +122,10 @@ class BW20M1EvidenceMirror:
         destination = self.local_root / name
         if destination.exists() or destination.is_symlink():
             raise RuntimeError("local BW20 M1 evidence destination already exists")
-        self.transport.copy(remote, destination, download=True)
+        if isinstance(self.runner, BW20LocalCommandRunner):
+            copy_local_evidence(Path(remote), destination, before)
+        else:
+            self.transport.copy(remote, destination, download=True)
         if _sha256(destination) != expected_hash or destination.stat().st_size != before["size"]:
             raise RuntimeError("downloaded BW20 M1 evidence differs from its remote pin")
         after = self._read(remote)
@@ -116,5 +162,6 @@ def host_script_is_python36_compatible() -> bool:
 __all__ = [
     "BW20M1EvidenceMirror",
     "READ_EVIDENCE",
+    "copy_local_evidence",
     "host_script_is_python36_compatible",
 ]

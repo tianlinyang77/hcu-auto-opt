@@ -339,3 +339,23 @@
 - Do not repeat: do not run the M1 container as the host deployment UID and do not add sudo or
   privileged namespace readers merely to bypass procfs permissions.
 - Last updated: 2026-09-16
+
+# BW20 local controller must not SCP evidence through its own SSH endpoint
+
+- Scope: project-local
+- Symptom: after real container activation and process binding, M1 evidence mirroring failed on
+  `scp github@10.17.1.20:<source> <destination>` before accepting a performance sample.
+- Evidence: source evidence existed as a regular read-only file with the Worker-reported Hash;
+  controller and HCU execution both ran on `github-bw20`, so the SSH loopback added an unrelated
+  credential/host-key dependency. Cleanup succeeded and HCU 7 returned idle in `auto`.
+- Cause: `BW20M1EvidenceMirror` reused the remote-host transport even when passed the explicit
+  `BW20LocalCommandRunner`.
+- Proven workaround: for the exact local-runner type, copy through a no-follow file descriptor
+  bound to the prior device/inode/size/mtime receipt and an exclusive destination. Keep SCP for
+  genuine remote runners, then re-read the source and verify the destination SHA256 as before.
+- Validation: 17 focused evidence/session/factory/worker tests pass, including receipt drift
+  rejection; the formal retry must still prove the live local path.
+- Applies to: BW20 M1 Workers deployed directly on the target host.
+- Do not repeat: do not add SSH credentials or weaken `StrictHostKeyChecking` to make host-local
+  evidence copying work.
+- Last updated: 2026-09-16
