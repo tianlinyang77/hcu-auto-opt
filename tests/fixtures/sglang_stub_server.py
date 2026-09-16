@@ -26,10 +26,13 @@ def main() -> int:
     parser.add_argument("--ignore-term", action="store_true")
     parser.add_argument("--oversized-bytes", type=int, default=0)
     parser.add_argument("--spawn-child-ignore-term", action="store_true")
+    parser.add_argument("--import-module")
     args = parser.parse_args()
 
     if args.exit_immediately:
         return 17
+    if args.import_module:
+        __import__(args.import_module)
     state = {"ready_count": 0, "generate_count": 0, "child_pid": None}
     if args.ignore_term:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -62,6 +65,7 @@ def _spec(port: int, **updates: Any) -> dict[str, Any]:
         "expected_prompt_tokens": 5,
         "expected_completion_tokens": 2,
         "ignore_eos": True,
+        "activation_attestation": None,
         "smoke_spec": smoke_spec,
     }
     value.update(updates)
@@ -81,8 +85,13 @@ def test_provisional_acquisition_records_warmup_and_each_measured_request(
 ) -> None:
     port = _free_port()
     evidence = tmp_path / "acquisition"
+    cache = tmp_path / "cache"
+    cache.mkdir()
     result = runner.run_acquisition(
-        _spec(port), evidence, server_argv_override=_stub_argv(port)
+        _spec(port),
+        evidence,
+        server_argv_override=_stub_argv(port),
+        cache_parent=cache,
     )
 
     assert result == {
@@ -92,6 +101,7 @@ def test_provisional_acquisition_records_warmup_and_each_measured_request(
         "completed_requests": 2,
         "expected_requests": 2,
         "cleanup_succeeded": True,
+        "cache_cleanup_succeeded": True,
         "error": None,
         "producer_verdict": None,
         "automatic_release_allowed": False,
@@ -107,15 +117,23 @@ def test_provisional_acquisition_records_warmup_and_each_measured_request(
     assert all(item["succeeded"] for item in samples)
     assert [item["completion_tokens"] for item in samples] == [2, 2]
     assert _read(evidence / "stop.json")["cleanup_succeeded"] is True
+    namespace = _read(evidence / "cache-namespace.json")
+    assert namespace["empty_before_start"] is True
+    assert namespace["namespace_hash"].startswith("sha256:")
+    assert _read(evidence / "cache-cleanup.json")["removed"] is True
+    assert not list(cache.iterdir())
 
 
 def test_token_mismatch_fails_closed_and_preserves_raw_response(tmp_path: Path) -> None:
     port = _free_port()
     evidence = tmp_path / "token-mismatch"
+    cache = tmp_path / "cache"
+    cache.mkdir()
     result = runner.run_acquisition(
         _spec(port, expected_completion_tokens=3),
         evidence,
         server_argv_override=_stub_argv(port),
+        cache_parent=cache,
     )
 
     assert result["status"] == "failed"
@@ -128,10 +146,13 @@ def test_token_mismatch_fails_closed_and_preserves_raw_response(tmp_path: Path) 
 def test_http_failure_stops_acquisition_without_dropping_failed_request(tmp_path: Path) -> None:
     port = _free_port()
     evidence = tmp_path / "http-failure"
+    cache = tmp_path / "cache"
+    cache.mkdir()
     result = runner.run_acquisition(
         _spec(port),
         evidence,
         server_argv_override=_stub_argv(port, "--generate-status", "500"),
+        cache_parent=cache,
     )
 
     assert result["status"] == "failed"
@@ -142,13 +163,64 @@ def test_http_failure_stops_acquisition_without_dropping_failed_request(tmp_path
     assert result["cleanup_succeeded"] is True
 
 
+def test_required_activation_attestation_is_bound_to_imported_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    port = _free_port()
+    evidence = tmp_path / "activation"
+    cache = tmp_path / "cache"
+    hook = tmp_path / "hook"
+    modules = tmp_path / "modules"
+    cache.mkdir()
+    hook.mkdir()
+    modules.mkdir()
+    shutil.copyfile(
+        ROOT / "src" / "hcuopt" / "evaluation" / "endpoint_sitecustomize.py",
+        hook / "sitecustomize.py",
+    )
+    target = modules / "target_overlay.py"
+    target.write_text("VALUE = 7\n", encoding="utf-8")
+    expected = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((str(hook), str(modules))))
+    monkeypatch.setenv("HCUOPT_ENDPOINT_TARGET_MODULE", "target_overlay")
+    monkeypatch.setenv("HCUOPT_ENDPOINT_TARGET_PATH", str(target.resolve()))
+    monkeypatch.setenv("HCUOPT_ENDPOINT_TARGET_SHA256", expected)
+    monkeypatch.setenv(
+        "HCUOPT_ENDPOINT_ACTIVATION_PATH",
+        str((evidence / "activation.json").resolve()),
+    )
+    spec = _spec(
+        port,
+        activation_attestation={
+            "module_name": "target_overlay",
+            "module_path": str(target.resolve()),
+            "expected_sha256": expected,
+        },
+    )
+
+    result = runner.run_acquisition(
+        spec,
+        evidence,
+        server_argv_override=_stub_argv(port, "--import-module", "target_overlay"),
+        cache_parent=cache,
+    )
+
+    assert result["status"] == "succeeded", result
+    activation = _read(evidence / "activation.json")
+    assert activation["module_sha256"] == expected
+    assert activation["process_id"] == _read(evidence / "start.json")["pid"]
+
+
 def test_unknown_spec_field_fails_before_server_start(tmp_path: Path) -> None:
     port = _free_port()
     evidence = tmp_path / "invalid-spec"
     spec = _spec(port)
     spec["verdict"] = "faster"
     result = runner.run_acquisition(
-        spec, evidence, server_argv_override=_stub_argv(port)
+        spec,
+        evidence,
+        server_argv_override=_stub_argv(port),
+        cache_parent=tmp_path,
     )
 
     assert result["status"] == "failed"

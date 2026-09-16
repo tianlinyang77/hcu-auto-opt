@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
+from uuid import uuid4
 
 from hcuopt.evaluation import sglang_smoke_runner as smoke
 
@@ -28,6 +31,7 @@ EXPECTED_FIELDS = frozenset(
         "expected_prompt_tokens",
         "expected_completion_tokens",
         "ignore_eos",
+        "activation_attestation",
         "smoke_spec",
     }
 )
@@ -64,6 +68,25 @@ def validate_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
             raise EndpointRunnerError(f"endpoint {name} is outside the allowed range")
     if spec["ignore_eos"] is not True:
         raise EndpointRunnerError("endpoint acquisition v1 requires ignore_eos=true")
+    activation = spec["activation_attestation"]
+    if activation is not None:
+        if not isinstance(activation, Mapping) or set(activation) != {
+            "module_name",
+            "module_path",
+            "expected_sha256",
+        }:
+            raise EndpointRunnerError("endpoint activation attestation is malformed")
+        if (
+            not isinstance(activation["module_name"], str)
+            or not activation["module_name"]
+            or not isinstance(activation["module_path"], str)
+            or not os.path.isabs(activation["module_path"])
+            or not isinstance(activation["expected_sha256"], str)
+            or len(activation["expected_sha256"]) != 71
+            or not activation["expected_sha256"].startswith("sha256:")
+        ):
+            raise EndpointRunnerError("endpoint activation attestation is malformed")
+        spec["activation_attestation"] = dict(activation)
     smoke_spec = smoke.validate_spec(spec["smoke_spec"])
     if smoke_spec["stream"] is not False:
         raise EndpointRunnerError("endpoint acquisition v1 requires non-streaming requests")
@@ -77,6 +100,7 @@ def run_acquisition(
     *,
     server_argv_override: Sequence[str] | None = None,
     formal_lifecycle: bool = False,
+    cache_parent: Path = Path("/tmp"),
 ) -> dict[str, Any]:
     smoke._prepare_evidence_dir(evidence_dir)
     spec_path = evidence_dir / "spec.json"
@@ -118,11 +142,18 @@ def run_acquisition(
     smoke._atomic_write_json(start_path, start_record)
     smoke._atomic_write_json(stop_path, stop_record)
     completed_requests = 0
+    cache_root: Path | None = None
+    cache_cleanup_succeeded = False
     spec: dict[str, Any] | None = None
     finalization_errors: list[str] = []
     try:
         spec = validate_spec(raw_spec)
         smoke._atomic_write_json(spec_path, spec)
+        cache_root = _prepare_cache_namespace(
+            evidence_dir,
+            cache_parent=cache_parent,
+            acquisition_ordinal=spec["acquisition_ordinal"],
+        )
         smoke_spec = spec["smoke_spec"]
         argv = list(server_argv_override or smoke.server_argv(smoke_spec))
         launched_argv = argv
@@ -164,6 +195,7 @@ def run_acquisition(
 
         opener = build_opener(ProxyHandler({}))
         smoke._wait_until_ready(smoke_spec, process, opener, ready_handle)
+        _require_activation_attestation(spec, evidence_dir)
         for ordinal in range(spec["warmup_requests"]):
             _run_request(
                 smoke_spec,
@@ -217,11 +249,28 @@ def run_acquisition(
                 smoke._finalize_stream(handle, temporary, final_path)
             except Exception as exc:
                 finalization_errors.append(f"finalize {label}: {type(exc).__name__}: {exc}")
+        try:
+            cache_cleanup_succeeded = _cleanup_cache_namespace(cache_root, cache_parent)
+            smoke._atomic_write_json(
+                evidence_dir / "cache-cleanup.json",
+                {
+                    "cache_root": str(cache_root) if cache_root is not None else None,
+                    "removed": cache_cleanup_succeeded,
+                },
+            )
+        except Exception as exc:
+            cache_cleanup_succeeded = False
+            finalization_errors.append(f"cleanup cache: {type(exc).__name__}: {exc}")
 
     if not stop_record.get("cleanup_succeeded") and primary_error is None:
         primary_error = {
             "type": "EndpointCleanupError",
             "message": "endpoint server cleanup was not confirmed",
+        }
+    if not cache_cleanup_succeeded and primary_error is None:
+        primary_error = {
+            "type": "EndpointCacheCleanupError",
+            "message": "endpoint cache namespace cleanup was not confirmed",
         }
     if finalization_errors and primary_error is None:
         primary_error = {
@@ -241,12 +290,95 @@ def run_acquisition(
         "completed_requests": completed_requests,
         "expected_requests": expected,
         "cleanup_succeeded": bool(stop_record.get("cleanup_succeeded")),
+        "cache_cleanup_succeeded": cache_cleanup_succeeded,
         "error": primary_error,
         "producer_verdict": None,
         "automatic_release_allowed": False,
     }
     smoke._atomic_write_json(result_path, result)
     return result
+
+
+def _prepare_cache_namespace(
+    evidence_dir: Path,
+    *,
+    cache_parent: Path,
+    acquisition_ordinal: int,
+) -> Path:
+    parent = cache_parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise EndpointRunnerError("endpoint cache parent is not a directory")
+    identifier = uuid4()
+    root = parent / f"hcuopt-endpoint-cache-{identifier}"
+    if root.exists() or root.is_symlink() or root.parent != parent:
+        raise EndpointRunnerError("endpoint cache namespace is not fresh")
+    root.mkdir(mode=0o700)
+    paths = {
+        "xdg": root / "xdg",
+        "huggingface": root / "huggingface",
+        "triton": root / "triton",
+    }
+    for path in paths.values():
+        path.mkdir(mode=0o700)
+        if any(path.iterdir()):
+            raise EndpointRunnerError("endpoint cache namespace is not empty")
+    os.environ["XDG_CACHE_HOME"] = str(paths["xdg"])
+    os.environ["HF_HOME"] = str(paths["huggingface"])
+    os.environ["TRITON_CACHE_DIR"] = str(paths["triton"])
+    identity = {
+        "schema_version": "sglang-endpoint-cache-v1",
+        "acquisition_ordinal": acquisition_ordinal,
+        "namespace_id": str(identifier),
+        "cache_root": str(root),
+        "paths": {name: str(path) for name, path in sorted(paths.items())},
+        "empty_before_start": True,
+        "device": root.stat().st_dev,
+        "inode": root.stat().st_ino,
+    }
+    encoded = json.dumps(
+        identity, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    identity["namespace_hash"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    smoke._atomic_write_json(evidence_dir / "cache-namespace.json", identity)
+    return root
+
+
+def _cleanup_cache_namespace(cache_root: Path | None, cache_parent: Path) -> bool:
+    if cache_root is None:
+        return True
+    parent = cache_parent.resolve(strict=True)
+    if (
+        cache_root.parent != parent
+        or not cache_root.name.startswith("hcuopt-endpoint-cache-")
+        or cache_root.is_symlink()
+    ):
+        raise EndpointRunnerError("refusing to clean an unowned endpoint cache")
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+    return not cache_root.exists()
+
+
+def _require_activation_attestation(spec: Mapping[str, Any], evidence_dir: Path) -> None:
+    expected = spec["activation_attestation"]
+    if expected is None:
+        return
+    path = evidence_dir / "activation.json"
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+        raise EndpointRunnerError("endpoint activation attestation is absent or unsafe")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EndpointRunnerError("endpoint activation attestation is invalid") from exc
+    if (
+        value.get("schema_version") != "sglang-endpoint-import-attestation-v1"
+        or value.get("module_name") != expected["module_name"]
+        or value.get("module_path") != expected["module_path"]
+        or value.get("module_sha256") != expected["expected_sha256"]
+        or type(value.get("process_id")) is not int
+        or value["process_id"] < 1
+        or type(value.get("captured_monotonic_ns")) is not int
+    ):
+        raise EndpointRunnerError("endpoint activation attestation differs from the frozen spec")
 
 
 def _run_request(
