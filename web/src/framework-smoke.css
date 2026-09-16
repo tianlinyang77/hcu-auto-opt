@@ -40,3 +40,14 @@
 .smoke-signoff :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 @media (max-width: 800px) { .smoke-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); } .smoke-columns { grid-template-columns: 1fr; gap: 0; } .smoke-verdict { display: block; } }
 @media (max-width: 480px) { .smoke-inspection { padding: 24px 16px; } .smoke-checks { grid-template-columns: 1fr; } }
+
+.m1-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
+.m1-metrics article { display: grid; gap: 8px; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.m1-metrics small, .m1-metrics span { color: var(--text-soft); }
+.m1-metrics strong { font-size: 1.35rem; color: var(--cyan); overflow-wrap: anywhere; }
+.m1-patch { padding: 16px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-deep); color: var(--text); }
+.m1-id-row { display: contents; }
+.m1-inspection .smoke-panel dl { display: grid; grid-template-columns: minmax(110px, .45fr) minmax(0, 1.55fr); gap: 8px 16px; }
+.m1-inspection .smoke-panel dt, .m1-inspection .smoke-panel dd { margin: 0; padding: 4px 0; }
+@media (max-width: 860px) { .m1-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .m1-metrics { grid-template-columns: 1fr; } .m1-inspection .smoke-panel dl { grid-template-columns: 1fr; } }
