@@ -121,9 +121,16 @@ class EndpointValidationJobResult(ContractModel):
         actual = tuple((item.acquisition_ordinal, item.arm) for item in self.acquisitions)
         if actual != expected:
             raise ValueError("endpoint result requires one complete ordered ABBA group")
-        hashes = [item.result_sha256 for item in self.acquisitions]
-        if len(hashes) != len(set(hashes)):
-            raise ValueError("endpoint acquisitions require distinct result evidence")
+        distinct_identity_fields = {
+            "evidence URI": [item.evidence_uri for item in self.acquisitions],
+            "activation evidence": [item.activation_sha256 for item in self.acquisitions],
+            "cache namespace evidence": [
+                item.cache_namespace_sha256 for item in self.acquisitions
+            ],
+        }
+        for label, values in distinct_identity_fields.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"endpoint acquisitions require distinct {label}")
         fence = self.cleanup_evidence.get("fence")
         health = self.cleanup_evidence.get("health")
         if (

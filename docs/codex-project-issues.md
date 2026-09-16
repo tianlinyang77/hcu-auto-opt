@@ -1,5 +1,22 @@
 # Codex 项目本地已知问题
 
+## Endpoint 成功摘要 Hash 不能承担采集新鲜性证明
+
+- Scope: project-local；2026-09-16。
+- Symptom: Run `9652100f-29a2-53d2-9a34-566649ee87fd` 的 B-C-C-B 四次采集全部
+  成功、Job 已 succeeded、清理健康，但工作流结算拒绝 `distinct result evidence`。
+- Evidence: 四个 `result.json` 都只包含同一协议版本、成功状态、请求数和 cleanup 布尔值，
+  因此内容与 SHA256 合法相同；四个 evidence URI、激活证明 Hash 和缓存命名空间 Hash 均不同。
+- Cause: `EndpointValidationJobResult` 错把确定性的成功摘要 Hash 当作新进程/新缓存身份。
+- Proven workaround: 允许相同的 `result_sha256`；分别强制 evidence URI、
+  `activation_sha256` 和 `cache_namespace_sha256` 在四次采集中唯一。ABBA 顺序、每次 cleanup、
+  最终 fence/health 和真实 Adapter Provenance 约束保持不变。
+- Validation: 契约测试覆盖相同成功摘要可接受，以及 URI、激活证明或缓存证明任一复用都拒绝；
+  部署后只 reconcile 已成功 Job，不重跑 HCU。
+- Applies to: BW20 provisional Endpoint B-C-C-B 的结果引用契约和工作流结算。
+- Do not repeat: 不要用可重复的状态摘要证明进程或缓存新鲜性，也不要为结算而重写已落库 Job 结果。
+- Last updated: 2026-09-16
+
 ## 容器内发布的激活证据必须显式转换为宿主可读只读文件
 
 - Scope: project-local；2026-09-16。

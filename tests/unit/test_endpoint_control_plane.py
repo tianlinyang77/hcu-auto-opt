@@ -98,7 +98,9 @@ def test_endpoint_job_result_requires_real_complete_abba_and_healthy_cleanup() -
                 acquisition_ordinal=ordinal,
                 arm=arm,
                 evidence_uri=f"file:///endpoint/{ordinal}",
-                result_sha256=_hash(30 + ordinal),
+                # A successful summary is intentionally deterministic across
+                # acquisitions; freshness comes from process/cache evidence.
+                result_sha256=_hash(30),
                 activation_sha256=_hash(40 + ordinal),
                 cache_namespace_sha256=_hash(50 + ordinal),
                 cleanup_succeeded=True,
@@ -122,6 +124,18 @@ def test_endpoint_job_result_requires_real_complete_abba_and_healthy_cleanup() -
 
     assert result.producer_verdict is None
     assert result.automatic_release_allowed is False
+    for field in ("evidence_uri", "activation_sha256", "cache_namespace_sha256"):
+        acquisitions = list(result.acquisitions)
+        acquisitions[1] = acquisitions[1].model_copy(
+            update={field: getattr(acquisitions[0], field)}
+        )
+        with pytest.raises(ValidationError, match="distinct"):
+            EndpointValidationJobResult.model_validate(
+                {
+                    **result.model_dump(mode="python"),
+                    "acquisitions": acquisitions,
+                }
+            )
     with pytest.raises(ValidationError, match="fenced cleanup"):
         EndpointValidationJobResult.model_validate(
             {
