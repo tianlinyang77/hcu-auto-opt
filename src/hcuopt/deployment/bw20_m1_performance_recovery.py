@@ -22,6 +22,7 @@ PERFORMANCE_JOB_ID = UUID("cae78bc9-122c-4d4e-89a9-18f6eaccbbb8")
 RESOURCE_ID = "bw20-sglang-0.5.12:hcu:7"
 FIX_COMMIT = "912b19032681f648f8a0efe7886b2de96208b8c2"
 MIRROR_FIX_COMMIT = "155b223020ad33f11a0e6b513a19a05dd5bb9874"
+ARTIFACT_FIX_COMMIT = "4294e8a11450ceb1658d89219872ecf66e877293"
 
 
 def _validate_snapshot(
@@ -350,19 +351,172 @@ def authorize_evidence_mirror_retry(repository: PostgresRepository) -> dict[str,
     }
 
 
+def authorize_artifact_staging_retry(repository: PostgresRepository) -> dict[str, Any]:
+    """Grant one audited retry after the exact host-local Artifact SCP failure."""
+
+    with repository.connection() as connection:
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE task_id=%s FOR UPDATE", (TASK_ID,)
+        ).fetchone()
+        candidate = connection.execute(
+            "SELECT * FROM candidates WHERE candidate_id=%s FOR UPDATE", (CANDIDATE_ID,)
+        ).fetchone()
+        job = connection.execute(
+            "SELECT * FROM jobs WHERE job_id=%s FOR UPDATE", (PERFORMANCE_JOB_ID,)
+        ).fetchone()
+        resource = connection.execute(
+            "SELECT * FROM resources WHERE resource_id=%s FOR UPDATE", (RESOURCE_ID,)
+        ).fetchone()
+        if any(value is None for value in (task, candidate, job, resource)):
+            raise RuntimeError("BW20 M1 retry cannot find the frozen authority rows")
+        if (
+            job["state"] == JobState.QUEUED.value
+            and job["attempts"] == 5
+            and job["max_attempts"] == 6
+            and task["state"] == TaskState.MANUAL_PERFORMANCE.value
+            and candidate["state"] == CandidateState.PERFORMANCE_RUNNING.value
+        ):
+            return {
+                "status": "already_authorized",
+                "job_id": str(PERFORMANCE_JOB_ID),
+                "attempts": 5,
+                "max_attempts": 6,
+            }
+        jobs = connection.execute(
+            "SELECT job_type, state FROM jobs WHERE task_id=%s ORDER BY created_at",
+            (TASK_ID,),
+        ).fetchall()
+        signoff_exists = connection.execute(
+            "SELECT 1 FROM manual_candidate_signoffs WHERE task_id=%s", (TASK_ID,)
+        ).fetchone() is not None
+        evaluation_count = connection.execute(
+            "SELECT count(*) AS value FROM evaluation_runs WHERE task_id=%s", (TASK_ID,)
+        ).fetchone()["value"]
+        mirror_authorization_count = connection.execute(
+            """
+            SELECT count(*) AS value FROM job_events
+            WHERE job_id=%s AND event_type='manual_infrastructure_retry_authorized'
+              AND details->>'fix_commit'=%s
+            """,
+            (PERFORMANCE_JOB_ID, MIRROR_FIX_COMMIT),
+        ).fetchone()["value"]
+        error = job.get("last_error") or {}
+        message = str(error.get("message", ""))
+        cleanup = resource.get("cleanup_evidence") or {}
+        expected_jobs = {
+            JobType.MANUAL_BUILD.value: JobState.SUCCEEDED.value,
+            JobType.MANUAL_CORRECTNESS.value: JobState.SUCCEEDED.value,
+            JobType.MANUAL_PERFORMANCE.value: JobState.FAILED.value,
+        }
+        if (
+            task["task_id"] != TASK_ID
+            or task["workflow_type"] != "manual_candidate"
+            or task["state"] != TaskState.REJECTED.value
+            or task["automatic_release_allowed"] is not False
+            or candidate["candidate_id"] != CANDIDATE_ID
+            or candidate["task_id"] != TASK_ID
+            or candidate["state"] != CandidateState.REJECTED.value
+            or candidate["verdict"] is not None
+            or candidate["evidence_bundle_id"] is not None
+            or job["job_id"] != PERFORMANCE_JOB_ID
+            or job["job_type"] != JobType.MANUAL_PERFORMANCE.value
+            or job["state"] != JobState.FAILED.value
+            or job["attempts"] != 5
+            or job["max_attempts"] != 5
+            or job["result"] is not None
+            or {row["job_type"]: row["state"] for row in jobs} != expected_jobs
+            or error.get("code") != "CalledProcessError"
+            or "scp" not in message
+            or "/formal-build-v10/artifacts/sha256/" not in message
+            or "/home/github/hcu-auto-opt-runtime/bw20-m1/" not in message
+            or "/candidate-overlay.py" not in message
+            or "returned non-zero exit status 1" not in message
+            or signoff_exists
+            or evaluation_count != 0
+            or mirror_authorization_count != 1
+            or resource["resource_id"] != RESOURCE_ID
+            or resource["state"] != "available"
+            or resource["owner_job_id"] is not None
+            or resource["lease_id"] is not None
+            or resource["fencing_token"] != 48
+            or cleanup.get("healthy") is not True
+            or cleanup.get("fence", {}).get("fenced") is not True
+            or cleanup.get("health", {}).get("healthy") is not True
+        ):
+            raise RuntimeError(
+                "BW20 M1 retry is allowed only for the exact cleaned local Artifact staging fault"
+            )
+        details = {
+            "actor": "codex-assisted-formal-operator",
+            "reason": (
+                "one bounded retry after the on-host Worker used an unnecessary SSH loopback "
+                "while staging the Hash-pinned Candidate Artifact"
+            ),
+            "job_id": str(PERFORMANCE_JOB_ID),
+            "candidate_id": str(CANDIDATE_ID),
+            "previous_attempts": 5,
+            "previous_max_attempts": 5,
+            "previous_error": job["last_error"],
+            "resource_fencing_token": resource["fencing_token"],
+            "fix_commit": ARTIFACT_FIX_COMMIT,
+            "automatic_release_allowed": False,
+        }
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state='queued', max_attempts=6, available_at=now() + interval '1 second',
+                claimed_by=NULL, claim_token=NULL, claimed_at=NULL, heartbeat_at=NULL,
+                lease_id=NULL, resource_id=NULL, fencing_token=NULL,
+                finished_at=NULL, updated_at=now()
+            WHERE job_id=%s
+            """,
+            (PERFORMANCE_JOB_ID,),
+        )
+        connection.execute(
+            "UPDATE tasks SET state=%s, version=version + 1, updated_at=now() WHERE task_id=%s",
+            (TaskState.MANUAL_PERFORMANCE.value, TASK_ID),
+        )
+        connection.execute(
+            "UPDATE candidates SET state=%s, updated_at=now() WHERE candidate_id=%s",
+            (CandidateState.PERFORMANCE_RUNNING.value, CANDIDATE_ID),
+        )
+        for table, identifier in (
+            ("job_events", PERFORMANCE_JOB_ID),
+            ("task_events", TASK_ID),
+        ):
+            key = "job_id" if table == "job_events" else "task_id"
+            connection.execute(
+                f"INSERT INTO {table} ({key}, event_type, details) VALUES (%s, %s, %s)",
+                (identifier, "manual_infrastructure_retry_authorized", Jsonb(details)),
+            )
+    return {
+        "status": "authorized",
+        "job_id": str(PERFORMANCE_JOB_ID),
+        "attempts": 5,
+        "max_attempts": 6,
+        "fix_commit": ARTIFACT_FIX_COMMIT,
+        "automatic_release_allowed": False,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reason", choices=("namespace", "evidence-mirror"), required=True)
+    parser.add_argument(
+        "--reason",
+        choices=("namespace", "evidence-mirror", "artifact-staging"),
+        required=True,
+    )
     args = parser.parse_args(argv)
     database_url = os.getenv("HCUOPT_DATABASE_URL")
     if not database_url:
         raise SystemExit("HCUOPT_DATABASE_URL is required")
     repository = PostgresRepository(database_url)
-    result = (
-        authorize_namespace_retry(repository)
-        if args.reason == "namespace"
-        else authorize_evidence_mirror_retry(repository)
-    )
+    if args.reason == "namespace":
+        result = authorize_namespace_retry(repository)
+    elif args.reason == "evidence-mirror":
+        result = authorize_evidence_mirror_retry(repository)
+    else:
+        result = authorize_artifact_staging_retry(repository)
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -371,4 +525,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["authorize_evidence_mirror_retry", "authorize_namespace_retry", "main"]
+__all__ = [
+    "authorize_artifact_staging_retry",
+    "authorize_evidence_mirror_retry",
+    "authorize_namespace_retry",
+    "main",
+]
