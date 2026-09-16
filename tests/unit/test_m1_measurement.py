@@ -432,6 +432,41 @@ def test_m1_harness_preserves_noop_and_known_signal_as_raw_evidence(
     assert set(candidate_deltas) == {candidate_ticks}
 
 
+def test_job_bound_device_timer_is_closed_before_long_running_acquisitions(
+    tmp_path: Path,
+) -> None:
+    harness, payload = _fixture(tmp_path)
+    original_factory = harness.workload_factory
+
+    class OwnedTimer(FixtureTimer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    timer = OwnedTimer()
+
+    def timer_factory(_payload, _output_dir):
+        return timer
+
+    def workload_factory(arm, ordinal, submitted, output_dir):
+        assert timer.closed is True
+        return original_factory(arm, ordinal, submitted, output_dir)
+
+    harness.device_timer = None
+    harness.device_timer_factory = timer_factory
+    harness.workload_factory = workload_factory
+
+    result = harness.run_manual_performance(payload, tmp_path)
+
+    assert result.measurement.status == "measured"
+    assert timer.close_calls == 1
+
+
 def test_m1_evidence_contract_rejects_cache_event_and_cleanup_rebinding(
     tmp_path: Path,
 ) -> None:

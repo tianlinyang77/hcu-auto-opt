@@ -215,6 +215,14 @@ class M1TrustedMeasurementHarness:
                 synchronize=getattr(device_timer, "synchronize", self.synchronize),
                 device_name="hcu-device-event",
             )
+            if owns_device_timer:
+                close = getattr(device_timer, "close", None)
+                if not callable(close):
+                    raise MeasurementSafetyError(
+                        "M1 Job-bound device timer does not expose deterministic cleanup"
+                    )
+                close()
+                owns_device_timer = False
             for acquisition_ordinal, arm in enumerate(plan.acquisition_order):
                 _require_live_lease(context)
                 _require_within_wall_budget(deadline_ns, self.clock)

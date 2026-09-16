@@ -361,3 +361,23 @@
 - Do not repeat: do not add SSH credentials or weaken `StrictHostKeyChecking` to make host-local
   evidence copying work.
 - Last updated: 2026-09-16
+
+# BW20 calibration timer lifetime must not span the full M1 ABBA run
+
+- Scope: project-local
+- Symptom: the formal Performance attempt completed acquisitions `a0` through `a15`, then failed
+  before `a16` with `timing session budget exhausted`; no complete `performance.json` existed.
+- Evidence: the Stage 0 timer session was created once before the 40-acquisition plan and remained
+  registered as live for the whole run. Its deliberate 480-second process limit expired even
+  though every individual Baseline/Candidate acquisition completed well within its own limit.
+- Cause: the Job-bound device timer is needed only to calibrate event resolution at the start of
+  M1, but the Harness deferred its close until after all acquisitions.
+- Proven workaround: close and reap the owned calibration timer immediately after calibration,
+  before starting the first acquisition. Keep the overall Job wall budget and every acquisition's
+  independent session budget unchanged.
+- Validation: a Harness regression requires the owned timer to be closed exactly once before any
+  workload factory call. The failed partial evidence remains immutable and cannot be adjudicated.
+- Applies to: long M1 ABBA plans using a Job-bound calibration timer factory.
+- Do not repeat: do not raise the 480-second per-session safety ceiling or accept a partial ABBA
+  series merely to make the formal run finish.
+- Last updated: 2026-09-16
