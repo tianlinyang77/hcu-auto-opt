@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -18,7 +19,18 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 from uuid import uuid4
 
-from hcuopt.evaluation import sglang_smoke_runner as smoke
+
+def _load_sibling_smoke_runner() -> Any:
+    path = Path(__file__).with_name("sglang_smoke_runner.py")
+    module_spec = importlib.util.spec_from_file_location("hcuopt_locked_smoke_runner", path)
+    if module_spec is None or module_spec.loader is None:
+        raise RuntimeError("locked SGLang smoke runner cannot be loaded")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
+smoke = _load_sibling_smoke_runner()
 
 PROTOCOL_VERSION = "sglang-endpoint-acquisition-v1"
 EXPECTED_FIELDS = frozenset(
