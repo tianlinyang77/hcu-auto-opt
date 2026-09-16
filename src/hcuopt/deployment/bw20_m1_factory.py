@@ -142,6 +142,7 @@ class BW20M1WorkloadFactory:
                     proc_root=PurePosixPath("/proc"),
                     read_proc=transport.read_proc,
                     read_namespace=transport.read_namespace,
+                    container_namespace=str(ready["process_pid_namespace"]),
                     worker_protocol=M1_WORKER_PROTOCOL,
                 ),
                 cancelled=lambda: bool(

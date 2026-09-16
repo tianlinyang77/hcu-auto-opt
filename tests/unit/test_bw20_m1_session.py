@@ -46,6 +46,8 @@ def _ready():
             "architecture": "gfx936",
             "logical_device_index": 0,
         },
+        "controller_pid_namespace": "pid:[4026532999]",
+        "process_pid_namespace": "pid:[4026532999]",
         "namespace_hash": FILE_HASH,
         "cache_sha256": FILE_HASH,
         "import_sha256": FILE_HASH,
@@ -176,6 +178,15 @@ def test_session_keeps_container_pid_evidence_and_cleans_exact_cid() -> None:
 def test_session_rejects_wrong_device_before_accepting_activation() -> None:
     ready = _ready()
     ready["device_identity"]["pci"] = "0000:b2:00.0"
+    session, _, transport = _session(ready)
+    with pytest.raises(BW20M1SessionError, match="activation"):
+        session.open()
+    assert transport.removed and session.cleanup_complete
+
+
+def test_session_rejects_mismatched_container_pid_namespace() -> None:
+    ready = _ready()
+    ready["process_pid_namespace"] = "pid:[4026533000]"
     session, _, transport = _session(ready)
     with pytest.raises(BW20M1SessionError, match="activation"):
         session.open()

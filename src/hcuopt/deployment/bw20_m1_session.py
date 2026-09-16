@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -110,6 +111,7 @@ class BW20M1ProcessSession:
             "architecture": "gfx936",
             "logical_device_index": 0,
         }
+        namespace = ready.get("process_pid_namespace")
         if (
             ready.get("protocol") != M1_WORKER_PROTOCOL
             or ready.get("event") != "ready"
@@ -118,6 +120,9 @@ class BW20M1ProcessSession:
             or process_id < 2
             or ready.get("module_hash") != self.expected_module_hash
             or ready.get("device_identity") != expected_device
+            or not isinstance(namespace, str)
+            or re.fullmatch(r"pid:\[[0-9]+\]", namespace) is None
+            or ready.get("controller_pid_namespace") != namespace
         ):
             raise BW20M1SessionError("BW20 M1 worker activation attestation is invalid")
 

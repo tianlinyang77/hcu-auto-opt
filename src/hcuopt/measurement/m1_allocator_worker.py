@@ -474,12 +474,18 @@ def _controller(args: argparse.Namespace) -> int:
         ready = _read_json(responses)
         if ready is None or ready.get("event") != "ready":
             raise RuntimeError(f"M1 measured child failed to become ready: {ready!r}")
+        controller_pid_namespace = os.readlink("/proc/self/ns/pid")
+        process_pid_namespace = os.readlink(f"/proc/{child_pid}/ns/pid")
+        if controller_pid_namespace != process_pid_namespace:
+            raise RuntimeError("M1 controller and measured child PID namespaces differ")
         _write_json(
             sys.stdout,
             {
                 **ready,
                 "observer_process_id": os.getpid(),
                 "proc_stat_line": stat_line,
+                "controller_pid_namespace": controller_pid_namespace,
+                "process_pid_namespace": process_pid_namespace,
             },
         )
         while True:

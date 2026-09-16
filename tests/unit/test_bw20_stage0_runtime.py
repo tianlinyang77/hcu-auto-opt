@@ -141,6 +141,39 @@ def test_m1_protocol_uses_the_same_isolated_host_pid_binding(observations):
     assert result["measurement_authorized"] is False
 
 
+def test_m1_attested_namespace_keeps_host_identity_checks(observations):
+    protocol = "hcuopt-m1-allocator-worker-v1"
+    observations[2]["protocol"] = protocol
+    calls = []
+
+    def namespace(path):
+        calls.append(path)
+        if path == observations[0] / "self":
+            return "pid:[11]"
+        raise RuntimeError("different-uid namespace link is unreadable")
+
+    result = capture(
+        observations,
+        worker_protocol=protocol,
+        read_namespace=namespace,
+        container_namespace="pid:[22]",
+    )
+    assert result["host_controller"]["namespace"] == "pid:[22]"
+    assert result["host_measured"]["namespace"] == "pid:[22]"
+    assert calls == [observations[0] / "self"]
+
+
+@pytest.mark.parametrize("namespace", ["", "pid:22", "pid:[x]", "pid:[22]\n"])
+def test_m1_attested_namespace_is_strict(observations, namespace):
+    observations[2]["protocol"] = "hcuopt-m1-allocator-worker-v1"
+    with pytest.raises(runtime.ProcessBindingError, match="attested"):
+        capture(
+            observations,
+            worker_protocol="hcuopt-m1-allocator-worker-v1",
+            container_namespace=namespace,
+        )
+
+
 def test_cgroup_v1_membership_supported_without_namespace_changes(observations):
     for pid in (100, 101):
         (observations[0] / str(pid) / "cgroup").write_text(f"8:memory:/docker/{CID}\n")

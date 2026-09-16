@@ -318,3 +318,24 @@
 - Applies to: BW20 M1 Performance process creation and stdio requests.
 - Do not repeat: do not raise the transport ceiling to match a whole-session budget.
 - Last updated: 2026-09-16
+
+# BW20 M1 container PID namespace link is hidden across host UIDs
+
+- Scope: project-local
+- Symptom: the M1 worker reached its real HCU ready event, then host binding failed with
+  `host namespace unavailable` before any formal performance sample.
+- Evidence: the host `github` account can read `/proc/self/ns/pid` but receives permission denied
+  for namespace links owned by another UID; M1 containers deliberately run as `65534:65534`.
+  The failed attempt was cleaned, HCU 7 returned idle in `auto`, and no sample was accepted.
+- Cause: Stage 0 originally runs as UID 1002, so its host reader assumption did not cover the
+  stricter M1 non-owner container UID.
+- Proven workaround: keep the non-owner container UID and no privilege escalation. The frozen
+  PID1 controller attests that its namespace and the measured child namespace are identical;
+  the host still independently verifies exact CID/labels, cgroup membership, `NSpid`, parent PID,
+  start token, restart identity, and that the attested namespace differs from the host namespace.
+- Validation: 66 focused runtime/session/factory/worker/reference tests pass, including strict
+  namespace syntax, mismatch rejection, and simulated different-UID host denial.
+- Applies to: BW20 M1 performance process binding on hosts that restrict `/proc/*/ns/*` by UID.
+- Do not repeat: do not run the M1 container as the host deployment UID and do not add sudo or
+  privileged namespace readers merely to bypass procfs permissions.
+- Last updated: 2026-09-16
