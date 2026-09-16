@@ -7,6 +7,7 @@ from hcuopt.deployment.bw20_m1_performance_recovery import (
     TASK_ID,
     _validate_mirror_snapshot,
     _validate_snapshot,
+    _validate_timing_snapshot,
 )
 
 
@@ -112,3 +113,60 @@ def test_exact_cleaned_local_mirror_failure_is_recoverable() -> None:
         evaluation_count=0,
         namespace_authorization_count=1,
     )
+
+
+def test_exact_cleaned_calibration_timer_failure_is_recoverable() -> None:
+    task, candidate, job, jobs, resource = _snapshot()
+    job.update(
+        attempts=6,
+        max_attempts=6,
+        last_error={
+            "code": "TimeoutError",
+            "message": "timing session budget exhausted",
+        },
+    )
+    resource["fencing_token"] = 49
+    _validate_timing_snapshot(
+        task=task,
+        candidate=candidate,
+        job=job,
+        jobs=jobs,
+        resource=resource,
+        signoff_exists=False,
+        evaluation_count=0,
+        artifact_authorization_count=1,
+    )
+
+
+def test_calibration_timer_recovery_rejects_partial_or_drifted_state() -> None:
+    task, candidate, job, jobs, resource = _snapshot()
+    job.update(
+        attempts=6,
+        max_attempts=6,
+        last_error={
+            "code": "TimeoutError",
+            "message": "timing session budget exhausted",
+        },
+    )
+    resource["fencing_token"] = 49
+    for field, value in (
+        ("artifact_authorization_count", 0),
+        ("evaluation_count", 1),
+    ):
+        values = {
+            "task": task,
+            "candidate": candidate,
+            "job": job,
+            "jobs": jobs,
+            "resource": resource,
+            "signoff_exists": False,
+            "evaluation_count": 0,
+            "artifact_authorization_count": 1,
+        }
+        values[field] = value
+        try:
+            _validate_timing_snapshot(**values)
+        except RuntimeError as exc:
+            assert "exact cleaned calibration timer" in str(exc)
+        else:
+            raise AssertionError("drifted timing recovery snapshot must be rejected")
