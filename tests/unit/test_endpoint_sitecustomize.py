@@ -63,3 +63,68 @@ def test_sitecustomize_fails_import_when_module_hash_differs(tmp_path: Path) -> 
     assert completed.returncode != 0
     assert "differs from the frozen Hash" in completed.stderr
     assert not evidence.exists()
+
+
+def test_sitecustomize_accepts_a_second_process_for_the_same_module_identity(
+    tmp_path: Path,
+) -> None:
+    first, evidence, target = _run(tmp_path)
+    assert first.returncode == 0, first.stderr
+    original = evidence.read_bytes()
+    first_pid = json.loads(original)["process_id"]
+    environment = dict(os.environ)
+    environment.update(
+        PYTHONPATH=os.pathsep.join((str(tmp_path / "hook"), str(tmp_path / "modules"))),
+        HCUOPT_ENDPOINT_TARGET_MODULE="target_overlay",
+        HCUOPT_ENDPOINT_TARGET_PATH=str(target.resolve()),
+        HCUOPT_ENDPOINT_TARGET_SHA256=(
+            "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+        ),
+        HCUOPT_ENDPOINT_ACTIVATION_PATH=str(evidence.resolve()),
+    )
+
+    second = subprocess.run(
+        [sys.executable, "-c", "import os, target_overlay; print(os.getpid())"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert int(second.stdout) != first_pid
+    assert evidence.read_bytes() == original
+
+
+def test_sitecustomize_rejects_a_different_module_identity_at_the_same_path(
+    tmp_path: Path,
+) -> None:
+    first, evidence, _target = _run(tmp_path)
+    assert first.returncode == 0, first.stderr
+    original = evidence.read_bytes()
+    other = tmp_path / "modules" / "other_overlay.py"
+    other.write_text("VALUE = 7\n", encoding="utf-8")
+    environment = dict(os.environ)
+    environment.update(
+        PYTHONPATH=os.pathsep.join((str(tmp_path / "hook"), str(tmp_path / "modules"))),
+        HCUOPT_ENDPOINT_TARGET_MODULE="other_overlay",
+        HCUOPT_ENDPOINT_TARGET_PATH=str(other.resolve()),
+        HCUOPT_ENDPOINT_TARGET_SHA256=(
+            "sha256:" + hashlib.sha256(other.read_bytes()).hexdigest()
+        ),
+        HCUOPT_ENDPOINT_ACTIVATION_PATH=str(evidence.resolve()),
+    )
+
+    conflicting = subprocess.run(
+        [sys.executable, "-c", "import other_overlay"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert conflicting.returncode != 0
+    assert "activation evidence already differs" in conflicting.stderr
+    assert evidence.read_bytes() == original

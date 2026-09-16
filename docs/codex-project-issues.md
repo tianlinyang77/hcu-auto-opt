@@ -1,5 +1,27 @@
 # Codex 项目本地已知问题
 
+## SGLang 多进程导入不能把动态 PID 差异当成 Overlay 身份漂移
+
+- Scope: project-local；2026-09-16。
+- Symptom: BW20 Endpoint Baseline 第 0 次采集的 SGLang scheduler 在初始化时退出，服务始终
+  未 ready；每个子进程都报 `endpoint activation evidence already differs`。
+- Evidence: Run `0dbedc7e-15b0-58c2-9f1c-f3e6bdcd9d8f` 使用 fence 53，在任何请求和
+  性能样本产生前失败；失败证据、server.log 和 cleanup evidence 均已保留。清理后 HCU 7
+  为 auto、busy 0、约 2.1 MiB、无 KFD 进程，资源账本为 available。
+- Cause: SGLang 使用多个 Python 子进程；它们导入的是同一路径、同一 Hash、同一
+  inode/mtime 的目标模块，但每个进程的 PID、父 PID 和采集时间不同。旧 `_publish()` 对
+  整份 JSON 做字节相等比较，把合法的第二个导入者误判为篡改。
+- Proven workaround: 首个真实导入者以原子 hard-link 发布不可变 `activation.json`；后续
+  导入者只有在 schema、模块名、绝对路径、SHA256、device/inode/size/mtime 全部一致时才
+  复用首份证据。PID 和单调时钟只保留首个导入者的值，不参与跨进程稳定身份比较；其他
+  稳定字段、文件类型、link count 或 JSON inventory 有任何差异仍 fail closed。
+- Validation: 两个独立 Python 进程对同一模块和同一证据路径均成功，且第二个进程不能
+  改写首份字节；不同模块身份继续被拒绝。Endpoint/Runner 聚焦回归为 `33 passed`。
+- Applies to: 通过 `sitecustomize.py` 在 SGLang 多进程启动期间证明 Python Overlay 实际加载。
+- Do not repeat: 不要要求多进程激活 JSON 字节完全相同，也不要为了兼容多进程而删除
+  module Hash、路径或 inode/mtime 的稳定身份校验。
+- Last updated: 2026-09-16
+
 ## Registry Digest 运行时必须带完整仓库引用
 
 - Scope: project-local；2026-09-16。

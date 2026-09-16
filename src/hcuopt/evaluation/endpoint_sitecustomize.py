@@ -50,6 +50,16 @@ _CONFIGURATION = _configuration()
 _ORIGINAL_IMPORT = builtins.__import__
 _OBSERVING = False
 _OBSERVED = False
+_STABLE_ATTESTATION_FIELDS = (
+    "schema_version",
+    "module_name",
+    "module_path",
+    "module_sha256",
+    "device",
+    "inode",
+    "size",
+    "mtime_ns",
+)
 
 
 def _audited_import(
@@ -138,12 +148,58 @@ def _publish(path: Path, value: dict[str, Any]) -> None:
         try:
             os.link(temporary, path)
         except FileExistsError:
-            if path.read_bytes() != encoded:
+            if not _matches_existing_attestation(path, value):
                 raise RuntimeError("endpoint activation evidence already differs") from None
         else:
             temporary.unlink()
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _matches_existing_attestation(path: Path, value: dict[str, Any]) -> bool:
+    """Allow several SGLang children to attest one identical module identity.
+
+    The first importing process remains the immutable evidence producer.  A
+    later process may observe that file only when every stable file-identity
+    field agrees; process IDs and capture time are intentionally per-process.
+    """
+
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_nlink != 1
+            or not 0 < before.st_size <= 64 * 1024
+        ):
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                return False
+            raw = stream.read(64 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+        if (
+            len(raw) > 64 * 1024
+            or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns)
+        ):
+            return False
+        existing = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(existing, dict) or set(existing) != set(value):
+        return False
+    if any(existing.get(name) != value.get(name) for name in _STABLE_ATTESTATION_FIELDS):
+        return False
+    return (
+        type(existing.get("process_id")) is int
+        and existing["process_id"] > 0
+        and type(existing.get("parent_process_id")) is int
+        and existing["parent_process_id"] >= 0
+        and type(existing.get("captured_monotonic_ns")) is int
+        and existing["captured_monotonic_ns"] > 0
+    )
 
 
 if _CONFIGURATION is not None:
