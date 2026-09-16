@@ -39,7 +39,7 @@ EVIDENCE_BUNDLE_HASH = (
 )
 SIGNOFF_ID = UUID("e131588e-546c-5553-9095-0ce8fc5d38ea")
 WORKLOAD_PATH = Path("config/workloads/bw20-sglang-endpoint-provisional-v1.yaml")
-IDEMPOTENCY_KEY = "bw20-endpoint-provisional-20260916-v3"
+IDEMPOTENCY_KEY = "bw20-endpoint-provisional-20260916-v4"
 
 
 def _read_hashed_json(path: Path, expected_hash: str) -> dict[str, Any]:
