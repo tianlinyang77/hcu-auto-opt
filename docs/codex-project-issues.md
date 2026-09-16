@@ -283,3 +283,21 @@
 - Do not repeat: do not assume the first non-root user is UID 1000 and do not solve ownership
   mismatches with world-writable directories.
 - Last updated: 2026-09-15
+
+# BW20 controller identity assets must keep LF bytes across Windows deployment
+
+- Scope: project-local
+- Symptom: the BW20 M1 Performance Worker failed before Job claim with
+  `BW20 controller identity assets differ from the approved content`.
+- Evidence: Git blobs for `bw20-passwd` and `bw20-group` contained the approved LF bytes, while
+  the Windows-expanded deployment archive and both remote controller directories contained CRLF.
+  The worker stopped before HCU use and produced no measurement sample.
+- Cause: the two byte-pinned identity assets had no explicit checkout EOL rule.
+- Proven workaround: declare both paths as `text eol=lf` in `.gitattributes`; deploy from a
+  verified `git archive` or another transport that preserves Git blob bytes. Do not normalize
+  inside `freeze_controller` or weaken the byte-for-byte safety check.
+- Validation: repository-root `freeze_controller` succeeds with the LF working-tree files and
+  its focused staging/performance tests pass.
+- Applies to: Windows checkout to Linux BW20 controller deployments.
+- Do not repeat: do not copy an unconstrained Windows working tree as the formal controller.
+- Last updated: 2026-09-16
