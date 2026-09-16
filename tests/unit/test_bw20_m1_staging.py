@@ -123,6 +123,20 @@ def test_candidate_staging_reuses_frozen_controller_and_verifies_artifact(
     assert sum(command[0] == "setfacl" for command in transport.commands) == 2
 
 
+def test_local_artifact_copy_is_exclusive_and_hash_bound(tmp_path) -> None:
+    payload = b"# bounded candidate overlay\n"
+    source = tmp_path / "source.py"
+    destination = tmp_path / "destination.py"
+    source.write_bytes(payload)
+    staging.copy_local_artifact(source, destination, _hash(payload))
+    assert destination.read_bytes() == payload
+
+    with pytest.raises((FileExistsError, RuntimeError)):
+        staging.copy_local_artifact(source, destination, _hash(payload))
+    with pytest.raises(RuntimeError, match="frozen pin"):
+        staging.copy_local_artifact(source, tmp_path / "wrong.py", "sha256:" + "0" * 64)
+
+
 def test_staging_rejects_artifact_hash_drift_before_remote_contact(
     tmp_path, monkeypatch
 ) -> None:

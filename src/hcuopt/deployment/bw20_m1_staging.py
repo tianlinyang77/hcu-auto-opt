@@ -7,10 +7,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
+import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from hcuopt.deployment.bw20_local_runner import BW20LocalCommandRunner
 from hcuopt.deployment.bw20_m1_runtime import ROOT, BW20M1ContainerPlan
 from hcuopt.deployment.bw20_pair_bridge import BW20Transport
 from hcuopt.deployment.bw20_stage0_guards import BW20SourceGuard
@@ -88,6 +91,36 @@ def _artifact(path: Path | None, plan: BW20M1ContainerPlan) -> Path | None:
     return path
 
 
+def copy_local_artifact(source: Path, destination: Path, expected_hash: str) -> None:
+    """Publish one Hash-pinned Artifact without an SSH loopback on the HCU host."""
+
+    source, destination = source.absolute(), destination.absolute()
+    before = source.lstat()
+    if (
+        source.resolve(strict=True) != source
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or not 0 < before.st_size <= 256_000
+        or _sha256(source) != expected_hash
+    ):
+        raise RuntimeError("local BW20 M1 Artifact differs from its frozen pin")
+    descriptor = os.open(
+        source,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
+    with os.fdopen(descriptor, "rb") as reader:
+        opened = os.fstat(reader.fileno())
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("local BW20 M1 Artifact changed during open")
+        with destination.open("xb") as writer:
+            shutil.copyfileobj(reader, writer, length=256_000)
+        after = os.fstat(reader.fileno())
+        if (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise RuntimeError("local BW20 M1 Artifact changed during copy")
+    if _sha256(destination) != expected_hash:
+        raise RuntimeError("local BW20 M1 Artifact copy differs from its frozen pin")
+
+
 def stage_m1_run(
     *,
     plan: BW20M1ContainerPlan,
@@ -116,7 +149,14 @@ def stage_m1_run(
         if "user:65534:rwx" not in acl.splitlines():
             raise RuntimeError("BW20 M1 output ACL was not applied")
     if selected_artifact is not None:
-        transport.copy(selected_artifact, plan.artifact_path)
+        if isinstance(runner, BW20LocalCommandRunner):
+            copy_local_artifact(
+                selected_artifact,
+                Path(plan.artifact_path),
+                str(plan.artifact_hash),
+            )
+        else:
+            transport.copy(selected_artifact, plan.artifact_path)
         transport.checked(("chmod", "0444", plan.artifact_path), timeout=10)
     expected = plan.artifact_hash or "none"
     verified = json.loads(
@@ -148,6 +188,7 @@ __all__ = [
     "BW20M1StagedRun",
     "INIT_OUTPUT",
     "VERIFY_OUTPUT",
+    "copy_local_artifact",
     "host_scripts_are_python36_compatible",
     "stage_m1_run",
 ]
