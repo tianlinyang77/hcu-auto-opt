@@ -4645,3 +4645,14 @@ select:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+/* Local read-only entry: no persistent session or browser-native auth prompt. */
+.inspection-entry { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.inspection-login { width: min(100%, 520px); display: grid; gap: 14px; padding: 28px; border: 1px solid #294353; border-radius: 16px; background: #0c1b27; color: #dce8ef; }
+.inspection-login h1 { margin: 4px 0; font-size: 1.6rem; }
+.inspection-login p { margin: 0; line-height: 1.7; }
+.inspection-login label { font-size: 1rem; }
+.inspection-login input { width: 100%; box-sizing: border-box; font: inherit; padding: 12px; color: #edf6fc; background: #07131d; border: 1px solid #587487; border-radius: 8px; }
+.inspection-login input:focus-visible { outline: 2px solid #5dc7fa; outline-offset: 2px; }
+.inspection-login small { font-size: .875rem; line-height: 1.6; color: #aabcc9; }
+.inspection-login [role=alert] { color: #ffb6af; }
+.inspection-run { overflow-wrap: anywhere; font-size: .875rem; color: #aabcc9; }

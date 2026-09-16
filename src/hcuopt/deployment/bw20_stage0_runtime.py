@@ -168,6 +168,7 @@ def capture_process_binding(*, plan: BW20TimingPlan, container_id: str,
                             proc_root: Path = Path("/proc"),
                             read_proc: Callable[[Path], str] | None = None,
                             read_namespace: Callable[[Path], str] | None = None,
+                            container_namespace: str | None = None,
                             worker_protocol: str = "hcuopt-stage0-torch-worker-v1") -> dict:
     """Observe a live child; injected inspect must read the trusted local Docker daemon.
 
@@ -180,8 +181,17 @@ def capture_process_binding(*, plan: BW20TimingPlan, container_id: str,
     """
     if not isinstance(container_id, str) or re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
         raise ProcessBindingError("full container ID required")
-    if worker_protocol not in ("hcuopt-stage0-torch-worker-v1", "hcuopt-stage0-cpu-rehearsal-v1"):
+    if worker_protocol not in (
+        "hcuopt-stage0-torch-worker-v1",
+        "hcuopt-stage0-cpu-rehearsal-v1",
+        "hcuopt-m1-allocator-worker-v1",
+    ):
         raise ProcessBindingError("unsupported process binding protocol")
+    if container_namespace is not None and (
+        worker_protocol != "hcuopt-m1-allocator-worker-v1"
+        or re.fullmatch(r"pid:\[[0-9]+\]", container_namespace) is None
+    ):
+        raise ProcessBindingError("invalid attested container PID namespace")
     child_pid = ready.get("process_id")
     if (ready.get("protocol") != worker_protocol
             or ready.get("event") != "ready" or ready.get("observer_process_id") != 1
@@ -202,6 +212,8 @@ def capture_process_binding(*, plan: BW20TimingPlan, container_id: str,
         return value
 
     def namespace(path):
+        if container_namespace is not None and path != proc_root / "self":
+            return container_namespace
         try:
             return (read_namespace or _namespace)(path)
         except OSError as exc:

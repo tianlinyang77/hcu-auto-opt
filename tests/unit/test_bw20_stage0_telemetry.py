@@ -176,6 +176,22 @@ def test_collector_refreshes_bindings_and_preserves_unverified_raw_on_failure():
     assert count == 2 and collector.observations[0]["status"] == "unverified"
 
 
+def test_collector_accepts_m1_process_as_managed_only_with_host_start_token():
+    bindings = [
+        dict(
+            resource_id=RESOURCE,
+            worker_protocol="hcuopt-m1-allocator-worker-v1",
+            host_measured=dict(
+                host_pid=4321,
+                start_token="linux-proc-startticks:123",
+            ),
+        )
+    ]
+    assert BW20TelemetryCollector._identities(bindings) == {
+        4321: "linux-proc-startticks:123"
+    }
+
+
 @pytest.mark.parametrize(
     "case, expected_healthy",
     [

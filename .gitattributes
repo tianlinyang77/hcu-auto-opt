@@ -1,6 +1,11 @@
 # Content-addressed JSON is hashed as canonical LF bytes on every platform.
 *.json text eol=lf
 
+# These files are compared byte-for-byte before they are mounted as container
+# identity databases.  Keep the approved LF payload on every checkout host.
+/src/hcuopt/deployment/assets/bw20-passwd text eol=lf
+/src/hcuopt/deployment/assets/bw20-group text eol=lf
+
 # Store payloads are hashed byte-for-byte.  Do not let checkout filters rewrite
 # source files (including Python) or nested manifests on Windows.
 /config/m2/nmz36-business-candidate-store-v1/** -text
