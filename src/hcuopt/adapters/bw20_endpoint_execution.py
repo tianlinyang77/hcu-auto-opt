@@ -86,7 +86,7 @@ def endpoint_mounts(
     ]
     mounts.extend(
         MountSpec(
-            source=f"{MODEL}/{filename}",
+            source=f"{run_root}/model/{filename}",
             target=f"{MODEL}/{filename}",
             read_only=True,
         )

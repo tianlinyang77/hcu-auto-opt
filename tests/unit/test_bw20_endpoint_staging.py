@@ -12,7 +12,7 @@ from hcuopt.adapters.bw20_endpoint_execution import (
     TARGET_MODULE_PATH,
 )
 from hcuopt.deployment import bw20_endpoint_staging as staging
-from hcuopt.deployment.bw20_smoke_preflight import MODEL_HASHES
+from hcuopt.deployment.bw20_smoke_preflight import MODEL, MODEL_HASHES
 from hcuopt.targets import load_target
 
 REPOSITORY = Path(__file__).parents[2]
@@ -66,6 +66,13 @@ def test_prepare_freezes_minimal_sources_specs_and_exact_abba(tmp_path: Path) ->
         and mount["read_only"] is True
         for mount in candidate["mounts"]
     )
+    for filename in MODEL_HASHES:
+        assert any(
+            mount["source"] == f"{prepared.remote_run_root}/model/{filename}"
+            and mount["target"] == f"{MODEL}/{filename}"
+            and mount["read_only"] is True
+            for mount in candidate["mounts"]
+        )
 
 
 def test_prepared_hash_drift_is_rejected_before_remote_contact(tmp_path: Path) -> None:
@@ -81,6 +88,19 @@ def test_prepared_hash_drift_is_rejected_before_remote_contact(tmp_path: Path) -
 def test_remote_staging_checks_acl_and_exact_receipt(tmp_path: Path, monkeypatch) -> None:
     prepared = _prepare(tmp_path)
     plan = staging.verify_prepared_endpoint_run(prepared)
+    model_root = tmp_path / "model"
+    model_root.mkdir()
+    for name in MODEL_HASHES:
+        (model_root / name).write_bytes(name.encode("utf-8"))
+    original_sha256 = staging._sha256
+
+    def fixture_sha256(path: Path) -> str:
+        if path.parent == model_root:
+            return "sha256:" + MODEL_HASHES[path.name]
+        return original_sha256(path)
+
+    monkeypatch.setattr(staging, "MODEL", str(model_root))
+    monkeypatch.setattr(staging, "_sha256", fixture_sha256)
 
     class Transport:
         instance = None
@@ -120,9 +140,13 @@ def test_remote_staging_checks_acl_and_exact_receipt(tmp_path: Path, monkeypatch
     result = staging.stage_endpoint_run(prepared=prepared, runner=object())
 
     assert result.receipt["model_hashes"] == MODEL_HASHES
-    assert len(Transport.instance.copies) == len(plan["input_sha256"]) + 1
+    assert len(Transport.instance.copies) == (
+        len(plan["input_sha256"]) + 1 + len(MODEL_HASHES)
+    )
     assert sum(command[0][0] == "setfacl" for command in Transport.instance.commands) == 4
     assert Transport.instance.commands[-1][0][:3] == ("python3", "-c", staging.VERIFY_RUN)
+    verify = Transport.instance.commands[-1][0]
+    assert verify[-1] == f"{prepared.remote_run_root}/model"
 
 
 def test_host_preflight_programs_remain_python36_compatible() -> None:

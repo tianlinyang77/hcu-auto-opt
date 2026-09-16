@@ -65,7 +65,7 @@ run=pathlib.Path(sys.argv[1])
 if run.parent!=root or str(uuid.UUID(run.name))!=run.name: raise ValueError('invalid endpoint run')
 run.mkdir(mode=0o700)
 for name in ('input','input/src','input/src/hcuopt','input/src/hcuopt/evaluation',
-             'input/activation','acquisitions'):
+             'input/activation','model','acquisitions'):
  (run/name).mkdir(mode=0o700)
 for name in ('0000-baseline','0001-candidate','0002-candidate','0003-baseline'):
  (run/'acquisitions'/name).mkdir(mode=0o700)
@@ -144,6 +144,10 @@ if ('sha256:'+hashlib.sha256(artifact).hexdigest()!=artifact_pin
 models=plan.get('expected_model_sha256')
 if not isinstance(models,dict) or len(models)!=8:
  raise ValueError('endpoint model manifest differs')
+if (plan.get('staged_model_root')!=str(model_root)
+     or model_root.resolve(strict=True)!=model_root or model_root.is_symlink()
+     or {path.name for path in model_root.iterdir()}!=set(models)):
+ raise ValueError('staged model inventory differs')
 observed_models={}
 for name,pin in models.items():
  path=model_root/name
@@ -349,6 +353,7 @@ def prepare_endpoint_run(
         "candidate_artifact_path": SIGNED_ARTIFACT_PATH,
         "candidate_artifact_sha256": CANDIDATE_MODULE_HASH,
         "model_root": MODEL,
+        "staged_model_root": f"{remote_run_root}/model",
         "expected_model_sha256": MODEL_HASHES,
         "requests": [request.model_dump(mode="json") for request in requests],
         "hcu_accessed": False,
@@ -422,12 +427,27 @@ def stage_endpoint_run(
             transport=transport, runner=runner, source=source, destination=destination
         )
         transport.checked(("chmod", "0444", destination), timeout=10)
+    for name, expected in sorted(MODEL_HASHES.items()):
+        source = _regular_file(Path(MODEL) / name, limit=2 * 1024**3)
+        before = source.lstat()
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if _sha256(source) != "sha256:" + expected:
+            raise RuntimeError(f"endpoint model source hash drift: {name}")
+        destination = f"{prepared.remote_run_root}/model/{name}"
+        _copy_to_remote(
+            transport=transport, runner=runner, source=source, destination=destination
+        )
+        after = source.lstat()
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity:
+            raise RuntimeError(f"endpoint model source changed while copying: {name}")
+        transport.checked(("chmod", "0444", destination), timeout=10)
     for directory in (
         f"{prepared.remote_run_root}/input",
         f"{prepared.remote_run_root}/input/src",
         f"{prepared.remote_run_root}/input/src/hcuopt",
         f"{prepared.remote_run_root}/input/src/hcuopt/evaluation",
         f"{prepared.remote_run_root}/input/activation",
+        f"{prepared.remote_run_root}/model",
     ):
         transport.checked(("chmod", "0555", directory), timeout=10)
     for ordinal, arm in enumerate(ACQUISITION_ORDER):
@@ -446,7 +466,7 @@ def stage_endpoint_run(
                 prepared.plan_sha256,
                 SIGNED_ARTIFACT_PATH,
                 CANDIDATE_MODULE_HASH,
-                MODEL,
+                f"{prepared.remote_run_root}/model",
             ),
             timeout=180,
         )
