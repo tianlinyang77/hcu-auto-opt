@@ -80,3 +80,7 @@ Hash。
 首轮 8 组端点延迟 campaign 在完成 6 个组后，因第 7 组收尾资源安全守卫失败而按不重试
 语义停止。失败组没有纳入统计，资源已独立恢复为 `available`。部分结果、证据 Hash、结论
 边界和重新执行前的修复要求见 [BW20 SGLang 端点延迟采集：6/8 部分结果](bw20-endpoint-latency-partial-result.md)。
+
+在保持原安全阈值的前提下增加“有界等待 + 连续两次空闲确认”后，新建的 v2 campaign 已
+完成全部 8 组、32 次独立服务启动和 3,200 次 measured requests。结果为 `inconclusive`，
+完整范围、统计量和证据 Hash 见 [BW20 SGLang 端点延迟采集：完整 8/8 结果](bw20-endpoint-latency-result.md)。

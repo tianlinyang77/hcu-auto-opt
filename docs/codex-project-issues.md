@@ -496,3 +496,26 @@
 - Do not repeat: do not classify CPU import failure as missing SGLang, and do not map an HCU merely
   to enumerate installed benchmark files.
 - Last updated: 2026-09-16
+
+# Endpoint 收尾守卫必须等待设备状态连续稳定
+
+- Scope: project-local
+- Symptom: 8 组 Endpoint campaign 的组 06 已生成四次 acquisition 原始文件，但 Worker 在
+  提交成功前的最终资源守卫收到 `BW20 HCU 7 is not idle in the accepted auto window`；Run
+  失败且按不重试语义停止，组 07 未创建。
+- Evidence: 失败 Run `a4c51642-0d3b-5bc5-870b-3ddf1140d68a`、Job
+  `18e12908-fc74-5fc4-a129-ca03a2c5f05d`、Fence 62 均保留。延迟独立复检随后确认 HCU 7
+  为 `auto`、busy 0%、约 2.1 MiB 且无 KFD 进程，资源恢复为 `available`；失败 Run 未改写。
+- Cause: SGLang 进程回收、设备 busy 和 VRAM 记账并非原子完成；通用 Worker 在 Handler 返回
+  后立即读取一次设备状态，单个瞬态非空闲读数会直接终止整组。
+- Proven workaround: Endpoint Worker 保持原 idle/auto/进程/VRAM 阈值，只对精确的
+  `not idle in the accepted auto window` 状态执行最长约 60 秒的有界等待，并要求连续两次
+  空闲读数。遥测损坏、资源不匹配或设备归属不明仍立即 fail closed。
+- Validation: 三个新单测覆盖非连续空闲、结构性错误不重试和超时仍失败；相邻 Worker/守卫
+  聚焦回归 `29 passed, 2 skipped`，Ruff 通过。全新 BW20 v2 campaign 完成 8/8 组、32 次
+  独立启动和 3,200 次 measured requests；Fence 63–70，每组连续两次空闲、0 次瞬态失败，
+  `resource_guard.clear=true`。终态为 `available`、`auto`、busy 0%、无 KFD/受管容器。
+- Applies to: BW20 SGLang Endpoint Worker 的启动前和提交前资源安全确认。
+- Do not repeat: 不要放宽 busy、VRAM、频率或进程守卫；不要续接失败 campaign 的剩余组，
+  也不要把延迟恢复后的空闲状态用于改写旧失败 Run。
+- Last updated: 2026-09-17
