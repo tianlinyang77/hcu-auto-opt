@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import stat
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ from hcuopt.domain.enums import LeaseScope, WorkerType
 from hcuopt.domain.errors import ExecutionSafetyError
 from hcuopt.targets import load_target
 from hcuopt.workers.sdk import Worker
+
+_IDLE_WINDOW_ERROR = "BW20 HCU 7 is not idle in the accepted auto window"
 
 
 def _sha256(path: Path, *, limit: int = 2 * 1024**3) -> str:
@@ -247,7 +250,9 @@ class BW20EndpointMeasurementRunner:
 
 
 class BW20EndpointCleaner:
-    def __init__(self, target: TargetSpec, guard: BW20M1IdleGuard, runner) -> None:
+    def __init__(
+        self, target: TargetSpec, guard: BW20EndpointIdleSettlementGuard, runner
+    ) -> None:
         self.containers = ContainerResourceCleaner(target, runner, profile=PROFILE)
         self.guard = guard
         self.provenance = self.containers.provenance.model_copy(
@@ -273,8 +278,77 @@ class BW20EndpointCleaner:
             "healthy": True,
             "quarantined": False,
             "host_observation": self.guard.observations[-1],
+            "idle_settlement": self.guard.last_settlement,
             "clock_mutation_performed": False,
         }
+
+
+class BW20EndpointIdleSettlementGuard:
+    """Require two stable idle readbacks without weakening the HCU guard.
+
+    SGLang process teardown and device accounting are not atomic.  The generic
+    Worker checks the device immediately after the Handler returns, so a single
+    transient busy/VRAM readback must be allowed to settle.  Only the known
+    idle-window rejection is retryable; telemetry, attribution and resource
+    identity failures remain immediate fail-closed errors.
+    """
+
+    def __init__(
+        self,
+        guard: BW20M1IdleGuard,
+        *,
+        required_consecutive: int = 2,
+        max_attempts: int = 30,
+        interval_seconds: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if required_consecutive < 2 or max_attempts < required_consecutive:
+            raise ValueError("endpoint idle settlement requires bounded stable samples")
+        if interval_seconds < 0:
+            raise ValueError("endpoint idle settlement interval must be non-negative")
+        self.guard = guard
+        self.required_consecutive = required_consecutive
+        self.max_attempts = max_attempts
+        self.interval_seconds = interval_seconds
+        self.sleep = sleep
+        self.last_settlement: dict[str, object] | None = None
+
+    @property
+    def observations(self) -> list[dict[str, Any]]:
+        return self.guard.observations
+
+    def __call__(self, resource_id: str | None) -> None:
+        consecutive = 0
+        transient_failures = 0
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                self.guard(resource_id)
+            except ExecutionSafetyError as exc:
+                if str(exc) != _IDLE_WINDOW_ERROR:
+                    raise
+                consecutive = 0
+                transient_failures += 1
+            else:
+                consecutive += 1
+                if consecutive >= self.required_consecutive:
+                    self.last_settlement = {
+                        "required_consecutive": self.required_consecutive,
+                        "attempts": attempt,
+                        "transient_failures": transient_failures,
+                        "interval_seconds": self.interval_seconds,
+                        "settled": True,
+                    }
+                    return None
+            if attempt < self.max_attempts:
+                self.sleep(self.interval_seconds)
+        self.last_settlement = {
+            "required_consecutive": self.required_consecutive,
+            "attempts": self.max_attempts,
+            "transient_failures": transient_failures,
+            "interval_seconds": self.interval_seconds,
+            "settled": False,
+        }
+        raise ExecutionSafetyError(_IDLE_WINDOW_ERROR)
 
 
 def build_worker(
@@ -282,8 +356,9 @@ def build_worker(
     output_dir: Path,
 ) -> Worker:
     runner = BW20LocalCommandRunner()
-    guard = BW20M1IdleGuard(runner)
-    guard("bw20-sglang-0.5.12:hcu:7")
+    raw_guard = BW20M1IdleGuard(runner)
+    raw_guard("bw20-sglang-0.5.12:hcu:7")
+    guard = BW20EndpointIdleSettlementGuard(raw_guard)
     output = output_dir.absolute()
     output.mkdir(parents=True, exist_ok=True)
     registry = AdapterRegistry(
@@ -334,4 +409,10 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["BW20EndpointCleaner", "BW20EndpointMeasurementRunner", "build_worker", "main"]
+__all__ = [
+    "BW20EndpointCleaner",
+    "BW20EndpointIdleSettlementGuard",
+    "BW20EndpointMeasurementRunner",
+    "build_worker",
+    "main",
+]

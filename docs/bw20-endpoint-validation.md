@@ -74,3 +74,9 @@ Hash。
 4. 探针通过后冻结正式预算，执行 Formal ABBA；D 独立重读后给出
    `faster/slower/inconclusive/invalid`。
 5. 页面只展示端点 Run 自己的范围、原始证据和 D 结论，继续显示“自动发布关闭”。
+
+## 2026-09-17 执行状态
+
+首轮 8 组端点延迟 campaign 在完成 6 个组后，因第 7 组收尾资源安全守卫失败而按不重试
+语义停止。失败组没有纳入统计，资源已独立恢复为 `available`。部分结果、证据 Hash、结论
+边界和重新执行前的修复要求见 [BW20 SGLang 端点延迟采集：6/8 部分结果](bw20-endpoint-latency-partial-result.md)。
