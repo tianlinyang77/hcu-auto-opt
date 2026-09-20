@@ -1141,6 +1141,14 @@ def create_app(
     ) -> dict[str, Any]:
         return repo(request).get_endpoint_validation_campaign(campaign_id)
 
+    @application.get(
+        "/v1/endpoint-validation-campaigns/{campaign_id}/summary",
+    )
+    def get_endpoint_validation_campaign_summary(
+        campaign_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).endpoint_validation_campaign_summary(campaign_id)
+
     @application.post(
         "/v1/endpoint-validation-campaigns/{campaign_id}/signoff",
         response_model=EndpointCampaignSignoffView,

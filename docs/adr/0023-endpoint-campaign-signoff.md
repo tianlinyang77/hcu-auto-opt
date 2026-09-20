@@ -21,6 +21,8 @@ Agent、Worker 或浏览器自报的 actor 当作可信身份。
    返回不可用，payload actor 与已验证身份不一致时拒绝。
 5. 签核记录不可变且每个 Campaign 只能有一条。相同 idempotency key 和完全相同输入可重放；
    修改理由、结果 Hash、身份或决定后重放均拒绝。
+6. Campaign Summary Read Model 只复制 Campaign、D Job、八个 Run、结果 Hash 与 Signoff 的
+   持久化状态。页面不得重新计算 verdict、效应值或置信区间，只展示 D 已发布的结果。
 
 ## 后果
 
