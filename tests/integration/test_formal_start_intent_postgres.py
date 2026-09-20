@@ -96,7 +96,8 @@ class FormalStartIntentPostgresTests(unittest.TestCase):
         with self.connection.cursor() as cursor:
             cursor.execute(
                 """
-                TRUNCATE formal_operator_start_intent_events,
+                TRUNCATE formal_round_dispatch_events, formal_round_dispatches,
+                         formal_operator_start_intent_events,
                          formal_operator_start_intents
                 """
             )

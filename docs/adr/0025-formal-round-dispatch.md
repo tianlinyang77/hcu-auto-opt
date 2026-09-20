@@ -1,0 +1,104 @@
+# ADR-0025：Formal Intent 到 Round 的原子派发桥
+
+- 状态：Proposed；不授权生产开放或 HCU 执行
+- 日期：2026-09-20
+- 关联：#167、ADR-0015、ADR-0014、ADR-0024
+- 前置：PR #168 的非执行入口；本提案不属于该入口的完成证明
+
+## 当前代码的实际断点
+
+`FormalStartCoordinator` 已完成部署对象重读、验签、Plan 重验及角色分离，但只写 Intent。
+`PostgresRepository.create_search_round()` 明确拒绝 Formal，并校验 Scripted/synthetic/fixture。
+`create_search_round()`、`add_round_candidate()`、`close_search_round_intake()` 分别自行提交事务。
+因此不能依次调用三个方法，也不能删除 Formal 拒绝条件后直接复用 Scripted 启动器。
+目前 `cancel_formal_start_intent()` 与 reconcile 都锁 Intent；新增派发必须加入同一锁协议。
+
+## 决定提案
+
+### 1. 保留旧 Intent，独立保存派发事实
+
+旧 Intent v1 的三个 false 字段和 SQL 约束保持原义：这份记录本身不授予执行能力。
+新增版本化 Dispatch Contract 与表，不把 `ready_for_round_creation` 改名成 running。
+新记录一对一绑定 Intent、Task、Round、Preview、Plan、owner/B/D Authority、服务身份与候选成员。
+`intent_id`、`task_id`、`round_id` 分别唯一；ID 复用既有确定性推导，不增加浏览器幂等键。
+所有冻结绑定不可修改；状态变更及事件必须在同一事务中提交。
+
+派发状态拟定为 `queued / claimed / recovery_required / completed / cancelled / expired / failed`。
+`claimed` 只说明控制面已领取；物理运行来自 B Receipt，不从派发状态推导。
+`completed` 只说明派发职责完成，不等于评测通过或加速；D Review 和人工签核仍独立。
+具体终态所需证据在 Contract 评审中冻结，不能先实现一个宽松通用状态字符串。
+
+### 2. 事务前重验，事务内锁定版本
+
+部署显式注入派发能力，默认不注册 Worker 或新的 Web 执行路由。
+先复用并抽取现有 coordinator 的完整验签/重读逻辑，输出内部验证快照；不得复制第二套验证器。
+快照绑定 Intent version、完整输入摘要、服务身份、验证时间及所有授权的最早失效时间。
+快照不是可由客户端提交的通行证，不能单靠对象类型或 ready 布尔值放行。
+
+存储层新增一个单事务方法，执行：
+
+1. 锁定 Intent 行；已有同绑定 Dispatch 时返回已有结果，不再创建、派发或执行。
+   读取重放仍须部署身份验证；过期时可以查询已发生事实，但不重新授予执行能力。
+2. 对新派发检查 Intent 非取消/失败、ready、版本及全部绑定一致。
+3. 锁定可变的 Profile/Stage0/Baseline 权威行，核验撤销状态；统一锁序为
+   Intent → 权威行（固定主键顺序）→ Round → Dispatch → Job，取消/恢复遵循同一顺序。
+4. 使用数据库实际当前时间检查 owner/B/D/Preview 有效区间；长事务不能使用事务开始时间冒充现在。
+   验签对象按 Hash 不可变，注册撤销需版本检查；外部撤销不能声称与数据库事务原子同步。
+5. 原子写 Task、Formal Round、完整 business Candidate 集合、冻结 Family、Dispatch/outbox 及审计事件。
+   任一步失败全部回滚，不能留下部分候选或可被普通调度扫描领取的半成品。
+
+抽取接收同一 connection 的存储 helper；禁止在 helper 中另开连接或提交。
+Search/Holdout、family alpha、Evidence Root 等只从 D Authority 读取，Adapter/窗口/预算只从 B/Plan 读取。
+源码 Family、Round Candidate Family、Artifact Family 是不同 Hash 域，必须分别重算和交叉核对，不能互填。
+本步骤不揭示 Holdout，不预造 Artifact Hash，不触碰设备。
+
+### 3. 取消与 reconcile 必须同时升级
+
+迁移启用时同步升级所有会写 Intent 的进程，不能让旧取消实现继续忽略 Dispatch。
+部署采用停写、迁移、升级写进程、验证、再开放；不做新旧写进程混跑。
+
+- 无 Dispatch：沿用原取消。
+- Dispatch queued：在 Intent 锁内检查尚未领取，原子取消 Dispatch 和待投递记录并更新 Intent；
+  已创建的 Round 保留审计，具体取消表示须与现有 Round 状态契约共同评审。
+- 已 claimed：不能直接把 Intent 标 cancelled；提出停止请求，由持 Fence 的执行者安全停机和清理。
+  清理未确认时不得显示“已释放资源”。
+- reconcile 发现已派发：不得把历史 Intent 的新一次过期判定当作从未执行，或重新创建 Round。
+  派发后的健康、到期、停止与恢复转入 Dispatch 处理；旧 ready 只是历史闸门结果。
+
+数据库需提供取消/派发互斥约束或统一写函数作为第二道防线，而不只依赖 Python 调用约定。
+
+### 4. 投递幂等不等于物理执行可以重试
+
+outbox 使用持久化唯一业务键与 `FOR UPDATE SKIP LOCKED` 领取；领取提交后再做外部工作。
+投递允许重复，Job 消费必须校验 Dispatch、Round、Phase、Candidate 与 Attempt 的固定绑定。
+普通 Scripted Router 不得消费 Formal outbox，也不能因发现新 Round 自动绕过派发闸门。
+Worker 在物理操作前重验当前授权、Target Lock、预算及 B 的 Lease/Fence。
+
+消息领取期限与设备 Lease 是两个不同概念。消息期限到了，不意味着旧进程或设备空闲。
+Worker 失联进入 `recovery_required`：先用持久化 Receipt 判断是否已执行，再由 B 完成 Fence
+隔离及资源清理证明；仅在明确未开始或已安全恢复的情况下按预算/授权规则允许后继 Attempt。
+旧 Worker 的迟到写入须带 Fence 比较，不得覆盖新状态或启动第二次物理运行。
+队列本身只能保证逻辑幂等，不能承诺物理 exactly-once。
+
+### 5. 页面与发布边界
+
+页面分开显示“意图已受理”“轮次已创建/排队”“执行者已领取”“实机已开始”和“证据待签核”。
+这些状态来自相应持久化记录，刷新和网络重试不产生新执行身份。
+入口保持默认关闭，测试仅用隔离 schema 和模拟执行者；生产签名、资源窗口和 B/D 注册未具备时不开放。
+`automatic_release_allowed=false`；不提升 Baseline、不改频率、不停止无关进程。
+
+## 交付与评审顺序
+
+当前开发切片只实现 `queued / cancelled` 与原子完整 intake，默认关闭，
+没有 Consumer，不创建通用 Job；其余状态为后续设计，不属于本次已实现范围。
+`PostgresFormalDispatcher` 为独立部署服务，准备阶段复用 coordinator 验签与重读，
+事务内再次锁定并校验数据库 Authority、Intent version 与数据库实际时间。
+Profile Catalog 为部署快照，撤销须更新部署并停用旧进程；不宣称支持外部撤销原子同步。
+
+1. A/B/D 审阅本 ADR，明确取消、恢复、Round 状态兼容及部署切换方案。
+2. 定义 Dispatch Contract 和数据库迁移，实现原子创建/取消，真实 PostgreSQL 验证。
+3. 接受同一事务的存储 helper 与受控 outbox Consumer，使用模拟执行者完成崩溃恢复测试。
+4. 页面接持久化派发读模型，显示准确执行层级；生产部署另行验收。
+
+验收矩阵见 `docs/plans/formal-dispatch-acceptance.md`。评审前可以开发隔离测试，
+不能通过删除现有保护条件抢先开放 Formal 执行。本提案不关闭 #102/#126/#167。
