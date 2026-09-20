@@ -31,6 +31,7 @@ const percent = (value) => value == null ? "—" : `${Number(value).toFixed(4)}%
 function CampaignSignoff({ summary, onComplete }) {
   const [decision, setDecision] = useState("accepted");
   const [actor, setActor] = useState("");
+  const [credential, setCredential] = useState("");
   const [reason, setReason] = useState("接受本次正式 D 裁决作为项目证据；不授权自动发布或生产发布。");
   const [intent, setIntent] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -60,13 +61,18 @@ function CampaignSignoff({ summary, onComplete }) {
     }}>
       <label htmlFor="endpoint-actor">签署人</label>
       <input id="endpoint-actor" required maxLength={200} value={actor} onChange={(event) => setActor(event.target.value)} />
+      <label htmlFor="endpoint-credential">独立签核凭据</label>
+      <input id="endpoint-credential" type="password" autoComplete="off" required
+        minLength={32} maxLength={256} value={credential}
+        onChange={(event) => setCredential(event.target.value)} />
+      <p>凭据只保留在当前页面内存中，不是模型 API Key。</p>
       <label htmlFor="endpoint-decision">决定</label>
       <select id="endpoint-decision" value={decision} onChange={(event) => setDecision(event.target.value)}>
         <option value="accepted">接受本次裁决</option><option value="rejected">拒绝本次裁决</option>
       </select>
       <label htmlFor="endpoint-reason">签核理由</label>
       <textarea id="endpoint-reason" required maxLength={2000} value={reason} onChange={(event) => setReason(event.target.value)} />
-      <button disabled={!actor.trim() || !reason.trim()}>核对本次签核</button>
+      <button disabled={!actor.trim() || !reason.trim() || credential.length < 32}>核对本次签核</button>
     </form> : <div>
       <dl><dt>Campaign</dt><dd className="smoke-id">{intent.campaignId}</dd>
         <dt>D verdict</dt><dd>{verdictLabels[intent.verdict] || intent.verdict}</dd>
@@ -77,10 +83,11 @@ function CampaignSignoff({ summary, onComplete }) {
       <button disabled={busy} onClick={async () => {
         setBusy(true); setError("");
         try {
-          const receipt = await submitEndpointCampaignSignoff(intent);
+          const receipt = await submitEndpointCampaignSignoff(intent, credential);
           if (!endpointCampaignSignoffMatches(intent, receipt)) {
             throw new Error("数据库回执与冻结签核请求不一致");
           }
+          setCredential("");
           await onComplete();
         } catch (failure) { setError(failure.message); } finally { setBusy(false); }
       }}>{busy ? "正在写入…" : "我已核对，确认提交"}</button>
