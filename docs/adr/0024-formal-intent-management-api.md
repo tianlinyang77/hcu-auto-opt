@@ -29,7 +29,12 @@ Authority Hash、幂等键、目标服务身份。额外字段拒绝，浏览器
 服务端预签 assertion 与凭据绑定必须持久化，重启后加载同一内容；不得每次点击生成新 assertion。
 这是因为既有幂等逻辑不仅绑定请求摘要，也绑定 assertion Hash。
 前端仅保留冻结请求和幂等键；不在 URL、sessionStorage、日志或证据保存凭据。
-删除部署绑定即撤销后续提交权限，包括重放。生产加载器和操作工具在后续切片交付。
+`FormalStartManagement.from_file(coordinator, deployment_root=..., path=...)` 可加载部署配置。
+文件为 `formal-intent-capabilities-v1`，`capabilities` 数组每项仅含 `token_sha256` 与既有
+`assertion` 完整对象；最多 100 项、512 KiB，额外字段、错误版本、重复凭据或非法路径拒绝。
+管理员须保护配置根及父目录权限；加载器不是文件权限配置工具，也不防御管理员级并发替换。
+它读取启动快照，不热更新：移除绑定并重启应用后撤销后续提交权限，包括重放。
+保留同一预签声明重载可恢复重试；签发工具和生产密钥装配仍在后续切片交付。
 
 过期 assertion 的 create 重放继续拒绝；不能通过换 assertion 或换幂等键掩盖未知结果。
 应先通过受保护 GET/管理面核对 Intent；若 Intent 存在，沿既有经新签名认证的 reconcile
@@ -44,4 +49,7 @@ Authority Hash、幂等键、目标服务身份。额外字段拒绝，浏览器
 单元 HTTP 测试使用真实 coordinator 与测试签名器/内存仓库，覆盖成功、幂等、应用实例重建、
 越权、范围漂移、额外字段、过期、验签拒绝、撤销和默认关闭。
 这不是 PostgreSQL 重启、生产身份、浏览器或 HCU 验收。
-生产启用前必须完成上下游评审、部署凭据签发/加载、隔离 PostgreSQL 并发恢复与页面联验。
+新增 PostgreSQL HTTP 集成测试使用随机独立 schema、真实 Intent 存储、测试 Authority 与测试签名器，
+覆盖并发创建、模拟响应丢失后的应用/仓库实例重建、配置重载和撤销，检查无 Round/Task/Job。
+这仍不是数据库服务重启或生产部署验收。
+生产启用前必须完成上下游评审、部署凭据签发、隔离 PostgreSQL 回归通过与页面联验。

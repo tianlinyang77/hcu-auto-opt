@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from hmac import compare_digest
+from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -19,6 +21,7 @@ from hcuopt.contracts.m2_formal_start_v1 import (
 )
 from hcuopt.contracts.operator_v1 import OperatorServiceIdentityAssertion
 from hcuopt.contracts.platform_v1 import SHA256_PATTERN
+from hcuopt.measurement.m2_formal_receipt import _read_regular
 from hcuopt.operator.formal_start import FormalStartCoordinator
 
 
@@ -65,6 +68,28 @@ class FormalStartManagement:
         if len(digests) != len(set(digests)):
             raise ValueError("Formal capability credentials must be unique")
 
+    @classmethod
+    def from_file(
+        cls, coordinator: FormalStartCoordinator, *, deployment_root: Path, path: Path
+    ) -> "FormalStartManagement":
+        """Load only administrator-selected paths; errors never echo file content.
+
+        The deployment root and its parents must be administrator-controlled.
+        This is a startup snapshot: replacing the file requires an app restart.
+        """
+        try:
+            raw = _read_regular(deployment_root, path, 512 * 1024)
+            bundle = _CapabilityBundle.model_validate_json(raw)
+            return cls(
+                coordinator,
+                tuple(
+                    FormalIntentCapability(item.token_sha256, item.assertion)
+                    for item in bundle.capabilities
+                ),
+            )
+        except Exception:
+            raise ValueError("Formal capability configuration is unavailable or invalid") from None
+
     def router(self) -> APIRouter:
         router = APIRouter()
 
@@ -107,3 +132,13 @@ def _rejected() -> HTTPException:
         detail="Formal Start capability was rejected",
         headers={"Cache-Control": "no-store"},
     )
+
+
+class _CapabilityRecord(FrozenFormalStartModel):
+    token_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assertion: FormalStartActorAssertion
+
+
+class _CapabilityBundle(FrozenFormalStartModel):
+    schema_version: Literal["formal-intent-capabilities-v1"]
+    capabilities: tuple[_CapabilityRecord, ...] = Field(max_length=100)

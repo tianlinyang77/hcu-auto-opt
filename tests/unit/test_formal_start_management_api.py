@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
+import json
 from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
@@ -171,3 +172,62 @@ def test_duplicate_capability_binding_is_rejected(tmp_path: Path) -> None:
     management, _, _ = setup_management(tmp_path)
     with pytest.raises(ValueError, match="unique"):
         replace(management, capabilities=management.capabilities * 2)
+
+
+def test_capability_file_preserves_binding_across_loads(tmp_path: Path) -> None:
+    management, _, _ = setup_management(tmp_path)
+    path = tmp_path / "capabilities.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "formal-intent-capabilities-v1",
+                "capabilities": [
+                    {
+                        "token_sha256": management.capabilities[0].token_sha256,
+                        "assertion": management.capabilities[0].assertion.model_dump(mode="json"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    first = FormalStartManagement.from_file(
+        management.coordinator, deployment_root=tmp_path, path=path
+    )
+    second = FormalStartManagement.from_file(
+        management.coordinator, deployment_root=tmp_path, path=path
+    )
+    assert first.capabilities == second.capabilities == management.capabilities
+    assert TOKEN not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "not-json-sensitive-marker",
+        '{"schema_version":"wrong","capabilities":[]}',
+        '{"schema_version":"formal-intent-capabilities-v1","capabilities":[],"token":"secret"}',
+        pytest.param("x" * (512 * 1024 + 1), id="oversized"),
+    ],
+)
+def test_invalid_capability_file_fails_without_echoing_content(
+    tmp_path: Path, content: str
+) -> None:
+    management, _, _ = setup_management(tmp_path)
+    path = tmp_path / "invalid.json"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        FormalStartManagement.from_file(management.coordinator, deployment_root=tmp_path, path=path)
+    assert str(caught.value) == "Formal capability configuration is unavailable or invalid"
+
+
+def test_capability_file_cannot_escape_root(tmp_path: Path) -> None:
+    management, _, _ = setup_management(tmp_path)
+    root = tmp_path / "protected"
+    root.mkdir()
+    path = tmp_path / "outside.json"
+    path.write_text(
+        '{"schema_version":"formal-intent-capabilities-v1","capabilities":[]}', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="unavailable or invalid"):
+        FormalStartManagement.from_file(management.coordinator, deployment_root=root, path=path)
