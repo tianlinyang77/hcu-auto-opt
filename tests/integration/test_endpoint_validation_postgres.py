@@ -838,6 +838,14 @@ def test_endpoint_campaign_signoff_binds_current_d_result(
     assert repository.get_endpoint_validation_campaign(campaign["campaign_id"])[
         "state"
     ] == expected_state
+    summary = repository.endpoint_validation_campaign_summary(campaign["campaign_id"])
+    assert summary["campaign"]["state"] == expected_state
+    assert summary["adjudication_job"]["state"] == "succeeded"
+    assert len(summary["endpoint_runs"]) == 8
+    assert summary["signoff"] == signoff
+    assert summary["adjudication_result_sha256"] == result_hash
+    assert summary["formal_d_adjudication"] is True
+    assert summary["automatic_release_allowed"] is False
     with pytest.raises(Exception, match="idempotency key was reused"):
         repository.signoff_endpoint_validation_campaign(
             campaign["campaign_id"],

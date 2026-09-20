@@ -580,6 +580,32 @@ class EndpointValidationRepositoryMixin:
                 (campaign_id,),
             ).fetchone()
 
+    def endpoint_validation_campaign_summary(
+        self, campaign_id: UUID
+    ) -> dict[str, Any]:
+        campaign = self.get_endpoint_validation_campaign(campaign_id)
+        result_hash = (
+            endpoint_adjudication_result_hash(campaign["adjudication_result"])
+            if campaign["adjudication_result"] is not None
+            else None
+        )
+        return {
+            "campaign": campaign,
+            "adjudication_job": (
+                self.get_job(campaign["adjudication_job_id"])
+                if campaign["adjudication_job_id"] is not None
+                else None
+            ),
+            "endpoint_runs": [
+                self.get_endpoint_validation_run(endpoint_run_id)
+                for endpoint_run_id in campaign["endpoint_run_ids"]
+            ],
+            "signoff": self.get_endpoint_campaign_signoff(campaign_id),
+            "adjudication_result_sha256": result_hash,
+            "formal_d_adjudication": campaign["adjudication_result"] is not None,
+            "automatic_release_allowed": False,
+        }
+
     def record_endpoint_adjudication_result(
         self,
         job: dict[str, Any],

@@ -6,6 +6,7 @@ import { App } from "./App.jsx";
 import { FrameworkSmokeInspection } from "./FrameworkSmokeInspection.jsx";
 import { InspectionEntry } from "./InspectionEntry.jsx";
 import { ManualCandidateInspection } from "./ManualCandidateInspection.jsx";
+import { EndpointCampaignInspection } from "./EndpointCampaignInspection.jsx";
 import "./styles.css";
 
 const query = new URLSearchParams(window.location.search);
@@ -13,7 +14,8 @@ const frameworkSmokeTask = query.get("frameworkSmoke");
 const inspectionRun = query.get("agentInspection");
 const evidenceRun = query.get("agentEvidence");
 const manualCandidateTask = query.get("manualCandidate");
-const selectedEvidenceEntries = [frameworkSmokeTask, inspectionRun, evidenceRun, manualCandidateTask].filter(Boolean);
+const endpointCampaign = query.get("endpointCampaign");
+const selectedEvidenceEntries = [frameworkSmokeTask, inspectionRun, evidenceRun, manualCandidateTask, endpointCampaign].filter(Boolean);
 
 let content = <App />;
 if (selectedEvidenceEntries.length > 1) {
@@ -22,6 +24,8 @@ if (selectedEvidenceEntries.length > 1) {
   content = <FrameworkSmokeInspection taskId={frameworkSmokeTask} />;
 } else if (manualCandidateTask) {
   content = <ManualCandidateInspection taskId={manualCandidateTask} />;
+} else if (endpointCampaign) {
+  content = <EndpointCampaignInspection campaignId={endpointCampaign} />;
 } else if (inspectionRun || evidenceRun) {
   content = (
     <InspectionEntry
