@@ -47,6 +47,7 @@ jobs:
           pytest tests/unit/test_stage0_protocol.py tests/unit/test_stage0_statistics.py
           tests/unit/test_stage0_verifier.py tests/unit/test_m1_measurement.py
           tests/unit/test_m1_d_verifier.py tests/unit/test_m2a_formal_readiness.py
+          tests/unit/test_endpoint_adjudication.py
           tests/unit/test_m2_formal_execution.py
           tests/unit/test_formal_execution_profile_registry.py
           tests/unit/test_formal_evidence_acceptance_report_api.py

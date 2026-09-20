@@ -84,3 +84,14 @@ Hash。
 在保持原安全阈值的前提下增加“有界等待 + 连续两次空闲确认”后，新建的 v2 campaign 已
 完成全部 8 组、32 次独立服务启动和 3,200 次 measured requests。结果为 `inconclusive`，
 完整范围、统计量和证据 Hash 见 [BW20 SGLang 端点延迟采集：完整 8/8 结果](bw20-endpoint-latency-result.md)。
+
+## 2026-09-20 正式裁决工程状态
+
+ADR-0020 已冻结 D 的第一版输入和判定纪律。`hcuopt endpoint-adjudicate` 现在可以在证据
+所在主机上，通过显式 `--allow-root` 白名单独立重读八个 Endpoint Run 的完整文件树与
+Hash Manifest，验证 32 个进程/缓存身份、请求数量、token、Overlay 和清理证据，并按
+ABBA group 而不是 request 作为独立单位输出 `faster/slower/inconclusive/invalid`。
+
+该能力目前是正式 D 核心和离线入口；Campaign 的 PostgreSQL 持久化、自动 D Job、页面
+展示和人工签核仍在 #157 范围内。因此既有 v2 汇总仍保持
+`formal_d_adjudication=false`，不能仅因为代码入口已存在而追认成正式裁决。

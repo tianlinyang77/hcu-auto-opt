@@ -79,6 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="repository root used to verify immutable evidence paths",
     )
     readiness.add_argument("--json", action="store_true")
+    endpoint_adjudication = sub.add_parser(
+        "endpoint-adjudicate",
+        help="independently reread one frozen endpoint campaign and publish a D verdict",
+    )
+    endpoint_adjudication.add_argument("request", type=Path)
+    endpoint_adjudication.add_argument(
+        "--allow-root",
+        action="append",
+        type=Path,
+        required=True,
+        help="authorized local evidence root; may be repeated",
+    )
     worker = sub.add_parser("worker", help="run one Agent, Build, or GPU worker")
     worker.add_argument("--id", required=True, dest="worker_id")
     worker.add_argument("--type", required=True, choices=[item.value for item in WorkerType])
@@ -220,6 +232,25 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         return 0 if report.decision == "ready_for_window_authorization" else 2
+    if args.command == "endpoint-adjudicate":
+        from hcuopt.contracts.endpoint_adjudication_v1 import (
+            EndpointFormalAdjudicationRequest,
+        )
+        from hcuopt.evaluation.endpoint_adjudication import adjudicate_endpoint_campaign
+
+        try:
+            request = EndpointFormalAdjudicationRequest.model_validate_json(
+                args.request.read_text(encoding="utf-8")
+            )
+            result = adjudicate_endpoint_campaign(
+                request,
+                allowed_roots=tuple(args.allow_root),
+            )
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"verdict": "invalid", "error": str(exc)}))
+            return 2
+        print(result.model_dump_json(indent=2))
+        return 2 if result.verdict == "invalid" else 0
     if args.command == "worker":
         from hcuopt.adapters.real_profile import (
             build_nmz36_framework_smoke_registry,
