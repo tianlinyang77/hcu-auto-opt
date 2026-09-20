@@ -63,6 +63,25 @@ class EndpointFormalAdjudicationRequest(ContractModel):
     producer_verdict: Literal[None] = None
     automatic_release_allowed: Literal[False] = False
 
+    @field_validator("signed_m1", mode="before")
+    @classmethod
+    def parse_signed_m1_wire_uuids(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        converted = dict(value)
+        for name in (
+            "task_id",
+            "candidate_id",
+            "baseline_epoch_id",
+            "target_snapshot_id",
+            "artifact_id",
+            "evidence_bundle_id",
+            "signoff_id",
+        ):
+            if isinstance(converted.get(name), str):
+                converted[name] = UUID(converted[name])
+        return converted
+
     @field_validator("groups", mode="before")
     @classmethod
     def freeze_groups(cls, value: object) -> object:

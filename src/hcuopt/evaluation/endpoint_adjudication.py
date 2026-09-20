@@ -289,8 +289,12 @@ def _validate_acquisition_control(
         or exit_record.event != "reaped"
         or start.restart_ordinal != ordinal
         or exit_record.restart_ordinal != ordinal
+        or start.observer_process_id != exit_record.observer_process_id
         or start.process_id != exit_record.process_id
-        or exit_record.wait_status != 0
+        or start.proc_stat_line != exit_record.proc_stat_line
+        or start.captured_monotonic_ns >= exit_record.captured_monotonic_ns
+        or exit_record.waitpid_result_pid != exit_record.process_id
+        or not _terminal_wait_status(exit_record.wait_status)
         or activation.get("process_id") != start.process_id
     ):
         raise EndpointEvidenceError("endpoint acquisition lifecycle is invalid")
@@ -376,6 +380,17 @@ def _is_sha256(value: object) -> bool:
     if not isinstance(value, str) or len(value) != 71 or not value.startswith("sha256:"):
         return False
     return all(character in "0123456789abcdef" for character in value[7:])
+
+
+def _terminal_wait_status(wait_status: int | None) -> bool:
+    if wait_status is None or not 0 <= wait_status <= 0xFFFF or wait_status == 0xFFFF:
+        return False
+    signal = wait_status & 0x7F
+    if signal == 0:
+        return wait_status & 0xFF == 0
+    if signal == 0x7F:
+        return False
+    return wait_status >> 8 == 0
 
 
 __all__ = [
