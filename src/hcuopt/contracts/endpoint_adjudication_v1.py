@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
@@ -82,6 +84,36 @@ class EndpointFormalAdjudicationRequest(ContractModel):
             raise ValueError("endpoint adjudication groups must share one frozen plan")
         if self.groups[0].plan_hash != endpoint_plan_hash(self.group_plan):
             raise ValueError("endpoint adjudication group Hash differs from the frozen plan")
+        acquisitions = [item for group in self.groups for item in group.acquisitions]
+        if len({item.evidence_uri for item in acquisitions}) != 32:
+            raise ValueError("endpoint adjudication requires 32 distinct evidence URIs")
+        if len({item.cache_namespace_sha256 for item in acquisitions}) != 32:
+            raise ValueError("endpoint adjudication requires 32 distinct cache namespaces")
+        return self
+
+
+class EndpointCampaignCreate(ContractModel):
+    name: str = Field(min_length=1, max_length=200)
+    endpoint_run_ids: tuple[UUID, ...]
+    raw_evidence_manifest_uri: str = Field(min_length=1, max_length=4000)
+    raw_evidence_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    automatic_release_allowed: Literal[False] = False
+
+    @field_validator("endpoint_run_ids", mode="before")
+    @classmethod
+    def freeze_run_ids(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(UUID(item) if isinstance(item, str) else item for item in value)
+        return value
+
+    @model_validator(mode="after")
+    def require_eight_independent_groups(self) -> EndpointCampaignCreate:
+        if len(self.endpoint_run_ids) != 8 or len(set(self.endpoint_run_ids)) != 8:
+            raise ValueError("endpoint campaign requires eight distinct endpoint Runs")
+        parsed = urlparse(self.raw_evidence_manifest_uri)
+        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+            raise ValueError("endpoint campaign manifest must be a local file URI")
         return self
 
 
@@ -142,9 +174,39 @@ class EndpointFormalAdjudicationResult(ReadModel):
         return self
 
 
+class EndpointCampaignView(ReadModel):
+    campaign_id: UUID
+    name: str
+    signed_m1_task_id: UUID
+    target_snapshot_id: UUID
+    adapter_profile: str
+    environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
+    endpoint_run_ids: tuple[UUID, ...]
+    state: Literal[
+        "awaiting_adjudication",
+        "adjudicating",
+        "awaiting_signoff",
+        "completed",
+        "rejected",
+        "invalid",
+    ]
+    adjudication_request: EndpointFormalAdjudicationRequest
+    adjudication_result: EndpointFormalAdjudicationResult | None = None
+    automatic_release_allowed: Literal[False] = False
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("endpoint_run_ids", mode="before")
+    @classmethod
+    def freeze_view_run_ids(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
+
+
 __all__ = [
     "EndpointAdjudicationGroupRef",
     "EndpointAdjudicationGroupResult",
+    "EndpointCampaignCreate",
+    "EndpointCampaignView",
     "EndpointFormalAdjudicationRequest",
     "EndpointFormalAdjudicationResult",
 ]

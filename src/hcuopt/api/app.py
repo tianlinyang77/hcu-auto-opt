@@ -18,6 +18,10 @@ from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
+from hcuopt.contracts.endpoint_adjudication_v1 import (
+    EndpointCampaignCreate,
+    EndpointCampaignView,
+)
 from hcuopt.contracts.endpoint_control_v1 import (
     EndpointValidationRunCreate,
     EndpointValidationRunView,
@@ -1113,6 +1117,25 @@ def create_app(
         endpoint_run_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).endpoint_validation_summary(endpoint_run_id)
+
+    @application.post(
+        "/v1/endpoint-validation-campaigns",
+        response_model=EndpointCampaignView,
+        status_code=201,
+    )
+    def create_endpoint_validation_campaign(
+        payload: EndpointCampaignCreate, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).create_endpoint_validation_campaign(payload)
+
+    @application.get(
+        "/v1/endpoint-validation-campaigns/{campaign_id}",
+        response_model=EndpointCampaignView,
+    )
+    def get_endpoint_validation_campaign(
+        campaign_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).get_endpoint_validation_campaign(campaign_id)
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:

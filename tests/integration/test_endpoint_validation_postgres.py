@@ -14,6 +14,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 
+from hcuopt.contracts.endpoint_adjudication_v1 import EndpointCampaignCreate
 from hcuopt.contracts.endpoint_control_v1 import EndpointValidationRunCreate
 from hcuopt.contracts.v1 import WorkerRegister
 from hcuopt.domain.enums import TaskState, WorkerType
@@ -476,4 +477,137 @@ def test_endpoint_run_claim_lease_failure_and_cleanup(
     assert resource["owner_job_id"] is None
     assert resource["lease_id"] is None
     assert resource["cleanup_evidence"]["healthy"] is healthy
+
+
+def _complete_endpoint_group(
+    repository: PostgresRepository,
+    base: EndpointValidationRunCreate,
+    group_ordinal: int,
+):
+    request = base.model_copy(
+        update={
+            "name": f"endpoint campaign group {group_ordinal}",
+            "idempotency_key": f"endpoint-campaign-group:{group_ordinal}:{uuid4()}",
+        },
+        deep=True,
+    )
+    run = repository.create_endpoint_validation_run(request)
+    acquisitions = []
+    for acquisition_ordinal, arm in enumerate(
+        ("baseline", "candidate", "candidate", "baseline")
+    ):
+        identity = 1000 + group_ordinal * 10 + acquisition_ordinal
+        acquisitions.append(
+            {
+                "acquisition_ordinal": acquisition_ordinal,
+                "arm": arm,
+                "evidence_uri": (
+                    f"file:///evidence/group-{group_ordinal}/"
+                    f"{acquisition_ordinal:04d}-{arm}"
+                ),
+                "result_sha256": _hash(9000),
+                "activation_sha256": _hash(identity),
+                "cache_namespace_sha256": _hash(identity + 100),
+                "cleanup_succeeded": True,
+            }
+        )
+    result = {
+        "schema_version": "bw20-endpoint-provisional-result-v1",
+        "endpoint_run_id": str(run["endpoint_run_id"]),
+        "run_mode": "provisional",
+        "status": "provisional_passed",
+        "plan_hash": run["plan_hash"],
+        "staging_receipt_hash": _hash(8000 + group_ordinal),
+        "acquisitions": acquisitions,
+        "cleanup_evidence": {
+            "fence": {"fenced": True},
+            "health": {"healthy": True},
+        },
+        "adapter_provenance": [
+            {
+                "profile": PROFILE,
+                "capability": "endpoint_measurement_runner",
+                "adapter_name": "EndpointCampaignFixture",
+                "adapter_version": "1",
+                "implementation_kind": "real",
+            }
+        ],
+        "producer_verdict": None,
+        "automatic_release_allowed": False,
+    }
+    with repository.connection() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET state = 'succeeded', result = %s, workflow_advanced_at = now(),
+                finished_at = now(), updated_at = now()
+            WHERE job_id = %s
+            """,
+            (Jsonb(result), run["job_id"]),
+        )
+        connection.execute(
+            """
+            UPDATE endpoint_validation_runs
+            SET state = 'provisional_passed', result = %s, updated_at = now()
+            WHERE endpoint_run_id = %s
+            """,
+            (Jsonb(result), run["endpoint_run_id"]),
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET state = %s, version = version + 1, updated_at = now()
+            WHERE task_id = %s
+            """,
+            (TaskState.ENDPOINT_PROVISIONAL_PASSED.value, run["task_id"]),
+        )
+    return run["endpoint_run_id"]
+
+
+def test_endpoint_campaign_freezes_eight_advanced_groups(
+    endpoint_database: PostgresRepository,
+) -> None:
+    repository = endpoint_database
+    with repository.connection() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS count FROM schema_migrations WHERE version = 24"
+        ).fetchone()["count"] == 1
+    base = _seed_signed_m1(repository)
+    run_ids = tuple(_complete_endpoint_group(repository, base, item) for item in range(8))
+    create = EndpointCampaignCreate(
+        name="BW20 formal endpoint campaign",
+        endpoint_run_ids=run_ids,
+        raw_evidence_manifest_uri="file:///evidence/raw-evidence-hashes.json",
+        raw_evidence_manifest_sha256=_hash(7001),
+        idempotency_key=f"endpoint-campaign:{uuid4()}",
+    )
+
+    campaign = repository.create_endpoint_validation_campaign(create)
+
+    assert campaign["state"] == "awaiting_adjudication"
+    assert campaign["endpoint_run_ids"] == list(run_ids)
+    assert campaign["automatic_release_allowed"] is False
+    assert campaign["adjudication_request"]["campaign_id"] == str(
+        campaign["campaign_id"]
+    )
+    assert len(campaign["adjudication_request"]["groups"]) == 8
+    assert campaign["adjudication_request"]["producer_verdict"] is None
+    assert (
+        repository.create_endpoint_validation_campaign(create)["campaign_id"]
+        == campaign["campaign_id"]
+    )
+    assert (
+        repository.get_endpoint_validation_campaign(campaign["campaign_id"])["state"]
+        == "awaiting_adjudication"
+    )
+    with repository.connection() as connection:
+        with pytest.raises(psycopg.Error, match="endpoint campaign bindings are immutable"):
+            connection.execute(
+                """
+                UPDATE endpoint_validation_campaigns
+                SET endpoint_run_ids = %s
+                WHERE campaign_id = %s
+                """,
+                (list(reversed(run_ids)), campaign["campaign_id"]),
+            )
 
