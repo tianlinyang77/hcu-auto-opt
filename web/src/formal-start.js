@@ -24,7 +24,7 @@ async function request(path, token, options, fetchImpl) {
   try {
     response = await fetchImpl(path, { ...options, credentials: "omit", redirect: "error", cache: "no-store",
       headers: { Authorization: `Bearer ${token}`, ...(options.body ? { "Content-Type": "application/json" } : {}) } });
-  } catch { throw new Error("网络失败，提交结果可能未知。请使用同一凭据和原请求重试。"); }
+  } catch { throw new Error(options.method === "GET" ? "状态读取失败，请稍后重试。" : "网络失败，提交结果可能未知。请使用同一凭据和原请求重试。"); }
   if (!response.ok) throw new Error(response.status === 403 ? "凭据无效、已撤销或已过期。" :
     response.status === 409 ? "授权或请求发生冲突，请核对原意图，不要另建请求。" :
     "正式管理入口不可用或请求被拒绝；不会转用演练入口。");
@@ -50,4 +50,18 @@ export async function submitFormalIntent(submission, token, fetchImpl = fetch) {
     throw new Error("回执身份或执行边界不匹配，不能视为受理成功。");
   }
   return receipt;
+}
+
+export async function loadFormalDispatch(submission, receipt, token, fetchImpl = fetch) {
+  const frozen = freezeFormalSubmission(submission);
+  const status = await request("/v1/operator/formal-round-dispatch", token, { method: "GET" }, fetchImpl);
+  if (!status || status.schema_version !== "formal-dispatch-status-v1" ||
+      status.intent_id !== receipt.intent_id || !UUID.test(status.round_id) ||
+      status.round_id !== receipt.round_id || status.resolved_plan_hash !== frozen.resolved_plan_hash ||
+      Object.keys(frozen.expected_service_identity).some((key) => status.service_identity?.[key] !== frozen.expected_service_identity[key]) ||
+      !["not_created", "queued", "cancelled"].includes(status.state) ||
+      status.execution_consumer_enabled !== false || status.automatic_release_allowed !== false) {
+    throw new Error("派发状态与原请求不匹配，不能推断执行进度。");
+  }
+  return status;
 }

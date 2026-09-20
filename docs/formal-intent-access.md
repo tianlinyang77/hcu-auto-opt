@@ -40,6 +40,17 @@
 
 ## 当前验收边界
 
+### 可选的派发状态读取
+
+派发读模型须显式装配：`dataclasses.replace(management, dispatch_reader=dispatcher)`，
+其中 `dispatcher` 为绑定同一 coordinator/repository 的 `PostgresFormalDispatcher`。
+该注入仅增加 `GET /v1/operator/formal-round-dispatch`，不开放 Web 派发写接口。
+沿用独立操作凭据，复验 actor 声明及有效期；Intent ID 由凭据绑定请求推导，不接收任意 Run/Intent ID。
+响应核对 Intent/Round/Plan/服务身份。未配置 reader 时路由不存在；读取失败不是“轮次不存在”。
+
+页面重新输入凭据后只读查询，查询结束清空凭据。v1 仅支持 `not_created / queued / cancelled`，
+`execution_consumer_enabled=false` 固定；queued 明确显示“已创建，待执行模块接入”，不是 HCU 运行。
+
 单元测试覆盖配置生成→文件加载→HTTP 读取/提交→同请求重放，以及过期、错误 actor、拒绝签名、
 验证器故障和无时区时间的失败前零文件写入。PostgreSQL 集成测试改为消费工具生成的材料，
 验证真实持久化与恢复；其中 Authority 和签名器仍明确为测试夹具。

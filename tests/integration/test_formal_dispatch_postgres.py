@@ -189,11 +189,13 @@ def dispatch_case(isolated_dsn, tmp_path, monkeypatch):  # type: ignore[no-untyp
 
 def test_atomic_concurrent_creation_replay_and_cancel(dispatch_case):  # type: ignore[no-untyped-def]
     dispatcher, intent_id = dispatch_case
+    assert dispatcher.read_status(intent_id).state == "not_created"
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: dispatcher.create(intent_id), range(2)))
     assert {result["replayed"] for result in results} == {False, True}
     assert results[0]["round_id"] == results[1]["round_id"]
     repository = dispatcher.repository
+    assert dispatcher.read_status(intent_id).state == "queued"
     with repository.connection() as connection:
         assert connection.execute("SELECT count(*) AS n FROM search_rounds").fetchone()["n"] == 1
         assert connection.execute("SELECT count(*) AS n FROM round_candidates").fetchone()["n"] == 2
@@ -216,6 +218,7 @@ def test_atomic_concurrent_creation_replay_and_cancel(dispatch_case):  # type: i
         cancelled_at = connection.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
     repository.cancel_formal_start_intent(intent_id, cancelled_at=cancelled_at)
     assert fresh.create(intent_id)["state"] == "cancelled"
+    assert fresh.read_status(intent_id).state == "cancelled"
     assert repository.get_search_round(before.round_id)["state"] == "cancelled"
 
 

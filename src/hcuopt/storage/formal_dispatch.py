@@ -8,6 +8,7 @@ from uuid import UUID
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from hcuopt.contracts.formal_dispatch_v1 import FormalDispatchStatus
 from hcuopt.domain.enums import SearchRoundRunMode
 from hcuopt.domain.errors import Conflict, NotFound
 from hcuopt.operator.formal_dispatch import PreparedFormalRound, prepare_formal_round
@@ -44,6 +45,29 @@ class PostgresFormalDispatcher:
         self.repository = repository
         self.coordinator = coordinator
         self.enabled = enabled
+
+    def read_status(self, intent_id: UUID) -> FormalDispatchStatus:
+        intent = self.repository.get_formal_start_intent(intent_id)
+        if intent.service_identity != self.coordinator.service_identity:
+            raise Conflict("Formal dispatch belongs to another deployment")
+        with self.repository.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM formal_round_dispatches WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
+        if row is not None and (
+            row["round_id"] != intent.round_id
+            or row["request_digest"] != intent.request_digest
+            or row["resolved_plan_hash"] != intent.resolved_plan_hash
+            or row["service_identity"] != intent.service_identity.model_dump(mode="json")
+        ):
+            raise Conflict("Formal dispatch stored bindings differ")
+        return FormalDispatchStatus(
+            intent_id=intent_id,
+            round_id=intent.round_id,
+            resolved_plan_hash=intent.resolved_plan_hash,
+            state="not_created" if row is None else row["state"],
+            service_identity=intent.service_identity,
+        )
 
     def create(self, intent_id: UUID) -> dict[str, Any]:
         if not self.enabled:

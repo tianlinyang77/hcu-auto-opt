@@ -1,13 +1,13 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { freezeFormalSubmission, loadFormalSubmission, submitFormalIntent } from "../src/formal-start.js";
+import { freezeFormalSubmission, loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "../src/formal-start.js";
 const id = "12345678-1234-1234-1234-123456789abc";
 const hash = "sha256:" + "a".repeat(64);
 const plan = { preview_id: id, idempotency_key: "formal-test-key", resolved_plan_hash: hash,
   formal_authorization_hash: hash, execution_authority_hash: hash, evaluation_authority_hash: hash,
   expected_service_identity: { server_instance_id: id, source_commit: "a".repeat(40), profile_catalog_hash: hash, control_contract_version: "v1" } };
-const receipt = { ...plan, intent_id: id, service_identity: plan.expected_service_identity,
+const receipt = { ...plan, intent_id: id, round_id: id, service_identity: plan.expected_service_identity,
   round_creation_allowed: false, hcu_accessed: false, automatic_release_allowed: false, synthetic: false, state: "ready_for_round_creation" };
 test("formal preparation uses protected same-origin read and frozen refs", async () => {
   const loaded = await loadFormalSubmission("test-token", async (url, options) => {
@@ -38,6 +38,24 @@ test("formal receipts reject permission or identity substitution", async () => {
   }
 });
 test("errors do not echo credentials", async () => {
-  await assert.rejects(loadFormalSubmission("test-token", async () => { throw new Error("test-token"); }), /网络失败/);
+  await assert.rejects(loadFormalSubmission("test-token", async () => { throw new Error("test-token"); }), /读取失败/);
   await assert.rejects(loadFormalSubmission("test-token", async () => ({ ok: false, status: 503 })), /不可用/);
+});
+test("dispatch status is a scoped read, never a new submission", async () => {
+  const status = { schema_version: "formal-dispatch-status-v1", intent_id: id, round_id: id,
+    resolved_plan_hash: hash, service_identity: plan.expected_service_identity, state: "queued",
+    execution_consumer_enabled: false, automatic_release_allowed: false };
+  const observed = await loadFormalDispatch(plan, receipt, "test-token", async (url, options) => {
+    assert.equal(url, "/v1/operator/formal-round-dispatch");
+    assert.equal(options.method, "GET"); assert.equal(options.body, undefined);
+    assert.equal(options.credentials, "omit"); assert.equal(options.cache, "no-store");
+    return { ok: true, json: async () => status };
+  });
+  assert.equal(observed.state, "queued");
+  for (const change of [{ intent_id: "other" }, { state: "running" },
+    { execution_consumer_enabled: true }, { automatic_release_allowed: true },
+    { round_id: "22345678-1234-1234-1234-123456789abc" }]) {
+    await assert.rejects(loadFormalDispatch(plan, receipt, "test-token", async () =>
+      ({ ok: true, json: async () => ({ ...status, ...change }) })), /不匹配/);
+  }
 });
