@@ -17,7 +17,8 @@ CREATE TABLE formal_round_dispatches (
     cancelled_at TIMESTAMPTZ,
     CHECK (valid_until > valid_from),
     CHECK (created_at >= valid_from AND created_at < valid_until),
-    CHECK ((state = 'cancelled') = (cancelled_at IS NOT NULL))
+    CHECK ((state = 'cancelled') = (cancelled_at IS NOT NULL)),
+    CHECK (cancelled_at IS NULL OR cancelled_at >= created_at)
 );
 
 CREATE TABLE formal_round_dispatch_events (

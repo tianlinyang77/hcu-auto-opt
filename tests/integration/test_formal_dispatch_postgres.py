@@ -4,6 +4,7 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import timedelta
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentRequest
 from hcuopt.domain.errors import Conflict
+from hcuopt.storage import formal_dispatch as dispatch_module
 from hcuopt.storage.formal_dispatch import PostgresFormalDispatcher, _insert
 from hcuopt.storage.repository import PostgresRepository
 from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
@@ -210,7 +212,9 @@ def test_atomic_concurrent_creation_replay_and_cancel(dispatch_case):  # type: i
         checked_at=plans.NOW,
     )
     assert before == after
-    repository.cancel_formal_start_intent(intent_id, cancelled_at=plans.NOW)
+    with repository.connection() as connection:
+        cancelled_at = connection.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+    repository.cancel_formal_start_intent(intent_id, cancelled_at=cancelled_at)
     assert fresh.create(intent_id)["state"] == "cancelled"
     assert repository.get_search_round(before.round_id)["state"] == "cancelled"
 
@@ -247,3 +251,52 @@ def test_rollback_after_full_intake_before_outbox(dispatch_case, monkeypatch):  
             )
     monkeypatch.setattr(dispatcher, "_write_round", original)
     assert dispatcher.create(intent_id)["state"] == "queued"
+
+
+def test_locked_window_and_intent_version_are_rechecked(dispatch_case, monkeypatch):  # type: ignore[no-untyped-def]
+    dispatcher, intent_id = dispatch_case
+    original = dispatch_module.prepare_formal_round
+
+    def expired(*args):  # type: ignore[no-untyped-def]
+        prepared = original(*args)
+        return replace(prepared, valid_until=plans.NOW - timedelta(seconds=1))
+
+    monkeypatch.setattr(dispatch_module, "prepare_formal_round", expired)
+    with pytest.raises(Conflict, match="window"):
+        dispatcher.create(intent_id)
+
+    def version_changed(*args):  # type: ignore[no-untyped-def]
+        prepared = original(*args)
+        dispatcher.repository.record_formal_start_reconciliation(
+            intent_id,
+            state="ready_for_round_creation",
+            blocker_codes=(),
+            checked_at=plans.NOW,
+        )
+        return prepared
+
+    monkeypatch.setattr(dispatch_module, "prepare_formal_round", version_changed)
+    with pytest.raises(Conflict, match="changed"):
+        dispatcher.create(intent_id)
+    with dispatcher.repository.connection() as connection:
+        assert connection.execute("SELECT count(*) AS n FROM search_rounds").fetchone()["n"] == 0
+
+
+def test_dispatch_identity_is_frozen_and_scripted_cannot_run_it(dispatch_case):  # type: ignore[no-untyped-def]
+    dispatcher, intent_id = dispatch_case
+    result = dispatcher.create(intent_id)
+    with pytest.raises(Conflict):
+        dispatcher.repository.reconcile_scripted_search_round(result["round_id"])
+    with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+        with dispatcher.repository.connection() as connection:
+            connection.execute(
+                "UPDATE formal_round_dispatches SET resolved_plan_hash = %s WHERE intent_id = %s",
+                ("sha256:" + "f" * 64, intent_id),
+            )
+    with pytest.raises(psycopg.errors.RaiseException, match="dispatch-aware"):
+        with dispatcher.repository.connection() as connection:
+            connection.execute(
+                "UPDATE formal_operator_start_intents SET version = version + 1 "
+                "WHERE intent_id = %s",
+                (intent_id,),
+            )
