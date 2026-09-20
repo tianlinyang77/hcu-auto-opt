@@ -89,9 +89,9 @@ def _process_record(*, ordinal: int, pid: int, event: str) -> dict[str, object]:
         "observer_process_id": 1,
         "process_id": pid,
         "proc_stat_line": f"{pid} (python) S 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {pid * 100}",
-        "captured_monotonic_ns": pid * 1000,
+        "captured_monotonic_ns": pid * 1000 + (1 if event == "reaped" else 0),
         "waitpid_result_pid": pid if event == "reaped" else None,
-        "wait_status": 0 if event == "reaped" else None,
+        "wait_status": 9 if event == "reaped" else None,
     }
 
 
