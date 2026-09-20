@@ -1,5 +1,8 @@
 # Endpoint Campaign 短期人工签核
 
+已完成签核后，日常查看结果可使用 [托管结果入口](endpoint-console.md)，通过
+`hcuopt endpoint-console serve/status/stop` 管理正式前端构建和自有隧道。
+
 Endpoint Campaign 的签核凭据是单 Campaign、单签署人、短期有效的独立能力。它不应复用页面读取凭据、控制凭据或模型 API Key，也不会改变 `automatic_release_allowed=false`。
 
 ## 部署输入
