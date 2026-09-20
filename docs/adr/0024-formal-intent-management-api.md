@@ -31,7 +31,8 @@ Authority Hash、幂等键、目标服务身份。额外字段拒绝，浏览器
 前端仅保留冻结请求和幂等键；不在 URL、sessionStorage、日志或证据保存凭据。
 `FormalStartManagement.from_file(coordinator, deployment_root=..., path=...)` 可加载部署配置。
 文件为 `formal-intent-capabilities-v1`，`capabilities` 数组每项仅含 `token_sha256` 与既有
-`assertion` 完整对象；最多 100 项、512 KiB，额外字段、错误版本、重复凭据或非法路径拒绝。
+`assertion` 完整对象，以及可选的 `submission` 冻结请求；最多 100 项、512 KiB，额外字段、
+错误版本、重复凭据或非法路径拒绝。配置 submission 时必须与 assertion 的 subject digest 完全匹配。
 管理员须保护配置根及父目录权限；加载器不是文件权限配置工具，也不防御管理员级并发替换。
 它读取启动快照，不热更新：移除绑定并重启应用后撤销后续提交权限，包括重放。
 保留同一预签声明重载可恢复重试；签发工具和生产密钥装配仍在后续切片交付。
@@ -53,3 +54,15 @@ Authority Hash、幂等键、目标服务身份。额外字段拒绝，浏览器
 覆盖并发创建、模拟响应丢失后的应用/仓库实例重建、配置重载和撤销，检查无 Round/Task/Job。
 这仍不是数据库服务重启或生产部署验收。
 生产启用前必须完成上下游评审、部署凭据签发、隔离 PostgreSQL 回归通过与页面联验。
+
+## 页面接线
+
+`/?formalStart=1` 为独立入口，Demo 模式禁止使用。页面用独立凭据调用受保护的
+`GET /v1/operator/formal-start-submission`，只读取部署绑定的不可编辑请求，不返回签名或私钥。
+该 GET 检查凭据及声明时间范围，但不是 Authority 通过结论；所有验签和 B/D 闸门仍由 POST 复核。
+未配置 submission 返回 503，不回退到 Scripted，也不让浏览器自行生成幂等键或授权引用。
+
+确认后提交原请求，校验回执中的 Preview、请求编号、各 Hash、服务身份及三个禁止字段。
+页面只把 ready 显示为“授权核对完成，尚未创建轮次”，不显示执行中或性能收益。
+凭据不写入 Web Storage，POST 完成或失败后清空；重试需重新输入同一凭据。
+刷新后从部署绑定重读同一请求；声明过期后只能通过已有受保护管理面核对，不能新建请求绕过。

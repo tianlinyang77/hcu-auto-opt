@@ -48,6 +48,7 @@ class FormalIntentCapability:
 
     token_sha256: str
     assertion: FormalStartActorAssertion
+    submission: FormalIntentSubmission | None = None
 
     def __post_init__(self) -> None:
         if len(self.token_sha256) != 64 or any(
@@ -56,6 +57,10 @@ class FormalIntentCapability:
             raise ValueError("Formal capability requires a SHA256 credential digest")
         if self.assertion.action != "create":
             raise ValueError("Formal create capability requires a create assertion")
+        if self.submission is not None and formal_start_content_hash(self.submission) != (
+            self.assertion.subject_digest
+        ):
+            raise ValueError("Formal submission does not match its signed scope")
 
 
 @dataclass(frozen=True)
@@ -83,7 +88,7 @@ class FormalStartManagement:
             return cls(
                 coordinator,
                 tuple(
-                    FormalIntentCapability(item.token_sha256, item.assertion)
+                    FormalIntentCapability(item.token_sha256, item.assertion, item.submission)
                     for item in bundle.capabilities
                 ),
             )
@@ -93,14 +98,7 @@ class FormalStartManagement:
     def router(self) -> APIRouter:
         router = APIRouter()
 
-        @router.post(
-            "/v1/operator/formal-start-intents",
-            response_model=FormalStartIntentResult,
-        )
-        def create_intent(
-            payload: FormalIntentSubmission, request: Request, response: Response
-        ) -> FormalStartIntentResult:
-            # Explicit header only: cookies/query parameters cannot authenticate.
+        def authenticate(request: Request) -> FormalIntentCapability:
             headers = request.headers.getlist("authorization")
             value = headers[0] if len(headers) == 1 else ""
             scheme, _, token = value.partition(" ")
@@ -111,9 +109,33 @@ class FormalStartManagement:
                 (item for item in self.capabilities if compare_digest(item.token_sha256, digest)),
                 None,
             )
-            if capability is None or capability.assertion.subject_digest != (
-                formal_start_content_hash(payload)
-            ):
+            if capability is None:
+                raise _rejected()
+            return capability
+
+        @router.get("/v1/operator/formal-start-submission", response_model=FormalIntentSubmission)
+        def prepare(request: Request, response: Response) -> FormalIntentSubmission:
+            capability = authenticate(request)
+            now = self.coordinator.clock()
+            if not capability.assertion.issued_at <= now < capability.assertion.expires_at:
+                raise _rejected()
+            if capability.submission is None:
+                raise HTTPException(503, "Formal submission is not configured")
+            # Read-only preparation is not an Authority verdict. POST revalidates
+            # all signatures, profiles and authorities through the coordinator.
+            response.headers["Cache-Control"] = "no-store"
+            return capability.submission
+
+        @router.post(
+            "/v1/operator/formal-start-intents",
+            response_model=FormalStartIntentResult,
+        )
+        def create_intent(
+            payload: FormalIntentSubmission, request: Request, response: Response
+        ) -> FormalStartIntentResult:
+            # Explicit header only: cookies/query parameters cannot authenticate.
+            capability = authenticate(request)
+            if capability.assertion.subject_digest != (formal_start_content_hash(payload)):
                 raise _rejected()
             signed = FormalStartIntentRequest(
                 **payload.model_dump(), actor_assertion=capability.assertion
@@ -137,6 +159,7 @@ def _rejected() -> HTTPException:
 class _CapabilityRecord(FrozenFormalStartModel):
     token_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     assertion: FormalStartActorAssertion
+    submission: FormalIntentSubmission | None = None
 
 
 class _CapabilityBundle(FrozenFormalStartModel):

@@ -10,7 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hcuopt.api.app import create_app
-from hcuopt.api.formal_start_management import FormalIntentCapability, FormalStartManagement
+from hcuopt.api.formal_start_management import (
+    FormalIntentCapability,
+    FormalIntentSubmission,
+    FormalStartManagement,
+)
 from tests.unit.test_formal_operator_plans import NOW, _fixture
 from tests.unit.test_formal_operator_start import (
     _authorities,
@@ -231,3 +235,39 @@ def test_capability_file_cannot_escape_root(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="unavailable or invalid"):
         FormalStartManagement.from_file(management.coordinator, deployment_root=root, path=path)
+
+
+def test_preparation_returns_only_bound_submission_without_writes(tmp_path: Path) -> None:
+    management, repository, payload = setup_management(tmp_path)
+    management = replace(
+        management,
+        capabilities=(
+            replace(
+                management.capabilities[0],
+                submission=FormalIntentSubmission.model_validate(payload),
+            ),
+        ),
+    )
+    with client_for(management, repository) as client:
+        assert client.get("/v1/operator/formal-start-submission").status_code == 403
+        loaded = client.get(
+            "/v1/operator/formal-start-submission", headers={"Authorization": f"Bearer {TOKEN}"}
+        )
+        assert loaded.status_code == 200
+        assert loaded.json() == payload
+        assert loaded.headers["cache-control"] == "no-store"
+        management.coordinator.clock = lambda: NOW + timedelta(hours=1)
+        assert (
+            client.get(
+                "/v1/operator/formal-start-submission", headers={"Authorization": f"Bearer {TOKEN}"}
+            ).status_code
+            == 403
+        )
+    assert not repository.intents
+    with pytest.raises(ValueError, match="signed scope"):
+        replace(
+            management.capabilities[0],
+            submission=FormalIntentSubmission.model_validate(
+                {**payload, "idempotency_key": "different-key"}
+            ),
+        )

@@ -64,6 +64,7 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
                     {
                         "token_sha256": sha256(TOKEN.encode()).hexdigest(),
                         "assertion": management.capabilities[0].assertion.model_dump(mode="json"),
+                        "submission": payload,
                     }
                 ],
             }
@@ -83,6 +84,9 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
 
     headers = {"Authorization": f"Bearer {TOKEN}"}
     with TestClient(make_app()) as client:
+        prepared = client.get("/v1/operator/formal-start-submission", headers=headers)
+        assert prepared.status_code == 200
+        assert prepared.json() == payload
 
         def submit(_):  # type: ignore[no-untyped-def]
             return client.post("/v1/operator/formal-start-intents", json=payload, headers=headers)

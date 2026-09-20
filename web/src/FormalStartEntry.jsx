@@ -1,0 +1,57 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+import { useRef, useState } from "react";
+import { loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
+
+const STATES = { awaiting_authority: "等待授权材料", ready_for_round_creation: "授权核对完成，尚未创建轮次", failed: "授权核对失败", cancelled: "意图已取消" };
+
+export function FormalStartEntry() {
+  const [token, setToken] = useState("");
+  const [plan, setPlan] = useState(null);
+  const [receipt, setReceipt] = useState(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const lock = useRef(false);
+  async function operate(submit) {
+    if (lock.current || (submit && !confirmed)) return;
+    lock.current = true; setBusy(true); setError("");
+    try {
+      if (submit) setReceipt(await submitFormalIntent(plan, token));
+      else setPlan(await loadFormalSubmission(token));
+    } catch (failure) { setError(failure.message); }
+    finally { if (submit) setToken(""); lock.current = false; setBusy(false); }
+  }
+  return <main className="workspace-panel" style={{ maxWidth: 960, margin: "40px auto", padding: 24 }}>
+    <a href="/">返回工作台</a>
+    <h1>正式启动 · 意图受理</h1>
+    <p>本入口只核对冻结计划和授权，不创建执行轮次、不访问 HCU、不自动发布。</p>
+    <section className="wizard-card full-width" style={{ padding: 24 }}>
+      <h2>1. 读取部署方登记的计划</h2>
+      <p>输入独立操作凭据，不是模型 API Key。凭据仅保留在当前页面内存，提交后清空。</p>
+      <label className="plan-field">独立操作凭据
+        <input type="password" autoComplete="off" value={token} disabled={busy || !!receipt}
+          onChange={(event) => setToken(event.target.value)} />
+      </label>
+      {!plan && <button className="primary-button" disabled={busy || !token} onClick={() => operate(false)}>读取冻结计划</button>}
+      {plan && <>
+        <h2>2. 核对请求</h2>
+        <p>以下是不可编辑的部署引用；读取成功不代表授权闸门已通过。</p>
+        <dl>{[["计划预览", plan.preview_id], ["请求编号（重试不变）", plan.idempotency_key],
+          ["计划 Hash", plan.resolved_plan_hash], ["窗口授权 Hash", plan.formal_authorization_hash], ["执行授权 Hash", plan.execution_authority_hash],
+          ["评测授权 Hash", plan.evaluation_authority_hash], ["服务实例", plan.expected_service_identity.server_instance_id]]
+          .map(([label, value]) => <div key={label}><dt>{label}</dt><dd className="mono" style={{ overflowWrap: "anywhere" }}>{value}</dd></div>)}</dl>
+        <label className="plan-field"><span><input type="checkbox" checked={confirmed} disabled={busy || !!receipt}
+          onChange={(event) => setConfirmed(event.target.checked)} /> 我确认仅提交启动意图，此操作不会启动 HCU</span></label>
+        <button className="primary-button" disabled={busy || !confirmed || !token || !!receipt} onClick={() => operate(true)}>
+          {busy ? "正在处理…" : "提交原请求 / 安全重试"}</button>
+        <p>失败后重新输入同一凭据，重试仍使用上述请求。刷新后须用同一凭据重新读取；过期时请交由管理面核对，勿另建计划。</p>
+      </>}
+      {error && <p role="alert">{error}</p>}
+      {receipt && <section role="status"><h2>3. 服务端回执</h2>
+        <p>{STATES[receipt.state]}</p><p className="mono">意图：{receipt.intent_id}</p>
+        <p>尚未派发 Worker；此回执不是正确性、性能或签核结论。</p>
+        {receipt.blocker_codes?.map((code) => <p className="mono" key={code}>{code}</p>)}
+      </section>}
+    </section>
+  </main>;
+}
