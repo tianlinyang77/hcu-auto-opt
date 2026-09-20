@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from hcuopt.adapters.endpoint_adjudication import LocalEndpointCampaignAdjudicator
+from hcuopt.adapters.registry import AdapterRegistry
 from hcuopt.cli import main
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointAdjudicationGroupRef,
@@ -21,6 +23,7 @@ from hcuopt.measurement.endpoint_models import (
     SignedM1EvidenceReference,
     endpoint_plan_hash,
 )
+from hcuopt.workers.handlers import JobHandlers
 
 
 def _hash_bytes(value: bytes) -> str:
@@ -255,6 +258,26 @@ def test_endpoint_d_calls_noisy_campaign_inconclusive(tmp_path: Path) -> None:
     assert result.verdict == "inconclusive"
     assert result.confidence_interval_percent is not None
     assert result.confidence_interval_percent[0] < 0 < result.confidence_interval_percent[1]
+
+
+def test_endpoint_d_worker_handler_uses_root_bound_real_adapter(tmp_path: Path) -> None:
+    request, _ = _request(tmp_path)
+    profile = "endpoint-formal-adjudicator-v1"
+    adapter = LocalEndpointCampaignAdjudicator(
+        profile=profile,
+        allowed_evidence_roots=(tmp_path,),
+    )
+    handlers = JobHandlers(
+        AdapterRegistry(profile=profile, endpoint_campaign_adjudicator=adapter)
+    )
+    payload = request.model_dump(mode="json")
+    payload["_job_context"] = {"untrusted": "not part of the frozen request"}
+
+    result = handlers.handle("endpoint_adjudicate", payload)
+
+    assert result["verdict"] == "faster"
+    assert result["formal_d_adjudication"] is True
+    assert result["automatic_release_allowed"] is False
 
 
 def test_endpoint_d_fails_closed_after_sample_tampering(tmp_path: Path) -> None:

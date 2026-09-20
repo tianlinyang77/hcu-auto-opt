@@ -194,6 +194,7 @@ class JobType(StrEnum):
     MANUAL_PERFORMANCE = "manual_performance"
     MANUAL_ADJUDICATE = "manual_adjudicate"
     ENDPOINT_VALIDATION = "endpoint_validation"
+    ENDPOINT_ADJUDICATE = "endpoint_adjudicate"
 
 
 class EvaluationPhase(StrEnum):

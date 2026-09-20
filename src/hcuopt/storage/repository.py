@@ -6633,6 +6633,20 @@ class PostgresRepository(
                     """,
                     (job["job_id"],),
                 )
+            elif job["job_type"] == JobType.ENDPOINT_ADJUDICATE.value:
+                advanced = connection.execute(
+                    """
+                    UPDATE endpoint_validation_campaigns
+                    SET state = 'adjudicating', updated_at = now()
+                    WHERE adjudication_job_id = %s
+                      AND state = 'awaiting_adjudication'
+                    """,
+                    (job["job_id"],),
+                )
+                if advanced.rowcount != 1:
+                    raise Conflict(
+                        "endpoint D Job has no awaiting frozen Campaign binding"
+                    )
             connection.execute(
                 "UPDATE workers SET last_heartbeat_at = now() WHERE worker_id = %s",
                 (worker_id,),
@@ -6884,6 +6898,9 @@ class PostgresRepository(
                 )
                 self._fail_endpoint_validation_run_after_job_failure(
                     connection, job, error, cleanup_evidence
+                )
+                self._fail_endpoint_adjudication_after_job_failure(
+                    connection, job, error
                 )
         assert row is not None
         return row
@@ -7159,6 +7176,9 @@ class PostgresRepository(
                         connection, job, error
                     )
                     self._fail_endpoint_validation_run_after_job_failure(
+                        connection, job, error
+                    )
+                    self._fail_endpoint_adjudication_after_job_failure(
                         connection, job, error
                     )
                 recovered.append(job["job_id"])
@@ -8860,6 +8880,11 @@ class PostgresRepository(
                 VALUES (%s, 'cancelled', %s)
                 """,
                 (job_id, Jsonb({"reason": reason})),
+            )
+            self._fail_endpoint_adjudication_after_job_failure(
+                connection,
+                job,
+                {"code": "cancelled", "message": reason},
             )
         assert row is not None
         return row

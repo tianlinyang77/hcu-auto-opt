@@ -21,7 +21,8 @@ def test_m2_search_round_migration_is_registered_last() -> None:
     assert MIGRATIONS[22] == "0022_endpoint_validation_control_plane.sql"
     assert MIGRATIONS[23] == "0023_endpoint_validation_failure_evidence.sql"
     assert MIGRATIONS[24] == "0024_endpoint_campaign_control_plane.sql"
-    assert [version for version, _ in migration_plan()] == list(range(1, 25))
+    assert MIGRATIONS[25] == "0025_endpoint_adjudication_jobs.sql"
+    assert [version for version, _ in migration_plan()] == list(range(1, 26))
 
 
 def test_endpoint_failure_migration_preserves_error_and_cleanup_evidence() -> None:

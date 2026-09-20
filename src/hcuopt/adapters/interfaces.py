@@ -9,6 +9,9 @@ from hcuopt.contracts.agent_v1 import (
     CandidateGenerationRequest,
     CandidateProposalBatch,
 )
+from hcuopt.contracts.endpoint_adjudication_v1 import (
+    EndpointFormalAdjudicationResult,
+)
 from hcuopt.contracts.platform_v1 import (
     AdapterProvenance,
     ArtifactManifest,
@@ -118,6 +121,17 @@ class EndpointMeasurementRunner(Protocol):
     def run_endpoint_validation(
         self, payload: Mapping[str, Any], output_dir: Path
     ) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class EndpointCampaignAdjudicatorAdapter(Protocol):
+    """Independent D boundary; it has no HCU, signoff, or release authority."""
+
+    provenance: AdapterProvenance
+
+    def adjudicate_endpoint_campaign(
+        self, payload: Mapping[str, Any]
+    ) -> EndpointFormalAdjudicationResult: ...
 
 
 class Stage0ProbeAdapter(Protocol):
