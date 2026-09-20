@@ -2,10 +2,8 @@
 
 """Real Intent persistence; plan authorities/signatures are explicit test fixtures."""
 
-import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha256
 from uuid import UUID, uuid4
 
 import psycopg
@@ -16,8 +14,11 @@ from psycopg.conninfo import make_conninfo
 
 from hcuopt.api.app import create_app
 from hcuopt.api.formal_start_management import FormalStartManagement
+from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentRequest
+from hcuopt.deployment.formal_intent_access import materialize_formal_intent_access
 from hcuopt.storage.repository import PostgresRepository
-from tests.unit.test_formal_start_management_api import TOKEN, setup_management
+from tests.unit.test_formal_operator_plans import NOW
+from tests.unit.test_formal_start_management_api import setup_management
 
 pytestmark = [
     pytest.mark.postgres,
@@ -55,26 +56,22 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
         def assert_operator_candidate_ids_available(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             return memory.assert_operator_candidate_ids_available(*args, **kwargs)
 
-    config = tmp_path / "capabilities.json"
-    config.write_text(
-        json.dumps(
-            {
-                "schema_version": "formal-intent-capabilities-v1",
-                "capabilities": [
-                    {
-                        "token_sha256": sha256(TOKEN.encode()).hexdigest(),
-                        "assertion": management.capabilities[0].assertion.model_dump(mode="json"),
-                        "submission": payload,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
+    signed = FormalStartIntentRequest(
+        **payload, actor_assertion=management.capabilities[0].assertion
     )
+    access = materialize_formal_intent_access(
+        signed,
+        expected_actor_id=signed.actor_assertion.actor_id,
+        verifier=management.coordinator.actor_verifier,
+        now=NOW,
+        private_parent=tmp_path / "private",
+    )
+    config = access.configuration
+    token = access.credential.read_text(encoding="utf-8")
 
     def make_app():  # type: ignore[no-untyped-def]
         loaded = FormalStartManagement.from_file(
-            management.coordinator, deployment_root=tmp_path, path=config
+            management.coordinator, deployment_root=access.directory, path=config
         )
         return create_app(
             repository=FixtureAuthorityRepository(isolated_dsn),
@@ -82,7 +79,7 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
             auto_migrate=False,
         )
 
-    headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers = {"Authorization": f"Bearer {token}"}
     with TestClient(make_app()) as client:
         prepared = client.get("/v1/operator/formal-start-submission", headers=headers)
         assert prepared.status_code == 200
