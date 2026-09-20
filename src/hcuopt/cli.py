@@ -40,6 +40,13 @@ def _load_stage0(path: Path) -> Stage0Evidence:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hcuopt")
     sub = parser.add_subparsers(dest="command", required=True)
+    console = sub.add_parser(
+        "endpoint-console", help="manage a built local endpoint result console"
+    )
+    console_sub = console.add_subparsers(dest="console_action", required=True)
+    console_sub.add_parser("serve").add_argument("config", type=Path)
+    for action in ("status", "stop"):
+        console_sub.add_parser(action).add_argument("instance_directory", type=Path)
     viewer = sub.add_parser(
         "framework-viewer", help="manage a local result viewer (read-only default)"
     )
@@ -124,6 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "endpoint-console":
+        from hcuopt.deployment.endpoint_console import load_config, serve
+        from hcuopt.deployment.viewer_service import control_instance
+
+        try:
+            if args.console_action == "serve":
+                return serve(load_config(args.config))
+            print(json.dumps(control_instance(args.instance_directory, args.console_action)))
+            return 0
+        except Exception:
+            print(json.dumps({"ok": False, "error": "console_command_failed",
+                              "next_step": "Check build, config, VPN, SSH and API availability"}))
+            return 2
     if args.command == "framework-viewer":
         from hcuopt.deployment.viewer_service import (
             ViewerServiceError,
