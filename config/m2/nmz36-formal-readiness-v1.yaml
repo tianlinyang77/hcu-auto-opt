@@ -106,7 +106,7 @@ gates:
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py
-        sha256: sha256:48b53aece2e5970de8522976133072188377efebaba8d6bb6dc432910df8cc49
+        sha256: sha256:a269b90399ffab328d99822dc3e2c4a0f694e69a527695551dc72f9bc1506547
         digest_mode: text_lf
         evidence_type: formal_repository_terminal_transactions
       - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql

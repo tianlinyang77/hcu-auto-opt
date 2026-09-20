@@ -844,7 +844,7 @@ export function App() {
         {!round ? (
           <EmptyState
             title="尚无可展示的 Scripted Round"
-            detail="只会列出 finalized StartIntent 对应的 Round。先使用 CLI 建立 Round，再刷新本页面。"
+            detail="点击“新建计划预览”，核对候选与预算后确认启动演练；启动完成后刷新查看轮次。"
             icon={Database}
           />
         ) : (

@@ -23,6 +23,7 @@ import {
 } from "@phosphor-icons/react";
 
 import { createRoundPlanPreview, loadOperatorHotspots } from "./api.js";
+import { ScriptedStartPanel } from "./ScriptedStartPanel.jsx";
 import {
   buildPlanPreviewRequest,
   createDemoPlanPreview,
@@ -336,7 +337,7 @@ function CandidateStep({
   );
 }
 
-function PreviewStep({ preview, error, onBack, onRetry, onClose }) {
+function PreviewStep({ preview, error, onBack, onRetry, onClose, demoMode }) {
   if (error) {
     return (
       <section className="preview-error-state">
@@ -356,7 +357,7 @@ function PreviewStep({ preview, error, onBack, onRetry, onClose }) {
   const expired = isPreviewExpired(preview);
   const state = expired ? "expired" : preview.start_allowed ? "ready" : "blocked";
   const stateCopy = {
-    ready: ["Preflight 已通过", "该 Preview 满足后端 Start 前置条件，但 UI-1 不执行 Start。", CheckCircle],
+    ready: ["Preflight 已通过", "请核对候选和预算，再确认是否创建 Scripted 演练轮次。", CheckCircle],
     blocked: ["存在阻塞项", "必须处理所有 block 后重新生成 Preview。", LockKey],
     expired: ["Preview 已过期", "不可使用旧 Hash 继续执行，请返回并重新生成。", ClockCountdown],
   }[state];
@@ -414,10 +415,7 @@ function PreviewStep({ preview, error, onBack, onRetry, onClose }) {
         </button>
       </aside>
 
-      <section className="preview-no-start full-width">
-        <LockKey size={22} />
-        <div><strong>UI-1 到此为止</strong><span>没有调用 <span className="mono">:start</span>，没有创建 Round、申请 HCU、签核或发布。</span></div>
-      </section>
+      <ScriptedStartPanel key={preview.preview_id} preview={preview} demoMode={demoMode} />
 
       <div className="wizard-actions spread full-width">
         <button className="outline-button" type="button" onClick={onBack}><ArrowLeft size={18} />返回 Candidate</button>
@@ -616,6 +614,7 @@ export function PlanPreviewWorkspace({ dashboard, demoMode, onClose }) {
           )}
           {step === 3 && (
             <PreviewStep
+              demoMode={demoMode}
               preview={preview}
               error={previewError}
               onBack={() => setStep(2)}
