@@ -261,6 +261,18 @@ def test_endpoint_d_calls_noisy_campaign_inconclusive(tmp_path: Path) -> None:
     assert result.confidence_interval_percent[0] < 0 < result.confidence_interval_percent[1]
 
 
+def test_endpoint_adjudication_request_replays_json_signed_m1_uuids(
+    tmp_path: Path,
+) -> None:
+    request, _ = _request(tmp_path)
+
+    replayed = EndpointFormalAdjudicationRequest.model_validate(
+        request.model_dump(mode="json")
+    )
+
+    assert replayed == request
+
+
 def test_endpoint_d_worker_handler_uses_root_bound_real_adapter(tmp_path: Path) -> None:
     request, _ = _request(tmp_path)
     profile = "endpoint-formal-adjudicator-v1"
