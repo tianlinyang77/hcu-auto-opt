@@ -36,11 +36,23 @@ python -m pytest tests/integration/test_formal_dispatch_postgres.py tests/integr
 页面顶部保留“内存数据库与测试签名”提示，查询显示 `not_created`，不把它冒充数据库联验。
 4198 为单独 UI 夹具；上面的 PostgreSQL 验证是自动化测试，两者不是同一次端到端部署。
 
-补充边界：6 项数据库测试通过之后，为同一集成用例追加了 `read_status` 的
-not_created/queued/cancelled 三个读取断言。该次补跑在建立凭据阶段遇到测试主机 Docker
-包装命令故障，pytest 没有启动，因此新增三个数据库读取断言仍待补跑；不能用前一次
-6 passed 冒充这一版已全部验证。只读 HTTP 的测试替身验证和前端浏览器验证已通过。
-未尝试替换或绕过测试主机的 Docker 包装程序。
+补跑更新：测试主机 Docker 命令恢复后，在 `ad19569` 上重新执行上述两个测试文件，
+结果为 **6 passed（45.87s）**，覆盖最后追加的 `read_status` 的
+not_created/queued/cancelled 三个读取断言。临时隧道已关闭，未修改或绕过 Docker 包装程序。
+前端重新验证：lint、56 项单测、构建和 4 项 Sites 包装测试均通过。
+Scripted 集成冒烟 `tests/integration/test_sglang_smoke_scripted.py`：
+13 passed、4 skipped（34.68s）；只验证模拟链路，不代表 SGLang 实机执行。
+
+额外执行 Windows 全量 `python -m pytest tests/unit -q`，结果为
+**1746 passed、46 skipped、18 failed（363.21s）**，不能作为全仓通过证明。
+失败集中在 F1-C pipeline、GitSourceManager、M1 Candidate Builder、No-op Builder
+的符号链接夹具，以及 LocalArtifactStore 的 Windows 只读临时文件清理。
+独立复现后者为 `temporary_path.unlink()` 报 WinError 5。
+仓库 CI 原本只在 Linux 运行完整 unit 集，Windows 使用定向清单；
+这些失败仍予保留，不通过删除测试、放宽制品只读约束或更改系统权限掩盖。
+当前本地验证不等于 Linux 全量回归，后续需在 Linux CPU 环境补齐。
+随后按 CI 的 Windows 定向清单执行组合回归，中途长期无进度，已中断本次测试进程；
+未得到最终汇总，不能记为通过。没有停止预览或其他进程。
 
 ## 未完成项
 
