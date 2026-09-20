@@ -10,6 +10,7 @@ import {
 
 const campaignId = "00000000-0000-0000-0000-000000000157";
 const resultHash = `sha256:${"a".repeat(64)}`;
+const credential = "campaign-signing-credential-" + "x".repeat(32);
 const summary = () => ({
   campaign: {
     campaign_id: campaignId,
@@ -66,8 +67,9 @@ test("submits one frozen signoff and rejects a mismatched receipt", async () => 
     { decision: "rejected", actor: "reviewer", reason: "insufficient effect" },
     "endpoint-signoff-003",
   );
-  const receipt = await submitEndpointCampaignSignoff(intent, async (path, options) => {
+  const receipt = await submitEndpointCampaignSignoff(intent, credential, async (path, options) => {
     assert.equal(path, `/v1/endpoint-validation-campaigns/${campaignId}/signoff`);
+    assert.equal(options.headers.Authorization, `Bearer ${credential}`);
     assert.deepEqual(JSON.parse(options.body), intent.payload);
     return {
       ok: true,
@@ -83,5 +85,9 @@ test("submits one frozen signoff and rejects a mismatched receipt", async () => 
   assert.equal(
     endpointCampaignSignoffMatches(intent, { ...receipt, adjudication_result_sha256: `sha256:${"b".repeat(64)}` }),
     false,
+  );
+  assert.throws(
+    () => submitEndpointCampaignSignoff(intent, "short", async () => assert.fail("must not fetch")),
+    /独立的 Campaign 签核凭据/,
   );
 });

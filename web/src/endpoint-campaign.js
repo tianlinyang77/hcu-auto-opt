@@ -77,10 +77,17 @@ export function freezeEndpointCampaignSignoff(summary, fields, idempotencyKey) {
   });
 }
 
-export function submitEndpointCampaignSignoff(intent, fetcher = fetch) {
+export function submitEndpointCampaignSignoff(intent, credential, fetcher = fetch) {
+  if (typeof credential !== "string" || !/^[\x21-\x7e]{32,256}$/.test(credential)) {
+    throw new Error("请输入独立的 Campaign 签核凭据，不要使用模型 API Key");
+  }
   return request(
     `/v1/endpoint-validation-campaigns/${intent.campaignId}/signoff`,
-    { method: "POST", body: JSON.stringify(intent.payload) },
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${credential}` },
+      body: JSON.stringify(intent.payload),
+    },
     fetcher,
   );
 }

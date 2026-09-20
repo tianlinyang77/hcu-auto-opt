@@ -249,6 +249,14 @@ def create_app(
     auto_migrate: bool | None = None,
     agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
+    if endpoint_campaign_signoff_authorizer is None:
+        from hcuopt.deployment.endpoint_campaign_signoff_identity import (
+            endpoint_campaign_signoff_identity_from_env,
+        )
+
+        endpoint_campaign_signoff_authorizer = (
+            endpoint_campaign_signoff_identity_from_env()
+        )
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
         Path(os.getenv("HCUOPT_TARGET_ROOT", str(default_target_root)))
