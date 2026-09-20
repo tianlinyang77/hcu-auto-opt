@@ -7,7 +7,13 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
 
+from hcuopt.adapters.bw20_endpoint_execution import BASELINE_MODULE_HASH
 from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
+from hcuopt.contracts.endpoint_adjudication_v1 import (
+    EndpointAdjudicationGroupRef,
+    EndpointCampaignCreate,
+    EndpointFormalAdjudicationRequest,
+)
 from hcuopt.contracts.endpoint_control_v1 import (
     EndpointValidationJobResult,
     EndpointValidationRunCreate,
@@ -272,6 +278,155 @@ class EndpointValidationRepositoryMixin:
             "job": self.get_job(run["job_id"]),
             "events": self.list_task_events(run["task_id"]),
         }
+
+    def create_endpoint_validation_campaign(
+        self, request: EndpointCampaignCreate
+    ) -> dict[str, Any]:
+        campaign_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:endpoint-campaign:{request.idempotency_key}"
+        )
+        with self.connection() as connection:
+            replay = connection.execute(
+                """
+                SELECT * FROM endpoint_validation_campaigns
+                WHERE idempotency_key = %s FOR UPDATE
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            if replay is not None:
+                frozen = replay["adjudication_request"]
+                if (
+                    replay["name"] != request.name
+                    or replay["endpoint_run_ids"]
+                    != list(request.endpoint_run_ids)
+                    or frozen["baseline_module_hash"] != BASELINE_MODULE_HASH
+                    or frozen["raw_evidence_manifest_uri"]
+                    != request.raw_evidence_manifest_uri
+                    or frozen["raw_evidence_manifest_sha256"]
+                    != request.raw_evidence_manifest_sha256
+                ):
+                    raise Conflict(
+                        "endpoint campaign idempotency_key was reused with different inputs"
+                    )
+                return replay
+
+            rows = []
+            for endpoint_run_id in request.endpoint_run_ids:
+                row = connection.execute(
+                    """
+                    SELECT r.*, t.state AS task_state, j.state AS job_state,
+                           j.workflow_advanced_at, j.result AS job_result
+                    FROM endpoint_validation_runs AS r
+                    JOIN tasks AS t ON t.task_id = r.task_id
+                    JOIN jobs AS j ON j.job_id = r.job_id
+                    WHERE r.endpoint_run_id = %s
+                    FOR SHARE OF r, t, j
+                    """,
+                    (endpoint_run_id,),
+                ).fetchone()
+                if row is None:
+                    raise NotFound(f"endpoint validation run not found: {endpoint_run_id}")
+                rows.append(row)
+
+            first = rows[0]
+            signed_m1 = first["request_payload"]["signed_m1"]
+            workload = first["workload"]
+            plan = first["plan"]
+            groups = []
+            for group_ordinal, row in enumerate(rows):
+                if (
+                    row["state"] != "provisional_passed"
+                    or row["task_state"] != TaskState.ENDPOINT_PROVISIONAL_PASSED.value
+                    or row["job_state"] != JobState.SUCCEEDED.value
+                    or row["workflow_advanced_at"] is None
+                    or row["result"] is None
+                    or row["job_result"] != row["result"]
+                    or row["automatic_release_allowed"] is not False
+                ):
+                    raise Conflict(
+                        "endpoint campaign requires eight fully advanced successful Runs"
+                    )
+                if any(
+                    row[name] != first[name]
+                    for name in (
+                        "signed_m1_task_id",
+                        "target_snapshot_id",
+                        "adapter_profile",
+                        "environment_fingerprint",
+                        "workload",
+                        "plan",
+                        "plan_hash",
+                    )
+                ) or row["request_payload"]["signed_m1"] != signed_m1:
+                    raise Conflict("endpoint campaign Run bindings are not identical")
+                result = EndpointValidationJobResult.model_validate(row["result"])
+                if result.endpoint_run_id != row["endpoint_run_id"]:
+                    raise Conflict("endpoint campaign result belongs to another Run")
+                groups.append(
+                    EndpointAdjudicationGroupRef(
+                        group_ordinal=group_ordinal,
+                        endpoint_run_id=row["endpoint_run_id"],
+                        plan_hash=row["plan_hash"],
+                        acquisitions=result.acquisitions,
+                    )
+                )
+
+            adjudication = EndpointFormalAdjudicationRequest.model_validate(
+                {
+                    "campaign_id": campaign_id,
+                    "signed_m1": signed_m1,
+                    "workload": workload,
+                    "group_plan": plan,
+                    "environment_fingerprint": first["environment_fingerprint"],
+                    "baseline_module_hash": BASELINE_MODULE_HASH,
+                    "groups": groups,
+                    "raw_evidence_manifest_uri": request.raw_evidence_manifest_uri,
+                    "raw_evidence_manifest_sha256": (
+                        request.raw_evidence_manifest_sha256
+                    ),
+                    "producer_verdict": None,
+                    "automatic_release_allowed": False,
+                }
+            )
+            row = connection.execute(
+                """
+                INSERT INTO endpoint_validation_campaigns (
+                    campaign_id, name, signed_m1_task_id, target_snapshot_id,
+                    adapter_profile, environment_fingerprint, endpoint_run_ids,
+                    adjudication_request, state, idempotency_key,
+                    automatic_release_allowed
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    'awaiting_adjudication', %s, FALSE
+                ) RETURNING *
+                """,
+                (
+                    campaign_id,
+                    request.name,
+                    first["signed_m1_task_id"],
+                    first["target_snapshot_id"],
+                    first["adapter_profile"],
+                    first["environment_fingerprint"],
+                    list(request.endpoint_run_ids),
+                    Jsonb(adjudication.model_dump(mode="json")),
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+        assert row is not None
+        return row
+
+    def get_endpoint_validation_campaign(self, campaign_id: UUID) -> dict[str, Any]:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM endpoint_validation_campaigns
+                WHERE campaign_id = %s
+                """,
+                (campaign_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(f"endpoint validation campaign not found: {campaign_id}")
+        return row
 
     def record_endpoint_validation_result(
         self, job: dict[str, Any], result: EndpointValidationJobResult

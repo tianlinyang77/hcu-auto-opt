@@ -95,3 +95,8 @@ ABBA group 而不是 request 作为独立单位输出 `faster/slower/inconclusiv
 该能力目前是正式 D 核心和离线入口；Campaign 的 PostgreSQL 持久化、自动 D Job、页面
 展示和人工签核仍在 #157 范围内。因此既有 v2 汇总仍保持
 `formal_d_adjudication=false`，不能仅因为代码入口已存在而追认成正式裁决。
+
+ADR-0021 进一步增加了 Campaign 控制面：API 只有在八个 Run 均已成功并完成 Workflow
+advance，且 Signed M1、Target、环境、Workload、Plan 与 Hash 全部相同时，才会冻结
+Campaign 和完整 D request。绑定写入后由数据库 Trigger 保持不可变。自动 D Job、页面和
+人工签核仍是下一步，Campaign 创建本身不会产生 verdict。

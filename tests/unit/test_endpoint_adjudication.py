@@ -10,6 +10,7 @@ import pytest
 from hcuopt.cli import main
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointAdjudicationGroupRef,
+    EndpointCampaignCreate,
     EndpointFormalAdjudicationRequest,
 )
 from hcuopt.contracts.endpoint_control_v1 import EndpointAcquisitionResultRef
@@ -309,3 +310,33 @@ def test_endpoint_adjudication_cli_publishes_machine_readable_verdict(
     assert output["verdict"] == "faster"
     assert output["formal_d_adjudication"] is True
     assert output["automatic_release_allowed"] is False
+
+
+def test_endpoint_campaign_create_requires_eight_local_group_bindings() -> None:
+    run_ids = tuple(uuid4() for _ in range(8))
+    request = EndpointCampaignCreate(
+        name="formal endpoint campaign",
+        endpoint_run_ids=run_ids,
+        raw_evidence_manifest_uri="file:///evidence/raw-hashes.json",
+        raw_evidence_manifest_sha256="sha256:" + "b" * 64,
+        idempotency_key="formal-endpoint-campaign-v1",
+    )
+
+    assert request.endpoint_run_ids == run_ids
+    assert request.automatic_release_allowed is False
+    with pytest.raises(ValueError, match="eight distinct"):
+        EndpointCampaignCreate(
+            name=request.name,
+            endpoint_run_ids=(run_ids[0],) * 8,
+            raw_evidence_manifest_uri=request.raw_evidence_manifest_uri,
+            raw_evidence_manifest_sha256=request.raw_evidence_manifest_sha256,
+            idempotency_key=request.idempotency_key,
+        )
+    with pytest.raises(ValueError, match="local file URI"):
+        EndpointCampaignCreate(
+            name=request.name,
+            endpoint_run_ids=run_ids,
+            raw_evidence_manifest_uri="https://example.invalid/raw-hashes.json",
+            raw_evidence_manifest_sha256=request.raw_evidence_manifest_sha256,
+            idempotency_key=request.idempotency_key,
+        )
