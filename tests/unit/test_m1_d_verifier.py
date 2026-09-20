@@ -293,7 +293,7 @@ class _Suite:
                 {
                     "variant": variant,
                     "process_id": pid,
-                    "process_start_token": str(token),
+                    "process_start_token": f"linux-proc-startticks:{token}",
                     "start_record": {"uri": start.uri, "sha256": start.sha256},
                     "exit_record": {"uri": exit_record.uri, "sha256": exit_record.sha256},
                     "stdout": {"uri": stdout.uri, "sha256": stdout.sha256},
@@ -1004,9 +1004,7 @@ def test_invalid_evidence_still_produces_immutable_failure_bundle(
     assert result.evaluation.passed is None
     assert result.evidence.summary["automatic_release_allowed"] is False
     assert result.evidence.summary["correctness_failure_codes"] == list(correctness.failure_codes)
-    detached_measurement = measurement.model_copy(
-        update={"raw_samples_hash": "sha256:" + "b" * 64}
-    )
+    detached_measurement = measurement.model_copy(update={"raw_samples_hash": "sha256:" + "b" * 64})
     with pytest.raises(ValueError, match="another Performance Reference"):
         build_m1_adjudication_result(
             context.model_copy(update={"measurement": detached_measurement}),
@@ -1032,9 +1030,7 @@ def test_report_is_deterministic_bound_and_never_authorizes_release(tmp_path: Pa
     suite = _Suite(tmp_path / "evidence")
     correctness = suite.verify()
     _, performance = _performance(suite, correctness, [0.1, 0.11, 0.09, 0.1])
-    measurement = suite.measurement.model_copy(
-        update={"summary": {"producer_verdict": "ignored"}}
-    )
+    measurement = suite.measurement.model_copy(update={"summary": {"producer_verdict": "ignored"}})
     measurement_provenance = measurement.adapter_provenance
     adjudication_provenance = (
         measurement_provenance,

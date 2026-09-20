@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from hcuopt.deployment.nmz36_m1_allocator import (
     _base_docker_argv,
@@ -15,6 +18,7 @@ from hcuopt.measurement.m1_allocator_reference import build_case, input_hash
 from hcuopt.measurement.m1_allocator_worker import (
     _proc_start_token as worker_proc_start_token,
 )
+from hcuopt.measurement.m1_allocator_worker import _validate_expected_device
 from hcuopt.targets import load_target
 
 TARGET_PATH = (
@@ -72,6 +76,31 @@ def test_allocator_process_tokens_use_the_formal_linux_identity_format() -> None
     expected = "linux-proc-startticks:778899"
     assert deployment_proc_start_token(stat_line, process_id) == expected
     assert worker_proc_start_token(stat_line, process_id) == expected
+
+
+def test_allocator_worker_attests_optional_bw20_pci_and_architecture() -> None:
+    properties = SimpleNamespace(
+        pci_domain_id=0,
+        pci_bus_id=177,
+        pci_device_id=0,
+        gcnArchName="gfx936:sramecc+",
+    )
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(get_device_properties=lambda device: properties)
+    )
+    args = SimpleNamespace(
+        expected_device_pci="0000:b1:00.0",
+        expected_device_architecture="gfx936",
+    )
+    assert _validate_expected_device(torch, args) == {
+        "pci": "0000:b1:00.0",
+        "architecture": "gfx936",
+        "logical_device_index": 0,
+    }
+
+    properties.pci_bus_id = 178
+    with pytest.raises(RuntimeError, match="differs"):
+        _validate_expected_device(torch, args)
 
 
 def test_allocator_controller_keeps_docker_stdin_attached() -> None:

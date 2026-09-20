@@ -5,6 +5,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.interfaces import (
+    EndpointMeasurementRunner,
     ManualCandidateAdjudicatorAdapter,
     ManualKernelCorrectnessAdapter,
     ManualPerformanceMeasurementHarness,
@@ -50,6 +51,16 @@ class JobHandlers:
         return handler(payload)
 
     def cleanup(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if job_type == "stage0_probe" and self.adapters.stage0_probe is not None:
+            probe = self.adapters.require("stage0_probe")
+            cleanup_probe = getattr(probe, "cleanup_probe", None)
+            if callable(cleanup_probe):
+                # Deployment-owned job context also handles heartbeat/lease-loss
+                # cleanup. Do not fall back to a broad resource-wide cleaner.
+                result = dict(cleanup_probe(payload))
+                if not all(isinstance(result.get(key), dict) for key in ("fence", "health")):
+                    raise ExecutionSafetyError("Stage 0 job cleanup response is incomplete")
+                return result
         context = payload.get("_job_context", {})
         resource_id = context.get("resource_id")
         fencing_token = context.get("fencing_token")
@@ -172,6 +183,22 @@ class JobHandlers:
             "M1 performance result",
         )
         return result.model_dump(mode="json")
+
+    def handle_endpoint_validation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runner = self.adapters.require("endpoint_measurement_runner")
+        if not isinstance(runner, EndpointMeasurementRunner):
+            raise AdapterUnavailable(
+                "endpoint_validation requires the endpoint measurement interface"
+            )
+        result = dict(runner.run_endpoint_validation(payload, self.output_dir))
+        provenance = result.get("adapter_provenance")
+        if not isinstance(provenance, list) or runner.provenance.model_dump(
+            mode="json"
+        ) not in provenance:
+            raise ExecutionSafetyError(
+                "endpoint validation result omits the active Runner provenance"
+            )
+        return result
 
     def handle_manual_adjudicate(self, payload: dict[str, Any]) -> dict[str, Any]:
         adjudicator = self.adapters.require("candidate_adjudicator")

@@ -233,6 +233,33 @@ def test_registered_v2_amortizes_timer_error_over_a_protocol_bound_batch() -> No
     assert packaged.canonical_bytes == loaded.canonical_bytes
 
 
+def test_registered_bw20_v3_binds_each_warmup_to_a_complete_batch() -> None:
+    loaded = load_registered_stage0_protocol("s0-g0-bw20-v3", config_root=PROTOCOL_ROOT)
+    packaged = load_registered_stage0_protocol("s0-g0-bw20-v3")
+
+    assert loaded.protocol.sampling.warmup_count == 10
+    assert loaded.protocol.sampling.warmup_batch_iterations == 5000
+    assert (
+        loaded.protocol.sampling.warmup_batch_iterations
+        == loaded.protocol.sampling.batch_iterations
+    )
+    assert packaged.protocol_hash == loaded.protocol_hash
+    assert packaged.canonical_bytes == loaded.canonical_bytes
+
+
+def test_registered_bw20_v4_binds_a_device_dominant_fixture_and_spaced_calibration() -> None:
+    loaded = load_registered_stage0_protocol("s0-g0-bw20-v4", config_root=PROTOCOL_ROOT)
+    packaged = load_registered_stage0_protocol("s0-g0-bw20-v4")
+
+    assert loaded.protocol.sampling.workload_elements == 1 << 24
+    assert loaded.protocol.sampling.warmup_batch_iterations == 256
+    assert loaded.protocol.sampling.batch_iterations == 256
+    assert loaded.protocol.calibration_capture_mode == "measurement_process_spaced_v2"
+    assert loaded.protocol.outliers.max_flagged_ratio == 0.05
+    assert packaged.protocol_hash == loaded.protocol_hash
+    assert packaged.canonical_bytes == loaded.canonical_bytes
+
+
 def test_protocol_hash_is_canonical_and_unknown_fields_fail(tmp_path: Path) -> None:
     original = yaml.safe_load((PROTOCOL_ROOT / "s0-g0-v1.yaml").read_text(encoding="utf-8"))
     reordered = dict(reversed(list(original.items())))

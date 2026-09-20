@@ -419,6 +419,38 @@ class DockerTorchEventTimer:
             raise Nmz36RuntimeError("Stage 0 timer returned invalid resolution samples")
         return tuple(values)
 
+    def capture_calibration_inputs(
+        self, sample_count: int, resolution_sample_count: int
+    ) -> Mapping[str, Any]:
+        value = self.process.request(
+            {
+                "op": "calibration",
+                "sample_count": sample_count,
+                "resolution_sample_count": resolution_sample_count,
+            }
+        )
+        points = value.get("points")
+        deltas = value.get("resolution_tick_deltas")
+        if not isinstance(points, list) or not isinstance(deltas, list):
+            raise Nmz36RuntimeError("Stage 0 timer returned invalid calibration inputs")
+        return {"points": points, "resolution_tick_deltas": deltas}
+
+    def capture_spaced_calibration_inputs(
+        self, sample_count: int, resolution_sample_count: int
+    ) -> Mapping[str, Any]:
+        value = self.process.request(
+            {
+                "op": "calibration_spaced",
+                "sample_count": sample_count,
+                "resolution_sample_count": resolution_sample_count,
+            }
+        )
+        points = value.get("points")
+        deltas = value.get("resolution_tick_deltas")
+        if not isinstance(points, list) or not isinstance(deltas, list):
+            raise Nmz36RuntimeError("Stage 0 timer returned invalid spaced calibration inputs")
+        return {"points": points, "resolution_tick_deltas": deltas}
+
     def synchronize(self) -> None:
         self.process.request({"op": "synchronize"})
 
@@ -446,14 +478,24 @@ class DockerFormalStage0Workload(FormalStage0Workload):
     def synchronize(self) -> None:
         self.process.request({"op": "synchronize"})
 
-    def warmup_segment(self, segment: Stage0Segment) -> None:
-        self.process.request(
+    def configure_fixture(self, workload_elements: int) -> None:
+        response = self.process.request(
+            {"op": "configure_fixture", "workload_elements": workload_elements}
+        )
+        if response.get("workload_elements") != workload_elements:
+            raise Nmz36RuntimeError("workload fixture response does not match its plan")
+
+    def warmup_segment(self, segment: Stage0Segment, iterations: int) -> None:
+        response = self.process.request(
             {
                 "op": "warmup",
                 "probe_type": self.probe_type.value,
                 "segment": segment,
+                "iterations": iterations,
             }
         )
+        if response.get("batch_iterations") != iterations:
+            raise Nmz36RuntimeError("warmup response does not match its requested batch")
 
     def measure_segment_batch(
         self,

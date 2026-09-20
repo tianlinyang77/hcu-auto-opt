@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -339,6 +340,12 @@ class GitSourceManager:
         expected_path = Path(expected)
         if actual_path.exists() and expected_path.exists():
             return actual_path.resolve() == expected_path.resolve()
+        # GitHub's documented SSH and HTTPS clone addresses identify the same
+        # repository. Do not normalize arbitrary hosts, credentials, ports or paths.
+        pattern = r"(?:git@github\.com:|https://github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/?"
+        left, right = re.fullmatch(pattern, actual), re.fullmatch(pattern, expected)
+        if left and right:
+            return left[1].removesuffix(".git") == right[1].removesuffix(".git")
         return actual.rstrip("/") == expected.rstrip("/")
 
     def _require_repository(self, path: Path) -> None:

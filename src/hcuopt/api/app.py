@@ -18,6 +18,10 @@ from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
+from hcuopt.contracts.endpoint_control_v1 import (
+    EndpointValidationRunCreate,
+    EndpointValidationRunView,
+)
 from hcuopt.contracts.formal_evidence_acceptance_v1 import FormalEvidenceAcceptanceReport
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
@@ -99,10 +103,15 @@ from hcuopt.domain.errors import (
     TargetNotReady,
 )
 from hcuopt.domain.models import Stage0Evidence
+from hcuopt.evaluation.agent_generation_inspection import (
+    AgentGenerationInspection,
+    AgentGenerationInspectionService,
+)
 from hcuopt.evaluation.agent_generation_read_model import (
     AgentGenerationEvidenceReadService,
     AgentGenerationReadModelError,
 )
+from hcuopt.evaluation.endpoint_workload import load_endpoint_workload_spec
 from hcuopt.evaluation.evidence_reader import HashedEvidenceReader
 from hcuopt.evaluation.formal_evidence_reporting import (
     FormalEvidenceAcceptanceReportError,
@@ -228,6 +237,9 @@ def create_app(
     formal_start_read_authorizer: Callable[[Request, UUID], bool] | None = None,
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
+    framework_signoff_authorizer: Callable[[Request, UUID], str | None] | None = None,
+    auto_migrate: bool | None = None,
+    agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
     default_target_root = Path(__file__).resolve().parents[3] / "config" / "targets"
     targets = target_catalog or TargetCatalog(
@@ -297,7 +309,11 @@ def create_app(
         else:
             repo = repository
         application.state.repository = repo
-        if os.getenv("HCUOPT_AUTO_MIGRATE", "true").lower() == "true":
+        should_migrate = (
+            auto_migrate if auto_migrate is not None
+            else os.getenv("HCUOPT_AUTO_MIGRATE", "true").lower() == "true"
+        )
+        if should_migrate:
             repo.migrate()
         yield
 
@@ -356,9 +372,12 @@ def create_app(
     async def agent_evidence_handler(
         _request: Request, exc: AgentGenerationReadModelError
     ) -> JSONResponse:
-        unavailable = exc.code == "agent_evidence_root_unavailable"
+        unavailable = exc.code in {
+            "agent_evidence_root_unavailable", "agent_inspection_unconfigured"
+        }
         return JSONResponse(
             status_code=503 if unavailable else 422,
+            headers={"Cache-Control": "no-store"},
             content={
                 "code": exc.code,
                 "message": str(exc),
@@ -661,6 +680,50 @@ def create_app(
         request: Request,
     ) -> AgentGenerationReadModel:
         return agent_evidence_service(request).get(generation_run_id)
+
+    @application.get(
+        "/v1/operator/agent-generations/{generation_run_id}/inspection",
+        response_model=AgentGenerationInspection,
+    )
+    def get_operator_agent_generation_inspection(
+        generation_run_id: UUID, request: Request, response: Response
+    ) -> AgentGenerationInspection:
+        # Authenticate each exact Run before looking at its Store or A state.
+        # The model credential is never a browser/read credential.
+        if agent_inspection_read_authorizer is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication is not configured",
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            authorized = agent_inspection_read_authorizer(request, generation_run_id)
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Agent inspection read authentication failed closed",
+                headers={"Cache-Control": "no-store"},
+            ) from error
+        if authorized is not True:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Agent inspection read access was rejected",
+                headers={"Cache-Control": "no-store"},
+            )
+        root = os.getenv("HCUOPT_AGENT_INSPECTION_ROOT")
+        if not root:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unconfigured", "Agent inspection is not configured"
+            )
+        try:
+            service = AgentGenerationInspectionService(repo(request), Path(root))
+            response.headers["Cache-Control"] = "no-store"
+            return service.get(generation_run_id)
+        except (OSError, ValueError) as exc:
+            raise AgentGenerationReadModelError(
+                "agent_inspection_unavailable",
+                "Agent inspection could not be independently verified",
+            ) from exc
 
     @application.get(
         "/v1/operator/formal-rounds/{round_id}/evidence-acceptance",
@@ -969,7 +1032,10 @@ def create_app(
         payload: FrameworkSmokeSignoffRequest,
         request: Request,
     ) -> dict[str, Any]:
-        return repo(request).signoff_framework_task(task_id, payload)
+        from hcuopt.api.framework_signoff import submit_signoff
+
+        return submit_signoff(framework_signoff_authorizer, repo(request).signoff_framework_task,
+                              request, task_id, payload)
 
     @application.post("/v1/stage0-runs", response_model=Stage0RunView, status_code=201)
     def create_stage0_run(
@@ -1011,6 +1077,42 @@ def create_app(
         stage0_run_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).finalize_stage0_run(stage0_run_id)
+
+    @application.post(
+        "/v1/endpoint-validation-runs",
+        response_model=EndpointValidationRunView,
+        status_code=201,
+    )
+    def create_endpoint_validation_run(
+        payload: EndpointValidationRunCreate, request: Request
+    ) -> dict[str, Any]:
+        frozen = load_endpoint_workload_spec(
+            Path(__file__).resolve().parents[3]
+            / "config/workloads/bw20-sglang-endpoint-provisional-v1.yaml"
+        )
+        if payload.workload != frozen:
+            raise Conflict("endpoint workload differs from the repository-frozen document")
+        target = targets.load(payload.workload.target_id)
+        profile = profiles.require(payload.adapter_profile)
+        if profile.implementation_kind != "real":
+            raise Conflict("Endpoint Validation requires a real Adapter Profile")
+        profile.validate_target(target, scope="endpoint_validation")
+        return repo(request).create_endpoint_validation_run(payload)
+
+    @application.get(
+        "/v1/endpoint-validation-runs/{endpoint_run_id}",
+        response_model=EndpointValidationRunView,
+    )
+    def get_endpoint_validation_run(
+        endpoint_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).get_endpoint_validation_run(endpoint_run_id)
+
+    @application.get("/v1/endpoint-validation-runs/{endpoint_run_id}/summary")
+    def get_endpoint_validation_summary(
+        endpoint_run_id: UUID, request: Request
+    ) -> dict[str, Any]:
+        return repo(request).endpoint_validation_summary(endpoint_run_id)
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:
@@ -1197,6 +1299,15 @@ def create_app(
             worker_id, job_id, payload.claim_token, payload.fencing_token
         )
         return {"status": "ok"}
+
+    @application.post("/v1/workers/{worker_id}/jobs/{job_id}/lease-check", status_code=204)
+    def check_live_job_lease(
+        worker_id: str, job_id: UUID, payload: JobHeartbeat, request: Request,
+    ) -> Response:
+        repo(request).assert_live_job_lease(
+            worker_id, job_id, payload.claim_token, payload.fencing_token
+        )
+        return Response(status_code=204)
 
     @application.post("/v1/jobs", status_code=201)
     def enqueue_job(payload: JobCreate, request: Request) -> dict[str, Any]:

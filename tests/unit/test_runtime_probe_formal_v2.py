@@ -117,7 +117,7 @@ def _runtime_profile(tmp_path: Path) -> RuntimeProbeProfile:
     baseline = SourceSnapshot(
         kind="baseline",
         repository="fixture",
-        commit="1" * 40,
+        commit="4" * 40,
         tree_hash="2" * 40,
         source_hash=canonical_source_hash(baseline_path),
         worktree_uri=baseline_path.as_uri(),
@@ -324,7 +324,7 @@ def _formal_hotpatch_target_and_profile(
     candidate = SourceSnapshot(
         kind="candidate",
         repository=baseline.repository,
-        commit=baseline.commit,
+        commit="c" * 40,
         tree_hash="b" * 40,
         source_hash=canonical_source_hash(candidate_path),
         worktree_uri=candidate_path.as_uri(),

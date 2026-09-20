@@ -151,6 +151,7 @@ from hcuopt.operator.errors import OperatorPlanHashMismatch
 from hcuopt.operator.start import FrozenScriptedPlans
 from hcuopt.stage0 import REQUIRED_STAGE0_PROBES, evaluate_stage0
 from hcuopt.storage.agent_generation import AgentGenerationRepositoryMixin
+from hcuopt.storage.endpoint_validation import EndpointValidationRepositoryMixin
 from hcuopt.storage.formal_evidence_acceptance import FormalEvidenceAcceptanceRepositoryMixin
 from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
@@ -159,6 +160,7 @@ from hcuopt.targets import target_fingerprint
 class PostgresRepository(
     FormalEvidenceAcceptanceRepositoryMixin,
     AgentGenerationRepositoryMixin,
+    EndpointValidationRepositoryMixin,
 ):
     """Synchronous PostgreSQL boundary shared by API and maintenance commands.
 
@@ -6115,8 +6117,17 @@ class PostgresRepository(
         target_snapshot: Mapping[str, Any],
         records: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        # Evidence mode is the outer authority boundary.  Reject Dry Run input
+        # before applying Formal-only resource identity requirements so callers
+        # receive the authoritative failure reason and cannot mistake a Dry Run
+        # for malformed Formal evidence.
+        if run.get("mode") != Stage0RunMode.FORMAL.value:
+            raise Conflict("Dry Run evidence cannot be finalized as formal Stage 0")
         try:
             target = TargetSpec.model_validate(target_snapshot["specification"])
+            expected_resource_id = PostgresRepository._stage0_expected_resource_id(
+                target, records
+            )
             context = Stage0VerificationContext(
                 task_id=task["task_id"],
                 stage0_run_id=run["stage0_run_id"],
@@ -6125,7 +6136,7 @@ class PostgresRepository(
                 target_fingerprint=target_snapshot["target_fingerprint"],
                 workload_id=task["workload_id"],
                 adapter_profile=run["adapter_profile"],
-                expected_resource_id=(f"hcu-{target.execution_host.accelerator.device_index}"),
+                expected_resource_id=expected_resource_id,
             )
             references = tuple(
                 Stage0ProbeEvidenceReference(
@@ -6152,6 +6163,36 @@ class PostgresRepository(
             "context": context,
             "references": references,
         }
+
+    @staticmethod
+    def _stage0_expected_resource_id(
+        target: TargetSpec,
+        records: list[dict[str, Any]],
+    ) -> str:
+        """Resolve the run's accelerator identity without discarding Target scope.
+
+        ``hcu-N`` is retained for existing single-host deployments.  New deployments
+        may use ``<target_id>:hcu:N`` so the same physical index on two Targets does
+        not collapse to one scheduler resource.  The selected spelling must be the
+        one actually persisted by every control-plane lease record.
+        """
+
+        device_index = target.execution_host.accelerator.device_index
+        allowed = {
+            f"hcu-{device_index}",
+            f"{target.target_id}:hcu:{device_index}",
+        }
+        recorded = {row.get("resource_id") for row in records}
+        if len(recorded) != 1 or None in recorded:
+            raise Conflict(
+                "Stage 0 persisted probe records do not bind one accelerator resource"
+            )
+        resource_id = recorded.pop()
+        if not isinstance(resource_id, str) or resource_id not in allowed:
+            raise Conflict(
+                "Stage 0 accelerator resource does not match the frozen Target"
+            )
+        return resource_id
 
     @staticmethod
     def _require_stage0_ready_for_verification(value: Mapping[str, Any]) -> None:
@@ -6583,6 +6624,15 @@ class PostgresRepository(
                     job["job_id"],
                 ),
             ).fetchone()
+            if job["job_type"] == JobType.ENDPOINT_VALIDATION.value:
+                connection.execute(
+                    """
+                    UPDATE endpoint_validation_runs
+                    SET state = 'running', updated_at = now()
+                    WHERE job_id = %s AND state = 'queued'
+                    """,
+                    (job["job_id"],),
+                )
             connection.execute(
                 "UPDATE workers SET last_heartbeat_at = now() WHERE worker_id = %s",
                 (worker_id,),
@@ -6627,6 +6677,30 @@ class PostgresRepository(
                     """,
                     (job_id, fencing_token),
                 )
+
+    def assert_live_job_lease(
+        self, worker_id: str, job_id: UUID, claim_token: UUID,
+        fencing_token: int | None,
+    ) -> None:
+        """Check the original locked job/resource rows without renewing a lease."""
+        with self.connection() as connection:
+            job = self._assert_job_owner(connection, job_id, claim_token, fencing_token)
+            if job["claimed_by"] != worker_id:
+                raise StaleClaimToken("worker no longer owns this running job")
+            if job["resource_id"] is None or job["lease_id"] is None:
+                raise StaleFencingToken("live resource lease required")
+            resource = connection.execute(
+                """
+                SELECT *, expires_at > clock_timestamp() AS live_now
+                FROM resources WHERE resource_id = %s FOR UPDATE
+                """, (job["resource_id"],),
+            ).fetchone()
+            if (resource is None or resource["state"] != "active"
+                    or resource["live_now"] is not True
+                    or resource["owner_job_id"] != job_id
+                    or resource["lease_id"] != job["lease_id"]
+                    or resource["fencing_token"] != fencing_token):
+                raise StaleFencingToken("resource lease is inactive, expired or changed")
 
     def _assert_job_owner(
         self,
@@ -6807,6 +6881,9 @@ class PostgresRepository(
                 self._fail_stage0_run_after_job_failure(connection, job, error)
                 self._reject_manual_candidate_task_after_job_failure(
                     connection, job, error
+                )
+                self._fail_endpoint_validation_run_after_job_failure(
+                    connection, job, error, cleanup_evidence
                 )
         assert row is not None
         return row
@@ -7079,6 +7156,9 @@ class PostgresRepository(
                     self._reject_framework_task_after_job_failure(connection, job, error)
                     self._fail_stage0_run_after_job_failure(connection, job, error)
                     self._reject_manual_candidate_task_after_job_failure(
+                        connection, job, error
+                    )
+                    self._fail_endpoint_validation_run_after_job_failure(
                         connection, job, error
                     )
                 recovered.append(job["job_id"])

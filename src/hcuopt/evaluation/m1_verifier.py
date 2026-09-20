@@ -725,9 +725,10 @@ class M1CorrectnessVerifier:
                 "execution_budget_exceeded",
                 "correctness execution exceeded the registered time budget",
             )
-        if _procfs_start_token(start.proc_stat_line) != process.process_start_token:
+        expected_token = _normalized_procfs_start_token(process.process_start_token)
+        if _procfs_start_token(start.proc_stat_line) != expected_token:
             raise M1EvidenceError("process_identity_mismatch", "process start token is incorrect")
-        if _procfs_start_token(exit_record.proc_stat_line) != process.process_start_token:
+        if _procfs_start_token(exit_record.proc_stat_line) != expected_token:
             raise M1EvidenceError("process_identity_mismatch", "reaped process token is incorrect")
         if exit_record.waitpid_result_pid != process.process_id or exit_record.wait_status != 0:
             raise M1EvidenceError(
@@ -1092,10 +1093,7 @@ class M1PerformanceVerifier:
     def _verify_calibration(evidence: M1MeasurementEvidence) -> float:
         calibration = evidence.calibration
         resource_device = evidence.binding.lease.resource_id.removeprefix("hcu-")
-        if (
-            resource_device.isdigit()
-            and int(resource_device) != calibration.device_index
-        ):
+        if resource_device.isdigit() and int(resource_device) != calibration.device_index:
             raise M1EvidenceError(
                 "performance_device_binding_mismatch",
                 "timer calibration belongs to another leased HCU",
@@ -1114,10 +1112,13 @@ class M1PerformanceVerifier:
                 "performance_calibration_invalid",
                 "device timer calibration has no tick variance",
             )
-        slope = sum(
-            (device - mean_ticks) * (host - mean_host)
-            for device, host in zip(device_ticks, host_midpoints, strict=True)
-        ) / sum_squares
+        slope = (
+            sum(
+                (device - mean_ticks) * (host - mean_host)
+                for device, host in zip(device_ticks, host_midpoints, strict=True)
+            )
+            / sum_squares
+        )
         intercept = mean_host - slope * mean_ticks
         residual = max(
             abs(host - (intercept + slope * device))
@@ -1135,9 +1136,13 @@ class M1PerformanceVerifier:
             (calibration.max_residual_ns, residual),
             (calibration.timer_resolution_ns, resolution),
         )
-        if not math.isfinite(slope) or slope <= 0 or any(
-            not math.isclose(claimed, recomputed, rel_tol=1e-12, abs_tol=1e-9)
-            for claimed, recomputed in claims
+        if (
+            not math.isfinite(slope)
+            or slope <= 0
+            or any(
+                not math.isclose(claimed, recomputed, rel_tol=1e-12, abs_tol=1e-9)
+                for claimed, recomputed in claims
+            )
         ):
             raise M1EvidenceError(
                 "performance_calibration_mismatch",
@@ -1561,6 +1566,19 @@ def _procfs_start_token(stat_line: str) -> str:
     if len(fields) < 20 or not fields[19].isdigit():
         raise M1EvidenceError("process_lifecycle_invalid", "proc stat starttime is missing")
     return fields[19]
+
+
+def _normalized_procfs_start_token(value: str) -> str:
+    prefix = "linux-proc-startticks:"
+    if value.startswith(prefix):
+        value = value.removeprefix(prefix)
+    elif ":" in value:
+        raise M1EvidenceError(
+            "process_identity_mismatch", "process start token scheme is incorrect"
+        )
+    if not value.isdigit() or int(value) < 1:
+        raise M1EvidenceError("process_identity_mismatch", "process start token is incorrect")
+    return value
 
 
 def _bootstrap_mean_ci(

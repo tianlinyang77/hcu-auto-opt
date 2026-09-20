@@ -38,6 +38,7 @@ class WorkflowType(StrEnum):
     STAGE0 = "stage0"
     MANUAL_CANDIDATE = "manual_candidate"
     SEARCH_ROUND = "search_round"
+    ENDPOINT_VALIDATION = "endpoint_validation"
 
 
 class FrameworkSmokeDecision(StrEnum):
@@ -109,6 +110,8 @@ class TaskState(StrEnum):
     MANUAL_CORRECTNESS = "manual_correctness"
     MANUAL_PERFORMANCE = "manual_performance"
     MANUAL_ADJUDICATING = "manual_adjudicating"
+    ENDPOINT_PROBING = "endpoint_probing"
+    ENDPOINT_PROVISIONAL_PASSED = "endpoint_provisional_passed"
     CANCELLED = "cancelled"
 
 
@@ -190,6 +193,7 @@ class JobType(StrEnum):
     MANUAL_CORRECTNESS = "manual_correctness"
     MANUAL_PERFORMANCE = "manual_performance"
     MANUAL_ADJUDICATE = "manual_adjudicate"
+    ENDPOINT_VALIDATION = "endpoint_validation"
 
 
 class EvaluationPhase(StrEnum):

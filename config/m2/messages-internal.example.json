@@ -1,0 +1,8 @@
+{
+  "base_url": "https://api.deepseek.com/anthropic",
+  "model": "deepseek-flash",
+  "max_output_tokens": 4096,
+  "timeout_seconds": 120,
+  "allow_http": false,
+  "thinking_mode": "disabled"
+}

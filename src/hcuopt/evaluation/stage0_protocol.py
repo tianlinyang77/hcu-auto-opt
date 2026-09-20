@@ -19,6 +19,10 @@ MAX_PROTOCOL_BYTES = 1024 * 1024
 _REGISTERED_PROTOCOL_FILES = {
     "s0-g0-v1": "s0-g0-v1.yaml",
     "s0-g0-v2": "s0-g0-v2.yaml",
+    "s0-g0-bw20-v1": "s0-g0-bw20-v1.yaml",
+    "s0-g0-bw20-v2": "s0-g0-bw20-v2.yaml",
+    "s0-g0-bw20-v3": "s0-g0-bw20-v3.yaml",
+    "s0-g0-bw20-v4": "s0-g0-bw20-v4.yaml",
 }
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -34,6 +38,12 @@ class _ProtocolModel(ContractModel):
 class Stage0SamplingProtocol(_ProtocolModel):
     restart_count: int = Field(ge=2)
     warmup_count: int = Field(ge=0)
+    # Added by BW20 v3.  None preserves the exact v1/v2 protocol bytes and
+    # their historical meaning: one operation per warmup call.
+    warmup_batch_iterations: int | None = Field(default=None, ge=1)
+    # BW20 v4 binds a device-dominant fixture size into the signed protocol.
+    # Earlier protocols keep the historical 2**18 element implementation.
+    workload_elements: int | None = Field(default=None, ge=1, le=1 << 26)
     batch_iterations: int = Field(ge=1)
     noise_samples_per_restart: int = Field(ge=2)
     signal_segment_order: tuple[Literal["A1", "B1", "B2", "A2"], ...]
@@ -88,7 +98,10 @@ class Stage0EnvironmentGates(_ProtocolModel):
     max_temperature_c: float = Field(gt=0)
     max_temperature_delta_c: float = Field(gt=0)
     clock_tolerance_ratio: float = Field(gt=0, lt=1)
-    required_performance_level: Literal["manual"]
+    required_performance_level: Literal["manual", "auto"]
+    clock_validation_mode: Literal[
+        "target_fixed", "observed_stable", "performance_level_only"
+    ] = "target_fixed"
     power_gate_enabled: Literal[False]
 
 
@@ -118,6 +131,59 @@ class Stage0StatisticsProtocol(_ProtocolModel):
     environment_gates: Stage0EnvironmentGates
     timer_gates: Stage0TimerGates
     outliers: Stage0OutlierProtocol
+    # None preserves the legacy canonical bytes and D behavior.
+    cache_policy: Literal["allocator_reset_per_batch_v1"] | None = None
+    # None preserves every pre-BW20-v2 canonical protocol byte.
+    calibration_capture_mode: Literal[
+        "measurement_process_atomic_v1", "measurement_process_spaced_v2"
+    ] | None = None
+
+    @model_validator(mode="after")
+    def bind_cache_policy_version(self):
+        bw20_versions = {
+            "s0-g0-bw20-v1",
+            "s0-g0-bw20-v2",
+            "s0-g0-bw20-v3",
+            "s0-g0-bw20-v4",
+        }
+        if (self.protocol_version in bw20_versions) != (
+            self.cache_policy == "allocator_reset_per_batch_v1"
+        ):
+            raise ValueError("explicit allocator policy is bound to BW20 protocol versions")
+        auto_observed = (
+            self.environment_gates.required_performance_level == "auto"
+            and self.environment_gates.clock_validation_mode == "observed_stable"
+        )
+        if (self.protocol_version == "s0-g0-bw20-v1") != auto_observed:
+            raise ValueError("auto observed clock policy is bound to BW20 v1")
+        auto_level_only = (
+            self.environment_gates.required_performance_level == "auto"
+            and self.environment_gates.clock_validation_mode == "performance_level_only"
+        )
+        if (
+            self.protocol_version
+            in {"s0-g0-bw20-v2", "s0-g0-bw20-v3", "s0-g0-bw20-v4"}
+        ) != auto_level_only:
+            raise ValueError("auto performance-level policy is bound to BW20 v2/v3/v4")
+        expected_capture = {
+            "s0-g0-bw20-v2": "measurement_process_atomic_v1",
+            "s0-g0-bw20-v3": "measurement_process_atomic_v1",
+            "s0-g0-bw20-v4": "measurement_process_spaced_v2",
+        }.get(self.protocol_version)
+        if self.calibration_capture_mode != expected_capture:
+            raise ValueError("calibration capture mode does not match the protocol version")
+        full_batch_warmup = (
+            self.sampling.warmup_batch_iterations == self.sampling.batch_iterations
+        )
+        if (self.protocol_version in {"s0-g0-bw20-v3", "s0-g0-bw20-v4"}) != (
+            full_batch_warmup
+        ):
+            raise ValueError("full-batch warmup is bound to BW20 v3/v4")
+        if (self.protocol_version == "s0-g0-bw20-v4") != (
+            self.sampling.workload_elements is not None
+        ):
+            raise ValueError("explicit workload size is bound to BW20 v4")
+        return self
 
     @property
     def alpha(self) -> float:
@@ -155,7 +221,18 @@ class LoadedStage0Protocol:
 def canonical_protocol_bytes(protocol: Stage0StatisticsProtocol) -> bytes:
     """Return the only byte representation used to identify a protocol."""
 
-    return canonical_json_bytes(protocol)
+    value = protocol.model_dump(mode="json")
+    if value["sampling"]["warmup_batch_iterations"] is None:
+        del value["sampling"]["warmup_batch_iterations"]
+    if value["sampling"]["workload_elements"] is None:
+        del value["sampling"]["workload_elements"]
+    if value["cache_policy"] is None:
+        del value["cache_policy"]
+    if value["calibration_capture_mode"] is None:
+        del value["calibration_capture_mode"]
+    if value["environment_gates"]["clock_validation_mode"] == "target_fixed":
+        del value["environment_gates"]["clock_validation_mode"]
+    return canonical_json_bytes(value)
 
 
 def protocol_sha256(protocol: Stage0StatisticsProtocol) -> str:
