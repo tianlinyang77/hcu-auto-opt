@@ -911,7 +911,7 @@ class PostgresRepository(
                     automatic_release_allowed, version, created_at, updated_at
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, 'preparing',
-                    %s, %s, TRUE, FALSE, 1, %s, %s
+                    %s, %s, TRUE, FALSE, 1, now(), now()
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING *
@@ -927,8 +927,6 @@ class PostgresRepository(
                     intent.idempotency_key,
                     Jsonb(members),
                     Jsonb(service_identity),
-                    intent.created_at,
-                    intent.updated_at,
                 ),
             ).fetchone()
             created = row is not None

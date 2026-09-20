@@ -4,7 +4,7 @@ import hashlib
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4, uuid5
@@ -684,6 +684,21 @@ class OperatorPlanPreviewPostgresTests(unittest.TestCase):
             "operator_authority_unavailable",
             {item.code for item in preview.checks},
         )
+
+    def test_start_timestamps_use_database_clock_when_application_is_ahead(self) -> None:
+        coordinator, request = self._startable_suite()
+        preview = self.repository.get_operator_plan_preview(request.preview_id)
+        proposed = coordinator._build_intent(request, preview)
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        proposed = proposed.model_copy(update={"created_at": future, "updated_at": future})
+        stored, created = self.repository.create_operator_start_intent(proposed)
+        self.assertTrue(created)
+        self.assertLess(stored.created_at, future)
+        self.assertEqual(stored.created_at, stored.updated_at)
+        result = coordinator.start(request, self.repository)
+        self.assertEqual(result.state, "finalized")
+        self.assertGreaterEqual(result.updated_at, result.created_at)
+        self.assertEqual(result.finalized_at, result.updated_at)
 
     def test_start_intent_finalizes_and_concurrent_replay_converges(self) -> None:
         coordinator, start = self._startable_suite()
