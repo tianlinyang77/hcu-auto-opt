@@ -12,10 +12,10 @@ from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from hcuopt.api.app import create_app
 from hcuopt.api.formal_start_management import FormalStartManagement
 from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentRequest
 from hcuopt.deployment.formal_intent_access import materialize_formal_intent_access
+from hcuopt.deployment.formal_intent_console import create_formal_intent_console
 from hcuopt.storage.repository import PostgresRepository
 from tests.unit.test_formal_operator_plans import NOW
 from tests.unit.test_formal_start_management_api import setup_management
@@ -68,19 +68,23 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
     )
     config = access.configuration
     token = access.credential.read_text(encoding="utf-8")
+    static_root = tmp_path / "frontend"
+    (static_root / "assets").mkdir(parents=True)
+    (static_root / "index.html").write_text("<h1>test fixture</h1>", encoding="utf-8")
 
     def make_app():  # type: ignore[no-untyped-def]
         loaded = FormalStartManagement.from_file(
             management.coordinator, deployment_root=access.directory, path=config
         )
-        return create_app(
+        return create_formal_intent_console(
             repository=FixtureAuthorityRepository(isolated_dsn),
-            formal_start_management=loaded,
-            auto_migrate=False,
+            management=loaded,
+            static_root=static_root,
+            browser_origin="http://127.0.0.1:4198",
         )
 
     headers = {"Authorization": f"Bearer {token}"}
-    with TestClient(make_app()) as client:
+    with TestClient(make_app(), base_url="http://127.0.0.1:4198") as client:
         prepared = client.get("/v1/operator/formal-start-submission", headers=headers)
         assert prepared.status_code == 200
         assert prepared.json() == payload
@@ -95,7 +99,7 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
     intent_id = UUID(responses[0].json()["intent_id"])
 
     # Treat previous response as lost; recreate app/repository/config loader.
-    with TestClient(make_app()) as restarted:
+    with TestClient(make_app(), base_url="http://127.0.0.1:4198") as restarted:
         replay = restarted.post("/v1/operator/formal-start-intents", json=payload, headers=headers)
     assert replay.status_code == 200, replay.text
     assert replay.json()["replayed"] is True
@@ -106,7 +110,7 @@ def test_http_concurrent_retry_restart_and_revocation(isolated_dsn, tmp_path):  
     config.write_text(
         '{"schema_version":"formal-intent-capabilities-v1","capabilities":[]}', encoding="utf-8"
     )
-    with TestClient(make_app()) as revoked:
+    with TestClient(make_app(), base_url="http://127.0.0.1:4198") as revoked:
         denied = revoked.post("/v1/operator/formal-start-intents", json=payload, headers=headers)
     assert denied.status_code == 403
     with psycopg.connect(isolated_dsn) as connection:

@@ -27,12 +27,16 @@
 
 1. 部署管理进程获得已有已签名请求，并用可信 verifier 生成上述访问材料。
 2. 通过 `FormalStartManagement.from_file(coordinator, deployment_root=目录, path=配置)` 装配。
-3. 显式向 `create_app(formal_start_management=...)` 注入；普通默认部署继续不注册写入口。
+3. 浏览器部署使用 `create_formal_intent_console(management=..., repository=..., static_root=..., browser_origin=...)`。
+   它只注册 Formal 准备/提交与静态页面，不挂载通用 Task/Job/Lease/签核接口，不迁移数据库。
+   `create_app(formal_start_management=...)` 仅供内部集成；不得为了开放页面而直接暴露整个通用 API。
 4. 页面 `/?formalStart=1` 使用独立凭据读取冻结引用，确认后提交，所有 B/D 校验仍由 coordinator 执行。
 5. 重启时复用原配置与 assertion；不要重新生成幂等键。移除配置绑定并重启后撤销访问。
 
 运维须保护父目录，使用 TLS 或受控回环通道，并避免代理日志记录 Authorization。
 凭据不写聊天、Git、URL 或浏览器存储。不要把模型 API Key 用在此处。
+专用控制台拒绝 Host/Origin 不匹配和跨站请求；所有响应禁止缓存、嵌框与引用来源泄露。
+绑定监听地址和 TLS 仍由部署管理进程负责，不能把允许回环 Origin 理解为服务自动只监听回环。
 
 ## 当前验收边界
 
