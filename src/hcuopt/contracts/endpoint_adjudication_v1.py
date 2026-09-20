@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ from hcuopt.measurement.endpoint_models import (
     SignedM1EvidenceReference,
     endpoint_plan_hash,
 )
+from hcuopt.measurement.evidence import canonical_json_bytes
 
 
 class EndpointAdjudicationGroupRef(ContractModel):
@@ -204,11 +206,47 @@ class EndpointCampaignView(ReadModel):
         return tuple(value) if isinstance(value, list) else value
 
 
+class EndpointCampaignSignoffRequest(ContractModel):
+    decision: Literal["accepted", "rejected"]
+    actor: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    adjudication_result_sha256: str = Field(pattern=SHA256_PATTERN)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    automatic_release_allowed: Literal[False] = False
+
+
+class EndpointCampaignSignoffView(ReadModel):
+    signoff_id: UUID
+    campaign_id: UUID
+    decision: Literal["accepted", "rejected"]
+    actor: str
+    reason: str
+    adjudication_result_sha256: str = Field(pattern=SHA256_PATTERN)
+    idempotency_key: str
+    campaign_state: Literal["completed", "rejected"]
+    automatic_release_allowed: Literal[False] = False
+    created_at: datetime
+
+
+def endpoint_adjudication_result_hash(
+    result: EndpointFormalAdjudicationResult | dict,
+) -> str:
+    materialized = (
+        result.model_dump(mode="json")
+        if isinstance(result, EndpointFormalAdjudicationResult)
+        else EndpointFormalAdjudicationResult.model_validate(result).model_dump(mode="json")
+    )
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(materialized)).hexdigest()
+
+
 __all__ = [
     "EndpointAdjudicationGroupRef",
     "EndpointAdjudicationGroupResult",
     "EndpointCampaignCreate",
+    "EndpointCampaignSignoffRequest",
+    "EndpointCampaignSignoffView",
     "EndpointCampaignView",
     "EndpointFormalAdjudicationRequest",
     "EndpointFormalAdjudicationResult",
+    "endpoint_adjudication_result_hash",
 ]

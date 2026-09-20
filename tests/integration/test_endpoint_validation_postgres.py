@@ -17,7 +17,9 @@ from psycopg.types.json import Jsonb
 from hcuopt.adapters.profiles import ENDPOINT_FORMAL_ADJUDICATION_PROFILE
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointCampaignCreate,
+    EndpointCampaignSignoffRequest,
     EndpointFormalAdjudicationResult,
+    endpoint_adjudication_result_hash,
 )
 from hcuopt.contracts.endpoint_control_v1 import EndpointValidationRunCreate
 from hcuopt.contracts.v1 import WorkerRegister
@@ -794,4 +796,62 @@ def test_endpoint_d_worker_failure_is_fail_closed(
     assert persisted["state"] == "adjudication_failed"
     assert persisted["adjudication_result"] is None
     assert persisted["automatic_release_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_state"),
+    (("accepted", "completed"), ("rejected", "rejected")),
+)
+def test_endpoint_campaign_signoff_binds_current_d_result(
+    endpoint_database: PostgresRepository,
+    decision: str,
+    expected_state: str,
+) -> None:
+    repository = endpoint_database
+    campaign = _create_endpoint_campaign(repository)
+    job = _claim_endpoint_d(repository, campaign)
+    result = _endpoint_d_result(campaign)
+    completed = repository.complete_job(
+        job["job_id"], job["claim_token"], job["fencing_token"], result
+    )
+    EndpointValidationCoordinator(repository).advance(completed)
+    result_hash = endpoint_adjudication_result_hash(result)
+    request = EndpointCampaignSignoffRequest(
+        decision=decision,
+        actor="endpoint-fixture-reviewer",
+        reason="formal D evidence reviewed",
+        adjudication_result_sha256=result_hash,
+        idempotency_key=f"endpoint-signoff:{uuid4()}",
+    )
+
+    signoff = repository.signoff_endpoint_validation_campaign(
+        campaign["campaign_id"], request
+    )
+
+    assert signoff["campaign_state"] == expected_state
+    assert signoff["adjudication_result_sha256"] == result_hash
+    assert signoff["automatic_release_allowed"] is False
+    assert repository.signoff_endpoint_validation_campaign(
+        campaign["campaign_id"], request
+    ) == signoff
+    assert repository.get_endpoint_campaign_signoff(campaign["campaign_id"]) == signoff
+    assert repository.get_endpoint_validation_campaign(campaign["campaign_id"])[
+        "state"
+    ] == expected_state
+    with pytest.raises(Exception, match="idempotency key was reused"):
+        repository.signoff_endpoint_validation_campaign(
+            campaign["campaign_id"],
+            request.model_copy(update={"reason": "changed replay"}),
+        )
+    with pytest.raises(Exception, match="cannot be signed"):
+        repository.signoff_endpoint_validation_campaign(
+            campaign["campaign_id"],
+            request.model_copy(update={"idempotency_key": f"other:{uuid4()}"}),
+        )
+    with repository.connection() as connection:
+        with pytest.raises(psycopg.Error, match="signoffs are immutable"):
+            connection.execute(
+                "DELETE FROM endpoint_campaign_signoffs WHERE campaign_id = %s",
+                (campaign["campaign_id"],),
+            )
 

@@ -20,6 +20,8 @@ from hcuopt.adapters.profiles import AdapterProfileCatalog
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointCampaignCreate,
+    EndpointCampaignSignoffRequest,
+    EndpointCampaignSignoffView,
     EndpointCampaignView,
 )
 from hcuopt.contracts.endpoint_control_v1 import (
@@ -242,6 +244,8 @@ def create_app(
     formal_evidence_reports: FormalEvidenceAcceptanceReportService | None = None,
     formal_evidence_read_authorizer: Callable[[Request, UUID, str], bool] | None = None,
     framework_signoff_authorizer: Callable[[Request, UUID], str | None] | None = None,
+    endpoint_campaign_signoff_authorizer: Callable[[Request, UUID], str | None]
+    | None = None,
     auto_migrate: bool | None = None,
     agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
 ) -> FastAPI:
@@ -1136,6 +1140,27 @@ def create_app(
         campaign_id: UUID, request: Request
     ) -> dict[str, Any]:
         return repo(request).get_endpoint_validation_campaign(campaign_id)
+
+    @application.post(
+        "/v1/endpoint-validation-campaigns/{campaign_id}/signoff",
+        response_model=EndpointCampaignSignoffView,
+    )
+    def signoff_endpoint_validation_campaign(
+        campaign_id: UUID,
+        payload: EndpointCampaignSignoffRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        from hcuopt.api.endpoint_campaign_signoff import (
+            submit_endpoint_campaign_signoff,
+        )
+
+        return submit_endpoint_campaign_signoff(
+            endpoint_campaign_signoff_authorizer,
+            repo(request).signoff_endpoint_validation_campaign,
+            request,
+            campaign_id,
+            payload,
+        )
 
     @application.post("/v1/tasks", response_model=TaskView, status_code=201)
     def create_task(payload: TaskCreate, request: Request) -> dict[str, Any]:

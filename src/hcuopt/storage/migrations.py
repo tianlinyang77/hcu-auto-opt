@@ -26,6 +26,7 @@ MIGRATIONS = {
     23: "0023_endpoint_validation_failure_evidence.sql",
     24: "0024_endpoint_campaign_control_plane.sql",
     25: "0025_endpoint_adjudication_jobs.sql",
+    26: "0026_endpoint_campaign_signoff.sql",
 }
 
 

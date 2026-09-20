@@ -14,6 +14,7 @@ from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointAdjudicationGroupRef,
     EndpointCampaignCreate,
     EndpointFormalAdjudicationRequest,
+    endpoint_adjudication_result_hash,
 )
 from hcuopt.contracts.endpoint_control_v1 import EndpointAcquisitionResultRef
 from hcuopt.evaluation.endpoint_adjudication import adjudicate_endpoint_campaign
@@ -278,6 +279,9 @@ def test_endpoint_d_worker_handler_uses_root_bound_real_adapter(tmp_path: Path) 
     assert result["verdict"] == "faster"
     assert result["formal_d_adjudication"] is True
     assert result["automatic_release_allowed"] is False
+    assert endpoint_adjudication_result_hash(result) == endpoint_adjudication_result_hash(
+        adjudicate_endpoint_campaign(request, allowed_roots=(tmp_path,))
+    )
 
 
 def test_endpoint_d_fails_closed_after_sample_tampering(tmp_path: Path) -> None:

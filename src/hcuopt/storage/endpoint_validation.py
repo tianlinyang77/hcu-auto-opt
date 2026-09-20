@@ -13,8 +13,10 @@ from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointAdjudicationGroupRef,
     EndpointCampaignCreate,
+    EndpointCampaignSignoffRequest,
     EndpointFormalAdjudicationRequest,
     EndpointFormalAdjudicationResult,
+    endpoint_adjudication_result_hash,
 )
 from hcuopt.contracts.endpoint_control_v1 import (
     EndpointValidationJobResult,
@@ -455,6 +457,128 @@ class EndpointValidationRepositoryMixin:
         if row is None:
             raise NotFound(f"endpoint validation campaign not found: {campaign_id}")
         return row
+
+    def signoff_endpoint_validation_campaign(
+        self,
+        campaign_id: UUID,
+        request: EndpointCampaignSignoffRequest,
+    ) -> dict[str, Any]:
+        signoff_id = uuid5(
+            NAMESPACE_URL, f"hcuopt:endpoint-campaign-signoff:{request.idempotency_key}"
+        )
+        with self.connection() as connection:
+            replay = connection.execute(
+                """
+                SELECT s.*, c.state AS campaign_state
+                FROM endpoint_campaign_signoffs AS s
+                JOIN endpoint_validation_campaigns AS c
+                  ON c.campaign_id = s.campaign_id
+                WHERE s.idempotency_key = %s
+                FOR UPDATE OF s, c
+                """,
+                (request.idempotency_key,),
+            ).fetchone()
+            if replay is not None:
+                expected = {
+                    "signoff_id": signoff_id,
+                    "campaign_id": campaign_id,
+                    "decision": request.decision,
+                    "actor": request.actor,
+                    "reason": request.reason,
+                    "adjudication_result_sha256": request.adjudication_result_sha256,
+                    "automatic_release_allowed": False,
+                }
+                if any(replay[name] != value for name, value in expected.items()):
+                    raise Conflict(
+                        "endpoint Campaign signoff idempotency key was reused"
+                    )
+                return replay
+
+            campaign = connection.execute(
+                """
+                SELECT * FROM endpoint_validation_campaigns
+                WHERE campaign_id = %s FOR UPDATE
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise NotFound(f"endpoint validation campaign not found: {campaign_id}")
+            if campaign["state"] != "awaiting_signoff":
+                raise Conflict(
+                    f"endpoint Campaign cannot be signed from {campaign['state']}"
+                )
+            if campaign["adjudication_result"] is None:
+                raise Conflict("endpoint Campaign has no formal D result")
+            result_hash = endpoint_adjudication_result_hash(
+                campaign["adjudication_result"]
+            )
+            if result_hash != request.adjudication_result_sha256:
+                raise Conflict("endpoint Campaign signoff differs from the current D result")
+            next_state = "completed" if request.decision == "accepted" else "rejected"
+            row = connection.execute(
+                """
+                INSERT INTO endpoint_campaign_signoffs (
+                    signoff_id, campaign_id, decision, actor, reason,
+                    adjudication_result_sha256, idempotency_key,
+                    automatic_release_allowed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+                RETURNING *
+                """,
+                (
+                    signoff_id,
+                    campaign_id,
+                    request.decision,
+                    request.actor,
+                    request.reason,
+                    result_hash,
+                    request.idempotency_key,
+                ),
+            ).fetchone()
+            connection.execute(
+                """
+                UPDATE endpoint_validation_campaigns
+                SET state = %s, updated_at = now()
+                WHERE campaign_id = %s
+                """,
+                (next_state, campaign_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'endpoint_campaign_signed_off', %s)
+                """,
+                (
+                    campaign["signed_m1_task_id"],
+                    Jsonb(
+                        {
+                            "campaign_id": str(campaign_id),
+                            "signoff_id": str(signoff_id),
+                            "decision": request.decision,
+                            "actor": request.actor,
+                            "adjudication_result_sha256": result_hash,
+                            "campaign_state": next_state,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        assert row is not None
+        return {**row, "campaign_state": next_state}
+
+    def get_endpoint_campaign_signoff(
+        self, campaign_id: UUID
+    ) -> dict[str, Any] | None:
+        with self.connection() as connection:
+            return connection.execute(
+                """
+                SELECT s.*, c.state AS campaign_state
+                FROM endpoint_campaign_signoffs AS s
+                JOIN endpoint_validation_campaigns AS c
+                  ON c.campaign_id = s.campaign_id
+                WHERE s.campaign_id = %s
+                """,
+                (campaign_id,),
+            ).fetchone()
 
     def record_endpoint_adjudication_result(
         self,
