@@ -182,9 +182,11 @@ class EndpointCampaignView(ReadModel):
     adapter_profile: str
     environment_fingerprint: str = Field(pattern=SHA256_PATTERN)
     endpoint_run_ids: tuple[UUID, ...]
+    adjudication_job_id: UUID | None = None
     state: Literal[
         "awaiting_adjudication",
         "adjudicating",
+        "adjudication_failed",
         "awaiting_signoff",
         "completed",
         "rejected",

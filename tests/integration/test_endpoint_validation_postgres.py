@@ -14,7 +14,11 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 
-from hcuopt.contracts.endpoint_adjudication_v1 import EndpointCampaignCreate
+from hcuopt.adapters.profiles import ENDPOINT_FORMAL_ADJUDICATION_PROFILE
+from hcuopt.contracts.endpoint_adjudication_v1 import (
+    EndpointCampaignCreate,
+    EndpointFormalAdjudicationResult,
+)
 from hcuopt.contracts.endpoint_control_v1 import EndpointValidationRunCreate
 from hcuopt.contracts.v1 import WorkerRegister
 from hcuopt.domain.enums import TaskState, WorkerType
@@ -23,6 +27,7 @@ from hcuopt.measurement.endpoint_models import (
     EndpointMeasurementPlan,
     SignedM1EvidenceReference,
 )
+from hcuopt.orchestrator.endpoint_validation import EndpointValidationCoordinator
 from hcuopt.storage.repository import PostgresRepository
 
 DSN = os.environ.get("HCUOPT_ENDPOINT_TEST_DATABASE_URL")
@@ -601,6 +606,9 @@ def test_endpoint_campaign_freezes_eight_advanced_groups(
         == "awaiting_adjudication"
     )
     with repository.connection() as connection:
+        assert connection.execute(
+            "SELECT count(*) AS count FROM schema_migrations WHERE version = 25"
+        ).fetchone()["count"] == 1
         with pytest.raises(psycopg.Error, match="endpoint campaign bindings are immutable"):
             connection.execute(
                 """
@@ -610,4 +618,180 @@ def test_endpoint_campaign_freezes_eight_advanced_groups(
                 """,
                 (list(reversed(run_ids)), campaign["campaign_id"]),
             )
+
+        with pytest.raises(psycopg.Error, match="endpoint campaign bindings are immutable"):
+            connection.execute(
+                """
+                UPDATE endpoint_validation_campaigns
+                SET adjudication_job_id = %s
+                WHERE campaign_id = %s
+                """,
+                (uuid4(), campaign["campaign_id"]),
+            )
+
+    job = repository.get_job(campaign["adjudication_job_id"])
+    assert job["job_type"] == "endpoint_adjudicate"
+    assert job["accepted_worker_type"] == "evaluation"
+    assert job["lease_scope"] == "none"
+    assert job["payload"] == campaign["adjudication_request"]
+    assert job["max_attempts"] == 1
+
+
+def _create_endpoint_campaign(repository: PostgresRepository):
+    base = _seed_signed_m1(repository)
+    run_ids = tuple(_complete_endpoint_group(repository, base, item) for item in range(8))
+    return repository.create_endpoint_validation_campaign(
+        EndpointCampaignCreate(
+            name="BW20 formal endpoint campaign",
+            endpoint_run_ids=run_ids,
+            raw_evidence_manifest_uri="file:///evidence/raw-evidence-hashes.json",
+            raw_evidence_manifest_sha256=_hash(7001),
+            idempotency_key=f"endpoint-campaign:{uuid4()}",
+        )
+    )
+
+
+def _claim_endpoint_d(repository: PostgresRepository, campaign):
+    worker_id = f"endpoint-d-worker-{uuid4()}"
+    repository.register_worker(
+        WorkerRegister(
+            worker_id=worker_id,
+            worker_type=WorkerType.EVALUATION,
+            adapter_profile=ENDPOINT_FORMAL_ADJUDICATION_PROFILE,
+            capabilities={"hcu_required": False},
+        )
+    )
+    job = repository.claim_job(worker_id)
+    assert job is not None
+    assert job["job_id"] == campaign["adjudication_job_id"]
+    assert repository.get_endpoint_validation_campaign(campaign["campaign_id"])[
+        "state"
+    ] == "adjudicating"
+    return job
+
+
+def _endpoint_d_result(campaign, verdict: str = "inconclusive") -> dict:
+    common = {
+        "schema_version": "endpoint-formal-adjudication-result-v1",
+        "campaign_id": str(campaign["campaign_id"]),
+        "verdict": verdict,
+        "reason": "independent fixture adjudication",
+        "verified_file_count": 257 if verdict != "invalid" else 0,
+        "manifest_sha256": campaign["adjudication_request"][
+            "raw_evidence_manifest_sha256"
+        ],
+        "formal_d_adjudication": True,
+        "automatic_release_allowed": False,
+    }
+    if verdict == "invalid":
+        return {
+            **common,
+            "successful_groups": 0,
+            "measured_requests": 0,
+            "groups": [],
+        }
+    return {
+        **common,
+        "successful_groups": 8,
+        "measured_requests": 3200,
+        "baseline_mean_ns": 40_211_056.0,
+        "candidate_mean_ns": 40_211_550.0,
+        "paired_latency_reduction_percent": -0.000554,
+        "confidence_interval_percent": [-0.654733, 0.649372],
+        "groups": [
+            {
+                "group_ordinal": ordinal,
+                "baseline_mean_ns": 40_211_056.0 + ordinal,
+                "candidate_mean_ns": 40_211_550.0 + ordinal,
+                "log_ratio": 0.000012,
+                "acquisition_means_ns": [
+                    40_211_050.0,
+                    40_211_545.0,
+                    40_211_555.0,
+                    40_211_062.0,
+                ],
+            }
+            for ordinal in range(8)
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected_state"),
+    (("inconclusive", "awaiting_signoff"), ("invalid", "invalid")),
+)
+def test_endpoint_d_job_persists_formal_result(
+    endpoint_database: PostgresRepository,
+    verdict: str,
+    expected_state: str,
+) -> None:
+    repository = endpoint_database
+    campaign = _create_endpoint_campaign(repository)
+    job = _claim_endpoint_d(repository, campaign)
+    result = _endpoint_d_result(campaign, verdict)
+    completed = repository.complete_job(
+        job["job_id"], job["claim_token"], job["fencing_token"], result
+    )
+    EndpointValidationCoordinator(repository).advance(completed)
+
+    persisted = repository.get_endpoint_validation_campaign(campaign["campaign_id"])
+    assert persisted["state"] == expected_state
+    assert persisted["adjudication_result"] == result
+    assert persisted["automatic_release_allowed"] is False
+    assert repository.get_job(job["job_id"])["workflow_advanced_at"] is not None
+
+
+def test_endpoint_d_rejects_payload_and_result_replay_mismatch(
+    endpoint_database: PostgresRepository,
+) -> None:
+    repository = endpoint_database
+    campaign = _create_endpoint_campaign(repository)
+    job = _claim_endpoint_d(repository, campaign)
+    result = _endpoint_d_result(campaign)
+    with repository.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET payload = payload || %s WHERE job_id = %s",
+            (Jsonb({"producer_verdict": "forged"}), job["job_id"]),
+        )
+    completed = repository.complete_job(
+        job["job_id"], job["claim_token"], job["fencing_token"], result
+    )
+    with pytest.raises(Exception, match="frozen Campaign binding"):
+        EndpointValidationCoordinator(repository).advance(completed)
+    assert repository.get_endpoint_validation_campaign(campaign["campaign_id"])[
+        "adjudication_result"
+    ] is None
+
+    with repository.connection() as connection:
+        connection.execute(
+            "UPDATE jobs SET payload = %s WHERE job_id = %s",
+            (Jsonb(campaign["adjudication_request"]), job["job_id"]),
+        )
+    EndpointValidationCoordinator(repository).advance(repository.get_job(job["job_id"]))
+    changed = EndpointFormalAdjudicationResult.model_validate(
+        {**result, "reason": "different replay"}
+    )
+    with pytest.raises(Exception, match="result replay differs"):
+        repository.record_endpoint_adjudication_result(
+            repository.get_job(job["job_id"]), changed
+        )
+
+
+def test_endpoint_d_worker_failure_is_fail_closed(
+    endpoint_database: PostgresRepository,
+) -> None:
+    repository = endpoint_database
+    campaign = _create_endpoint_campaign(repository)
+    job = _claim_endpoint_d(repository, campaign)
+    repository.fail_job(
+        job["job_id"],
+        job["claim_token"],
+        job["fencing_token"],
+        {"code": "fixture_failure", "message": "D worker stopped"},
+        retryable=True,
+    )
+    persisted = repository.get_endpoint_validation_campaign(campaign["campaign_id"])
+    assert persisted["state"] == "adjudication_failed"
+    assert persisted["adjudication_result"] is None
+    assert persisted["automatic_release_allowed"] is False
 

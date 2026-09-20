@@ -8,11 +8,13 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from psycopg.types.json import Jsonb
 
 from hcuopt.adapters.bw20_endpoint_execution import BASELINE_MODULE_HASH
+from hcuopt.adapters.profiles import ENDPOINT_FORMAL_ADJUDICATION_PROFILE
 from hcuopt.adapters.resource_cleaner import cleanup_is_healthy
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointAdjudicationGroupRef,
     EndpointCampaignCreate,
     EndpointFormalAdjudicationRequest,
+    EndpointFormalAdjudicationResult,
 )
 from hcuopt.contracts.endpoint_control_v1 import (
     EndpointValidationJobResult,
@@ -285,6 +287,10 @@ class EndpointValidationRepositoryMixin:
         campaign_id = uuid5(
             NAMESPACE_URL, f"hcuopt:endpoint-campaign:{request.idempotency_key}"
         )
+        adjudication_job_id = uuid5(
+            NAMESPACE_URL,
+            f"hcuopt:endpoint-campaign-adjudication:{request.idempotency_key}",
+        )
         with self.connection() as connection:
             replay = connection.execute(
                 """
@@ -304,6 +310,7 @@ class EndpointValidationRepositoryMixin:
                     != request.raw_evidence_manifest_uri
                     or frozen["raw_evidence_manifest_sha256"]
                     != request.raw_evidence_manifest_sha256
+                    or replay["adjudication_job_id"] != adjudication_job_id
                 ):
                     raise Conflict(
                         "endpoint campaign idempotency_key was reused with different inputs"
@@ -388,15 +395,35 @@ class EndpointValidationRepositoryMixin:
                     "automatic_release_allowed": False,
                 }
             )
+            adjudication_payload = adjudication.model_dump(mode="json")
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, task_id, job_type, accepted_worker_type,
+                    adapter_profile, lease_scope, payload, idempotency_key,
+                    priority, max_attempts
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, 1)
+                """,
+                (
+                    adjudication_job_id,
+                    first["signed_m1_task_id"],
+                    JobType.ENDPOINT_ADJUDICATE.value,
+                    WorkerType.EVALUATION.value,
+                    ENDPOINT_FORMAL_ADJUDICATION_PROFILE,
+                    LeaseScope.NONE.value,
+                    Jsonb(adjudication_payload),
+                    f"endpoint-campaign-adjudication:{campaign_id}:v1",
+                ),
+            )
             row = connection.execute(
                 """
                 INSERT INTO endpoint_validation_campaigns (
                     campaign_id, name, signed_m1_task_id, target_snapshot_id,
                     adapter_profile, environment_fingerprint, endpoint_run_ids,
-                    adjudication_request, state, idempotency_key,
+                    adjudication_request, adjudication_job_id, state, idempotency_key,
                     automatic_release_allowed
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     'awaiting_adjudication', %s, FALSE
                 ) RETURNING *
                 """,
@@ -408,7 +435,8 @@ class EndpointValidationRepositoryMixin:
                     first["adapter_profile"],
                     first["environment_fingerprint"],
                     list(request.endpoint_run_ids),
-                    Jsonb(adjudication.model_dump(mode="json")),
+                    Jsonb(adjudication_payload),
+                    adjudication_job_id,
                     request.idempotency_key,
                 ),
             ).fetchone()
@@ -427,6 +455,131 @@ class EndpointValidationRepositoryMixin:
         if row is None:
             raise NotFound(f"endpoint validation campaign not found: {campaign_id}")
         return row
+
+    def record_endpoint_adjudication_result(
+        self,
+        job: dict[str, Any],
+        result: EndpointFormalAdjudicationResult,
+    ) -> dict[str, Any]:
+        """Persist D's result only when Job, Campaign, payload, and result agree."""
+
+        if (
+            job["job_type"] != JobType.ENDPOINT_ADJUDICATE.value
+            or job["state"] != JobState.SUCCEEDED.value
+            or job["accepted_worker_type"] != WorkerType.EVALUATION.value
+            or job["lease_scope"] != LeaseScope.NONE.value
+        ):
+            raise Conflict("endpoint D result requires one succeeded Evaluation Job")
+        encoded = result.model_dump(mode="json")
+        with self.connection() as connection:
+            campaign = connection.execute(
+                """
+                SELECT * FROM endpoint_validation_campaigns
+                WHERE campaign_id = %s FOR UPDATE
+                """,
+                (result.campaign_id,),
+            ).fetchone()
+            if campaign is None:
+                raise NotFound(
+                    f"endpoint validation campaign not found: {result.campaign_id}"
+                )
+            if (
+                campaign["adjudication_job_id"] != job["job_id"]
+                or job["task_id"] != campaign["signed_m1_task_id"]
+                or job["payload"] != campaign["adjudication_request"]
+                or str(result.campaign_id)
+                != str(campaign["adjudication_request"]["campaign_id"])
+                or result.automatic_release_allowed is not False
+            ):
+                raise Conflict("endpoint D Job differs from the frozen Campaign binding")
+            if campaign["state"] in {"awaiting_signoff", "invalid"}:
+                if campaign["adjudication_result"] != encoded:
+                    raise Conflict("endpoint D result replay differs")
+                return campaign
+            if campaign["state"] != "adjudicating":
+                raise Conflict(
+                    f"endpoint Campaign cannot accept D result from {campaign['state']}"
+                )
+            next_state = (
+                "invalid" if result.verdict == "invalid" else "awaiting_signoff"
+            )
+            row = connection.execute(
+                """
+                UPDATE endpoint_validation_campaigns
+                SET state = %s, adjudication_result = %s, updated_at = now()
+                WHERE campaign_id = %s
+                RETURNING *
+                """,
+                (next_state, Jsonb(encoded), result.campaign_id),
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, 'endpoint_campaign_adjudicated', %s)
+                """,
+                (
+                    campaign["signed_m1_task_id"],
+                    Jsonb(
+                        {
+                            "campaign_id": str(result.campaign_id),
+                            "job_id": str(job["job_id"]),
+                            "verdict": result.verdict,
+                            "state": next_state,
+                            "formal_d_adjudication": True,
+                            "automatic_release_allowed": False,
+                        }
+                    ),
+                ),
+            )
+        assert row is not None
+        return row
+
+    def _fail_endpoint_adjudication_after_job_failure(
+        self,
+        connection: Any,
+        job: dict[str, Any],
+        error: dict[str, Any],
+    ) -> None:
+        """Fail closed without manufacturing a D verdict."""
+
+        if job["job_type"] != JobType.ENDPOINT_ADJUDICATE.value:
+            return
+        campaign = connection.execute(
+            """
+            SELECT * FROM endpoint_validation_campaigns
+            WHERE adjudication_job_id = %s FOR UPDATE
+            """,
+            (job["job_id"],),
+        ).fetchone()
+        if campaign is None:
+            return
+        if campaign["state"] in {"awaiting_adjudication", "adjudicating"}:
+            connection.execute(
+                """
+                UPDATE endpoint_validation_campaigns
+                SET state = 'adjudication_failed', updated_at = now()
+                WHERE campaign_id = %s
+                """,
+                (campaign["campaign_id"],),
+            )
+        connection.execute(
+            """
+            INSERT INTO task_events (task_id, event_type, details)
+            VALUES (%s, 'endpoint_campaign_adjudication_failed', %s)
+            """,
+            (
+                campaign["signed_m1_task_id"],
+                Jsonb(
+                    {
+                        "campaign_id": str(campaign["campaign_id"]),
+                        "job_id": str(job["job_id"]),
+                        "error": error,
+                        "verdict": None,
+                        "automatic_release_allowed": False,
+                    }
+                ),
+            ),
+        )
 
     def record_endpoint_validation_result(
         self, job: dict[str, Any], result: EndpointValidationJobResult

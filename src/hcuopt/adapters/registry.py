@@ -9,6 +9,7 @@ from hcuopt.adapters.interfaces import (
     CandidateBuilderAdapter,
     CandidateGenerator,
     CandidateRuntimeAdapter,
+    EndpointCampaignAdjudicatorAdapter,
     EndpointMeasurementRunner,
     EvaluatorAdapter,
     ExecutionAdapter,
@@ -37,6 +38,7 @@ class AdapterRegistry:
     kernel_correctness: ManualKernelCorrectnessAdapter | None = None
     measurement_harness: MeasurementHarness | None = None
     endpoint_measurement_runner: EndpointMeasurementRunner | None = None
+    endpoint_campaign_adjudicator: EndpointCampaignAdjudicatorAdapter | None = None
     candidate_adjudicator: ManualCandidateAdjudicatorAdapter | None = None
     stage0_probe: Stage0ProbeAdapter | None = None
     evaluator: EvaluatorAdapter | None = None
@@ -84,6 +86,7 @@ class AdapterRegistry:
             "kernel_correctness",
             "measurement_harness",
             "endpoint_measurement_runner",
+            "endpoint_campaign_adjudicator",
             "candidate_adjudicator",
             "stage0_probe",
             "evaluator",

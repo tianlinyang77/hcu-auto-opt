@@ -5,6 +5,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from hcuopt.adapters.interfaces import (
+    EndpointCampaignAdjudicatorAdapter,
     EndpointMeasurementRunner,
     ManualCandidateAdjudicatorAdapter,
     ManualKernelCorrectnessAdapter,
@@ -199,6 +200,18 @@ class JobHandlers:
                 "endpoint validation result omits the active Runner provenance"
             )
         return result
+
+    def handle_endpoint_adjudicate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        adjudicator = self.adapters.require("endpoint_campaign_adjudicator")
+        if not isinstance(adjudicator, EndpointCampaignAdjudicatorAdapter):
+            raise AdapterUnavailable(
+                "endpoint_adjudicate requires the independent D interface"
+            )
+        frozen_payload = {
+            key: value for key, value in payload.items() if key != "_job_context"
+        }
+        result = adjudicator.adjudicate_endpoint_campaign(frozen_payload)
+        return result.model_dump(mode="json")
 
     def handle_manual_adjudicate(self, payload: dict[str, Any]) -> dict[str, Any]:
         adjudicator = self.adapters.require("candidate_adjudicator")

@@ -30,11 +30,13 @@ MANUAL_CANDIDATE_CAPABILITIES = frozenset(
 ENDPOINT_VALIDATION_CAPABILITIES = frozenset(
     {"endpoint_measurement_runner", "resource_cleaner"}
 )
+ENDPOINT_ADJUDICATION_CAPABILITIES = frozenset({"endpoint_campaign_adjudicator"})
 REAL_FRAMEWORK_SMOKE_PROFILE = "nmz36-framework-smoke-v1"
 REAL_STAGE0_PROFILE = "nmz36-stage0-v2"
 REAL_MANUAL_CANDIDATE_PROFILE = "nmz36-m1-manual-v1"
 BW20_MANUAL_CANDIDATE_PROFILE = "bw20-m1-manual-v1"
 BW20_ENDPOINT_VALIDATION_PROFILE = "bw20-endpoint-provisional-v1"
+ENDPOINT_FORMAL_ADJUDICATION_PROFILE = "endpoint-formal-adjudicator-v1"
 # Compatibility name for S0-B callers. Measurement is an internal delegate of the
 # single public Stage 0 worker profile, not a separately claimable profile.
 REAL_STAGE0_MEASUREMENT_PROFILE = REAL_STAGE0_PROFILE
