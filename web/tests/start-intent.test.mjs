@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { freezeScriptedStart, submitScriptedStart, validateStartReceipt } from "../src/scripted-start.js";
+import { freezeScriptedStart, savedStartRequests, saveStartRequest, submitScriptedStart, validateStartReceipt } from "../src/scripted-start.js";
 
 import {
   deriveStartAuditSteps,
@@ -18,6 +18,33 @@ function startPreview() {
     resolved_plan: {run_mode: "scripted", synthetic: true, automatic_release_allowed: false},
     start_allowed: true, required_ack_codes: ["warning"], expires_at: "2099-01-01T00:00:00Z"};
 }
+
+test("refresh recovery preserves exact request and rejects replacement or corrupt storage", () => {
+  let value = null;
+  const storage = {getItem: () => value, setItem: (_, next) => { value = next; }};
+  const request = freezeScriptedStart(startPreview(), fixture.actor, ["warning"], fixture.idempotency_key);
+  saveStartRequest(request, storage);
+  assert.deepEqual(savedStartRequests(storage), [request]);
+  assert.throws(() => saveStartRequest({...request, actor: "someone else"}, storage));
+  value = "broken";
+  assert.throws(() => savedStartRequests(storage));
+});
+
+test("storage failure prevents sending a non-recoverable start", async () => {
+  const request = freezeScriptedStart(startPreview(), fixture.actor, ["warning"], fixture.idempotency_key);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  Object.defineProperty(globalThis, "sessionStorage", {configurable: true, value: {
+    getItem: () => null, setItem: () => { throw new Error("quota exceeded"); },
+  }});
+  let sent = false;
+  try {
+    await assert.rejects(submitScriptedStart({}, request, async () => { sent = true; }));
+    assert.equal(sent, false);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "sessionStorage", descriptor);
+    else delete globalThis.sessionStorage;
+  }
+});
 
 test("start requires explicit warning acknowledgement and live scripted authority", () => {
   const preview = startPreview();

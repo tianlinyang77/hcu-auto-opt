@@ -2,6 +2,33 @@
 const sessions = new Map();
 const identityFields = ["source_commit", "control_contract_version", "operator_contract_version",
   "profile_catalog_hash", "server_instance_id"];
+const storageKey = "hcuopt-scripted-start-v1";
+
+export function savedStartRequests(storage = globalThis.sessionStorage) {
+  if (!storage) return [];
+  const raw = storage.getItem(storageKey);
+  if (!raw) return [];
+  const rows = JSON.parse(raw);
+  if (!Array.isArray(rows) || rows.some((row) => !row || typeof row.preview_id !== "string" ||
+      typeof row.idempotency_key !== "string" || !row.expected_service_identity)) {
+    throw new Error("启动恢复记录损坏，请先核查已有请求，不能清空记录后重新提交");
+  }
+  return rows;
+}
+
+export function saveStartRequest(request, storage = globalThis.sessionStorage) {
+  if (!storage) {
+    if (typeof window !== "undefined") throw new Error("浏览器无法保存恢复记录，启动未发送");
+    return;
+  }
+  const rows = savedStartRequests(storage);
+  const previous = rows.find((row) => row.preview_id === request.preview_id);
+  if (previous && JSON.stringify(previous) !== JSON.stringify(request)) {
+    throw new Error("此计划已有不同的冻结请求，请恢复原请求");
+  }
+  if (!previous) rows.push(request);
+  storage.setItem(storageKey, JSON.stringify(rows));
+}
 
 export function freezeScriptedStart(preview, actor, acknowledgements, key, now = Date.now()) {
   if (preview?.synthetic !== true || preview?.automatic_release_allowed !== false ||
@@ -39,14 +66,22 @@ export function validateStartReceipt(receipt, request) {
 }
 
 export function startSession(previewId) {
-  if (!sessions.has(previewId)) sessions.set(previewId, {request: null, receipt: null, pending: null});
+  if (!sessions.has(previewId)) {
+    let request = null;
+    let recoveryError = null;
+    try { request = savedStartRequests().find((row) => row.preview_id === previewId) || null; }
+    catch (error) { recoveryError = error; }
+    sessions.set(previewId, {request, receipt: null, pending: null, recoveryError});
+  }
   return sessions.get(previewId);
 }
 
 export async function submitScriptedStart(session, request, fetcher = fetch) {
+  if (session.recoveryError) throw session.recoveryError;
   if (session.request && JSON.stringify(session.request) !== JSON.stringify(request)) {
     throw new Error("此计划已提交，不能更换请求身份");
   }
+  saveStartRequest(request);
   session.request = request;
   if (session.receipt) return session.receipt;
   if (session.pending) return session.pending;

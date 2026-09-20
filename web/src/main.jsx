@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "@fontsource-variable/jetbrains-mono";
 import "@fontsource-variable/noto-sans-sc";
 import { App } from "./App.jsx";
+import { ScriptedStartRecovery } from "./ScriptedStartRecovery.jsx";
 import { FrameworkSmokeInspection } from "./FrameworkSmokeInspection.jsx";
 import { InspectionEntry } from "./InspectionEntry.jsx";
 import { ManualCandidateInspection } from "./ManualCandidateInspection.jsx";
@@ -17,7 +18,7 @@ const manualCandidateTask = query.get("manualCandidate");
 const endpointCampaign = query.get("endpointCampaign");
 const selectedEvidenceEntries = [frameworkSmokeTask, inspectionRun, evidenceRun, manualCandidateTask, endpointCampaign].filter(Boolean);
 
-let content = <App />;
+let content = <>{query.get("demo") !== "1" && <ScriptedStartRecovery />}<App /></>;
 if (selectedEvidenceEntries.length > 1) {
   content = <main role="alert">请选择一个证据入口，不能同时指定多种审核或终态报告。</main>;
 } else if (frameworkSmokeTask) {

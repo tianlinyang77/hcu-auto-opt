@@ -43,7 +43,7 @@ export function ScriptedStartPanel({ preview, demoMode }) {
         {busy ? "正在提交…" : request ? "使用原请求重试" : "确认启动演练"}
       </button>
       {request && <p className="mono">请求编号：{request.idempotency_key}</p>}
-      {error && <p role="alert">{error}。请求可能已受理，勿刷新页面后重复创建。</p>}
+      {error && <p role="alert">{error}。请重试原请求；刷新后可在首页恢复，勿重新建计划。</p>}
       {receipt && <div role="status"><p>控制面状态：{receipt.state} · Round：{receipt.round_id}</p>
         <button className="outline-button" type="button" onClick={() => setAudit(true)}>查看启动记录</button>
       </div>}
