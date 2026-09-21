@@ -178,3 +178,20 @@ FormalPhaseConsumer 默认关闭，只处理部署方已准备好的单阶段请
 尚缺生产扫描/调度装配、从 Round 到完整 B PhaseRequest 的真实准备、
 运行中协作停止以及当前资源清理/恢复验收。旧执行器直调入口不在此日志保护范围，
 不能据新 Consumer 单测宣称所有物理执行都 exactly-once。
+
+## 2026-09-21：部署侧阶段请求装配（仍 Proposed）
+
+新增 prepare_formal_phase_request 和 Consumer.prepare_and_execute_once，默认关闭不变。
+候选/制品来自 RoundCandidate，Family/阶段计划来自 SearchRound，Profile 来自封存
+Authority，主机/卡和时间窗口来自部署 Reader 读取的正式授权。预算沿用既有
+M2PhaseBudgetReservationPlan，不另建测量协议。部署参数只接受明确的 Lease/拓扑/
+Target Lock 字段白名单；不允许覆盖候选、制品、授权窗口或阶段标识。
+
+装配时重用 B 的 Authority 状态、验签、Plan 和授权校验。缺失制品、未通过正确性、
+跨轮次材料或过期授权在写阶段日志前拒绝；不伪造 build/correctness 或状态跃迁。
+成功只代表请求装配及授权检查通过，部署提供的 Lease 材料仍须由 B 在执行时实时验真。
+该方法不申请资源、不调用探针、不预留预算；后续 Consumer 才提交调用日志并进入 B。
+历史回执在授权过期后读取仍走 execute_once，使用日志中的原始请求，不重新装配。
+
+没有新增 HTTP 权限、DB 表或自动扫描器。生产侧当前记录读取、构建/正确性阶段推进、
+真实租约采集与具体部署 wiring 尚未完成；不能把新增装配函数描述为生产准备链路已通。
