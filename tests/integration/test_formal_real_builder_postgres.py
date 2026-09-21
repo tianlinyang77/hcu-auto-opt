@@ -43,6 +43,7 @@ from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
 from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
 from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLease
 from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
+from hcuopt.storage.formal_correctness_recovery import PostgresFormalCorrectnessRecovery
 from hcuopt.targets import target_fingerprint
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
@@ -305,9 +306,15 @@ def test_real_builder_to_budget_publication_and_job_completion(
         with repo.connection() as conn:
             conn.execute("UPDATE baseline_epochs SET frozen = false")
     input_hash = "sha256:" + "c" * 64
+    recovery = PostgresFormalCorrectnessRecovery(journal)
+    before_invocation = recovery.inspect(input_hash)
+    assert before_invocation["status"] == "not_invoked"
     with ThreadPoolExecutor(max_workers=2) as pool:
         starts = list(pool.map(journal.begin, [input_hash] * 2))
     assert sum(acquired for _, acquired in starts) == 1
+    unresolved = recovery.inspect(input_hash)
+    assert unresolved["status"] == "invocation_unresolved"
+    assert unresolved["execution_retry_allowed"] is False
     with pytest.raises(Conflict, match="another input"):
         journal.begin("sha256:" + "d" * 64)
     with pytest.raises(Conflict, match="stale"):
@@ -351,20 +358,39 @@ def test_real_builder_to_budget_publication_and_job_completion(
         journal.record_result(input_hash, result, wall_seconds=0.2)
         with pytest.raises(Conflict, match="immutable"):
             journal.record_result(input_hash, result, wall_seconds=0.3)
+        preview = recovery.inspect(input_hash)
+        assert preview["status"] == "result_ready"
+        recovery_request = dict(
+            expected_snapshot_hash=preview["snapshot_hash"], requested_by="integration-operator",
+            request_id="recover-fixture",
+        )
+        with pytest.raises(Conflict, match="snapshot changed"):
+            recovery.reconcile_known_result(input_hash, **{
+                **recovery_request, "expected_snapshot_hash": unresolved["snapshot_hash"],
+            })
         def fail_settle(*args):
             raise RuntimeError("injected settlement failure")
 
         with monkeypatch.context() as patch:
             patch.setattr(repo, "finalize_round_budget", fail_settle)
             with pytest.raises(RuntimeError, match="settlement failure"):
-                journal.finalize_recorded_result(input_hash)
+                recovery.reconcile_known_result(input_hash, **recovery_request)
         with repo.connection() as conn:
             assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
                                 (plan.authorized_resource_id,)).fetchone()["state"] == "available"
             assert conn.execute("SELECT state FROM jobs WHERE job_id = %s",
                                 (job["job_id"],)).fetchone()["state"] == "running"
-        assert journal.finalize_recorded_result(input_hash) == result
-        assert journal.finalize_recorded_result(input_hash) == result
+        assert recovery.inspect(input_hash)["status"] == "settlement_pending"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            recovered = list(pool.map(
+                lambda _: recovery.reconcile_known_result(input_hash, **recovery_request), range(2),
+            ))
+        assert recovered == [result, result]
+        assert recovery.inspect(input_hash)["status"] == "completed"
+        with pytest.raises(Conflict, match="immutable"):
+            recovery.reconcile_known_result(input_hash, **{
+                **recovery_request, "requested_by": "different-operator",
+            })
         assert journal.begin(input_hash)[1] is False
         with repo.connection() as conn:
             assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
@@ -382,6 +408,20 @@ def test_real_builder_to_budget_publication_and_job_completion(
     else:
         journal.mark_unknown(input_hash)
         journal.mark_unknown(input_hash)
+        preview = recovery.inspect(input_hash)
+        assert preview["status"] == "unknown_requires_manual_recovery"
+        assert preview["resource_owned_by_attempt"] is True
+        assert preview["required_manual_checks"]
+        with pytest.raises(Conflict, match="recorded result"):
+            recovery.reconcile_known_result(
+                input_hash, expected_snapshot_hash=preview["snapshot_hash"],
+                requested_by="integration-operator", request_id="refuse-unknown",
+            )
+        with repo.connection() as conn:
+            assert conn.execute(
+                "SELECT count(*) AS n FROM job_events WHERE event_type = "
+                "'formal_correctness_reconciliation_requested'",
+            ).fetchone()["n"] == 0
         assert journal.begin(input_hash)[1] is False
         with pytest.raises(Conflict, match="no recorded result"):
             journal.finalize_recorded_result(input_hash)

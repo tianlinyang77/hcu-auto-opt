@@ -442,7 +442,15 @@ Ruff 通过。使用随机隔离 schema 和明确 fixture Stage0 报告引用，
 （3.80 秒）；隔离 PostgreSQL 25 passed（35.42 秒）；Ruff 通过。
 覆盖真实 CPU 子进程终止、停止/失租/检查故障、截止、检查阻塞、双阶段清理失败留证、
 KeyboardInterrupt 不重试。GPU 进程和容器清理仍需实机验证，不能外推 CPU 结论。
-宿主进程被 SIGKILL/主机失联不在协作停止保证内；unknown 的人工核查与恢复入口仍待接线，
+宿主进程被 SIGKILL/主机失联不在协作停止保证内；unknown 的物理恢复仍待接线，
 过期本身不代表安全释放。检查阻塞可能留下一个只读 daemon 线程直到底层调用返回，
 不会继续启动命令或自行释放资源。
 生产关闭、ADR 待审，不据此宣称实机验收或整轮优化完成。
+
+已补可信部署侧的异常核查与已知结果补账入口（见
+[操作说明](../formal-correctness-recovery.md)）。检查结果不暴露 claim token；
+补账绑定状态快照、操作者和请求 ID，复用原 finalizer，并发/故障重试只结算一次。
+Unknown 无释放入口，仅返回必须完成的核查清单；不新增公共 API 或绕过原身份验证。
+验证：Windows CPU 54 passed（9.13 秒），Linux/Python 3.10 CPU 54 passed（3.66 秒），
+隔离 PostgreSQL 25 passed（34.44 秒）。覆盖过期快照拒绝、请求不可改写、释放后补账失败恢复、
+并发幂等和 Unknown 拒绝。仍是 CPU/数据库证据，不代表物理恢复验收。
