@@ -271,3 +271,19 @@ FormalBuildConsumer 默认关闭，核对当期数据库 Round/Member/Baseline �
 有界执行与 Claim 生命周期、失败证据和恢复操作接线。在这些完成前不得开启生产消费，
 不得将普通队列 Job 留给另一个 Worker 同时执行。保留 queued Job/Attempt 预算约束，
 不扩展 phase 枚举，不借用 search/holdout 日志冒充 build。Family 与正确性仍未自动推进。
+
+## 2026-09-21：成功构建用量结算（仍 Proposed）
+
+Consumer 在 Builder 调用（含其 finally 清理）前后使用单调时钟记录 CPU 构建墙钟时间，
+与完整构建输出一起不可变保存；这不是 HCU 性能测量，不引入第二套性能 Harness。
+成功返回记一次 build_attempts，GPU Lease 与 Harness 消耗为零。使用原预算账本结算，
+Ledger ID/幂等键/时间来自持久化结果，不以每次重放的当前时间重新计费。
+
+顺序为保存结果与用量 → 结算预算 → 发布制品状态。结算成功但响应丢失、发布失败均可
+重放同一结果与账目，不重跑 Builder。停止或 Claim 过期不阻止已发生消耗的记账，但
+不授予发布或再次执行权限。旧结果缺失用量必须人工对账，不能把缺失值补零。
+未知构建/清理失败仍保留预留，等待核查，不把可能已消费的预算释放。
+
+本切片不新增迁移；result JSONB 增加 usage，旧版本不得继续消费新结算流程。
+Job 隔离领取/完成、有界执行与 Claim 生命周期、失败对账仍待实现。生产 Consumer
+保持关闭；预算预留必须由原 queued Job/Attempt 路径产生，不绕过其守卫。

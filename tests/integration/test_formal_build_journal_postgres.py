@@ -144,6 +144,16 @@ def test_consumer_replays_output_after_publication_failure(journal_case, tmp_pat
     args = dict(reservation_id=reservation.reservation_id, round_authority=round_, member=member,
                 baseline=baseline, hotspot={}, hotspot_intake_hash=INPUT_HASH, output_dir=tmp_path)
     record = store.record
+    finalize = repo.finalize_round_budget
+
+    def lost_settlement_response(entry):
+        finalize(entry)
+        raise RuntimeError("settlement response lost")
+
+    monkeypatch.setattr(repo, "finalize_round_budget", lost_settlement_response)
+    with pytest.raises(RuntimeError, match="response lost"):
+        consumer.execute_once(**args)
+    monkeypatch.setattr(repo, "finalize_round_budget", finalize)
 
     def fail(*args):
         raise RuntimeError("injected publication outage")
@@ -155,6 +165,15 @@ def test_consumer_replays_output_after_publication_failure(journal_case, tmp_pat
     assert consumer.execute_once(**args) == result
     assert consumer.execute_once(**args) == result
     assert len(calls) == 1
+    with repo.connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM round_budget_ledger WHERE entry_type = 'settle'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["actual"]["build_attempts"] == 1
+        assert rows[0]["actual"]["wall_seconds"] >= 0
+        assert rows[0]["actual"]["exclusive_lease_seconds"] == 0
+        assert rows[0]["harness_active_seconds"] == 0
 
 
 def test_consumer_unknown_failure_never_retries(journal_case, tmp_path, monkeypatch):
@@ -185,3 +204,44 @@ def test_consumer_unknown_failure_never_retries(journal_case, tmp_path, monkeypa
     with pytest.raises(Conflict, match="recovery required"):
         consumer.execute_once(**args)
     assert len(calls) == 1
+    with repo.connection() as conn:
+        assert conn.execute(
+            "SELECT state FROM round_budget_reservations"
+        ).fetchone()["state"] == "reserved"
+
+
+def test_usage_settlement_is_concurrent_idempotent_after_stop(journal_case):
+    journal, reservation, result, _ = journal_case
+    args = (result.build.candidate_id, reservation.reservation_id, INPUT_HASH)
+    journal.begin(*args)
+    journal.record_result(*args, result, wall_seconds=12.5)
+    journal.claims.request_stop(journal.intent_id, requested_by="operator")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [pool.submit(journal.settle_recorded_result, *args) for _ in range(2)]
+        outcomes = [c.result() for c in calls]
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0]["ledger_entry"]["actual"] == BudgetUsage(
+        build_attempts=1, wall_seconds=12.5,
+    ).model_dump(mode="json")
+    with pytest.raises(Conflict, match="invoking"):
+        journal.record_result(*args, result, wall_seconds=13)
+    with journal.claims.dispatcher.repository.connection() as conn:
+        assert conn.execute(
+            "SELECT count(*) AS n FROM round_budget_ledger WHERE entry_type = 'settle'"
+        ).fetchone()["n"] == 1
+
+
+def test_missing_and_invalid_usage_never_become_zero_charge(journal_case):
+    journal, reservation, result, _ = journal_case
+    args = (result.build.candidate_id, reservation.reservation_id, INPUT_HASH)
+    journal.begin(*args)
+    for invalid in [float("nan"), float("inf"), -1, True]:
+        with pytest.raises(ValueError, match="finite and nonnegative"):
+            journal.record_result(*args, result, wall_seconds=invalid)
+    journal.record_result(*args, result)  # Legacy immutable output without usage.
+    with pytest.raises(Conflict, match="reconciliation required"):
+        journal.settle_recorded_result(*args)
+    with journal.claims.dispatcher.repository.connection() as conn:
+        assert conn.execute(
+            "SELECT state FROM round_budget_reservations"
+        ).fetchone()["state"] == "reserved"

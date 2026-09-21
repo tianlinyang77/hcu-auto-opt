@@ -3,6 +3,7 @@
 """One bounded build call using a pre-reserved budget, not a background scheduler."""
 
 import hashlib
+import time
 from pathlib import Path
 
 from hcuopt.adapters.formal_candidate_builder import (
@@ -29,8 +30,9 @@ class FormalBuildConsumer:
                      hotspot, hotspot_intake_hash: str, output_dir: Path):
         """Persist output before publication; never rerun an uncertain build.
 
-        Budget reservation must already exist. This component does not finalize
-        accounting or claim Job completion; those remain deployment responsibilities.
+        Budget reservation must already exist. Successful build usage is settled
+        before publication, including replay. Unknown failures require reconciliation.
+        Job ownership/completion remain deployment responsibilities.
         """
         if not self.enabled or not self.builder.enabled or not self.store.enabled:
             raise Conflict("Formal build consumer is disabled")
@@ -86,14 +88,19 @@ class FormalBuildConsumer:
                         for key, value in baseline.model_dump(mode="python").items()
                     ):
                         raise Conflict("Formal build Baseline differs from durable parent")
+                started = time.monotonic()
                 result = self.builder.build_member(
                     round_authority=round_authority, member=member, baseline=baseline,
                     hotspot=hotspot, hotspot_intake_hash=hotspot_intake_hash, output_dir=output_dir,
                 )
-                journal.record_result(*args, result)
+                wall_seconds = time.monotonic() - started
+                journal.record_result(*args, result, wall_seconds=wall_seconds)
             except Exception:
                 journal.mark_unknown(*args)
                 raise
+        # Settlement errors retain the immutable output and usage for retry.
+        # Do not mark that known result unknown or rerun the builder.
+        journal.settle_recorded_result(*args)
         # Publication errors retain exact output for replay, not another build.
         self.store.record(journal.intent_id, journal.worker_id, journal.claim_token, result)
         return result

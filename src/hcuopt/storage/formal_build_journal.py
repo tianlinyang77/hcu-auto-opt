@@ -2,15 +2,18 @@
 
 """Durable build invocation slot. Recording output is not publishing a built candidate."""
 
+import hashlib
+import math
 import re
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from psycopg.types.json import Jsonb
 
 from hcuopt.adapters.formal_candidate_builder import FormalCandidateBuildResult
-from hcuopt.contracts.m2 import RoundCandidateBuildTerminal
+from hcuopt.contracts.m2 import BudgetUsage, RoundBudgetLedgerEntry, RoundCandidateBuildTerminal
 from hcuopt.contracts.v1 import ManualCandidateBuildResult
 from hcuopt.domain.errors import Conflict
+from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator.formal_dispatch import prepare_formal_round
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_dispatch import _insert
@@ -83,7 +86,8 @@ class PostgresFormalBuildJournal:
             return dict(row), True
 
     def record_result(self, candidate_id: UUID, reservation_id: UUID, input_hash: str,
-                      result: FormalCandidateBuildResult) -> None:
+                      result: FormalCandidateBuildResult, *, wall_seconds: float | None = None
+                      ) -> None:
         build = ManualCandidateBuildResult.model_validate(result.build.model_dump(mode="json"))
         terminal = RoundCandidateBuildTerminal.model_validate(
             result.terminal.model_dump(mode="json")
@@ -95,6 +99,13 @@ class PostgresFormalBuildJournal:
             raise Conflict("Formal build journal result binding differs")
         payload = {"build": build.model_dump(mode="json"),
                    "terminal": terminal.model_dump(mode="json")}
+        if wall_seconds is not None:
+            if (isinstance(wall_seconds, bool) or not math.isfinite(wall_seconds)
+                    or wall_seconds < 0):
+                raise ValueError("Formal build elapsed time must be finite and nonnegative")
+            payload["usage"] = BudgetUsage(
+                build_attempts=1, wall_seconds=wall_seconds,
+            ).model_dump(mode="json")
         with self.claims.dispatcher.repository.connection() as conn:
             intent, row = self._locked(conn, candidate_id, reservation_id, input_hash)
             if terminal.round_id != intent.round_id or not any(
@@ -112,6 +123,47 @@ class PostgresFormalBuildJournal:
                 "finished_at = clock_timestamp() WHERE intent_id = %s AND candidate_id = %s",
                 (Jsonb(payload), self.intent_id, candidate_id),
             )
+
+    def settle_recorded_result(self, candidate_id: UUID, reservation_id: UUID,
+                               input_hash: str) -> dict:
+        """Settle retained CPU build usage exactly once, even after stop/expiry.
+
+        Accounting is not authority to build or publish. Old receipts without
+        usage need explicit reconciliation; never replace missing usage with zero.
+        """
+        repo = self.claims.dispatcher.repository
+        with repo.connection() as conn:
+            intent, row = self._locked(conn, candidate_id, reservation_id, input_hash)
+            if row is None or row["state"] != "result_recorded" or "usage" not in row["result"]:
+                raise Conflict("Formal build usage is unavailable; reconciliation required")
+            actual = BudgetUsage.model_validate(row["result"]["usage"])
+            if (not math.isfinite(actual.wall_seconds)
+                    or actual != BudgetUsage(build_attempts=1, wall_seconds=actual.wall_seconds)):
+                raise Conflict("Formal build usage is not a single CPU build")
+            budget = conn.execute(
+                "SELECT * FROM round_budget_reservations WHERE reservation_id = %s FOR SHARE",
+                (reservation_id,),
+            ).fetchone()
+            if budget is None or (budget["round_id"] != intent.round_id
+                                  or budget["candidate_id"] != candidate_id):
+                raise Conflict("Formal build usage Budget binding differs")
+            evidence_hash = "sha256:" + hashlib.sha256(canonical_json_bytes({
+                "intent_id": str(self.intent_id), "candidate_id": str(candidate_id),
+                "reservation_id": str(reservation_id), "input_hash": input_hash,
+                "result": row["result"],
+            })).hexdigest()
+            entry = RoundBudgetLedgerEntry(
+                ledger_entry_id=uuid5(reservation_id, "formal-build-settlement-v1"),
+                reservation_id=reservation_id, round_id=intent.round_id, entry_type="settle",
+                reserved=BudgetUsage.model_validate(budget["planned"]), actual=actual,
+                lease_held_seconds=0, harness_active_seconds=0,
+                raw_usage_evidence_hash=evidence_hash,
+                idempotency_key=f"formal-build-settle:{reservation_id}",
+                created_at=row["finished_at"],
+            )
+        # Do not nest the repository's Round->Reservation locking transaction
+        # under the journal's Intent lock. The result and input identity are immutable.
+        return repo.finalize_round_budget(entry)
 
     def mark_unknown(self, candidate_id: UUID, reservation_id: UUID, input_hash: str) -> None:
         with self.claims.dispatcher.repository.connection() as conn:
