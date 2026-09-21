@@ -3,6 +3,7 @@
 """Atomic publication of a completed real build; no builder or hardware invocation."""
 
 import hashlib
+import subprocess
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -121,9 +122,21 @@ class PostgresFormalBuildStore:
                 or baseline["source_hash"] != member["baseline_source_hash"]
                 or baseline["synthetic"] or not baseline["clean"]
                 or baseline["repository"] != source.repository
-                or baseline["commit"] != source.commit
             ):
                 raise Conflict("Formal build Baseline differs from its durable parent")
+            # Real Overlay builds commit the reviewed replacement. Candidate HEAD
+            # must be a direct child of Baseline, not equal to Baseline HEAD.
+            try:
+                parent_path = file_uri_to_path(baseline["worktree_uri"])
+                git = subprocess.run(
+                    ["git", "--no-replace-objects", "-C", str(parent_path), "show", "-s",
+                     "--format=%P%n%T", source.commit],
+                    check=True, capture_output=True, text=True, timeout=30,
+                )
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise Conflict("Formal build Git ancestry cannot be verified") from error
+            if git.stdout.strip().splitlines() != [baseline["commit"], source.tree_hash]:
+                raise Conflict("Formal build Git parent or tree differs from its snapshot")
             provenance = Jsonb([p.model_dump(mode="json") for p in build.adapter_provenance])
             _insert(connection, "source_snapshots", {
                 **source.model_dump(mode="python"), "task_id": intent.task_id,

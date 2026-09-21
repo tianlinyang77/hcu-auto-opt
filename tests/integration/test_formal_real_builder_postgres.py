@@ -1,0 +1,182 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
+"""Real Git/Overlay/DB composition with explicitly synthetic test source and authority.
+
+No HCU, model, real SGLang workload, or performance conclusion is involved.
+"""
+
+import hashlib
+import os
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import pytest
+
+from hcuopt.adapters.build_cache import LocalBuildCache
+from hcuopt.adapters.formal_candidate_builder import FormalRoundCandidateBuilder
+from hcuopt.adapters.git_source import GitSourceManager
+from hcuopt.adapters.local_artifact_store import LocalArtifactStore
+from hcuopt.adapters.manual_candidate import (
+    CandidateSourcePackageStore,
+    ManualOverlayCandidateBuilder,
+)
+from hcuopt.contracts.m2 import (
+    BudgetUsage,
+    RoundBudgetLedgerEntry,
+    RoundBudgetReservation,
+    RoundCandidate,
+)
+from hcuopt.contracts.v1 import WorkerRegister
+from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
+from hcuopt.storage.formal_build import PostgresFormalBuildStore
+from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
+from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
+from hcuopt.storage.formal_claim import PostgresFormalClaimStore
+from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
+from tests.integration import test_formal_dispatch_postgres as dispatch_tests
+from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
+from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
+from tests.unit import f1c_helpers as source_helpers
+from tests.unit import test_formal_operator_plans as plans
+
+pytestmark = [
+    pytest.mark.postgres,
+    pytest.mark.skipif(not os.getenv("HCUOPT_DATABASE_URL"), reason="requires PostgreSQL"),
+    pytest.mark.skipif(os.name == "nt", reason="real readonly publication requires Linux"),
+]
+
+
+@pytest.fixture
+def real_sources(tmp_path, monkeypatch):
+    profile = "nmz36-m2a-formal-v1"
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git = source_helpers.git
+    git(origin, "init")
+    git(origin, "config", "user.name", "Test Builder")
+    git(origin, "config", "user.email", "builder@example.invalid")
+    target = origin / plans.OVERLAY_PATH
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"def free(value):\n    return value\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-m", "test source")
+    output = tmp_path / "build-output"
+    manager = GitSourceManager(profile)
+    baseline = manager.prepare_baseline(source_helpers.target_for(
+        origin, tmp_path / "baseline", git(origin, "rev-parse", "HEAD"),
+    ), output)
+    digests = {"baseline-source": baseline.source_hash}
+    contents = [b"def free_v1(value):\n    return value\n",
+                b"def free_v2(value):\n    return value + 0\n"]
+    for label, candidate_id, content in zip(
+        ["candidate-one", "candidate-two"],
+        [plans.FIRST_CANDIDATE_ID, plans.SECOND_CANDIDATE_ID], contents, strict=True,
+    ):
+        snapshot = manager.create_candidate(baseline, candidate_id, output)
+        try:
+            worktree = file_uri_to_path(snapshot.worktree_uri)
+            (worktree / plans.OVERLAY_PATH).write_bytes(content)
+            digests[label] = canonical_source_hash(worktree)
+        finally:
+            manager.remove_candidate(baseline, snapshot, output)
+    old_hash, old_seed = plans._hash, dispatch_tests.seed_authority
+    monkeypatch.setattr(plans, "_hash", lambda value: digests.get(value) or old_hash(value))
+    state = {"manager": manager, "output": output, "profile": profile, "contents": contents}
+
+    def seed(repo, coordinator, memory):
+        # Set up test authority before Intent signing/dispatch; never rewrite frozen intake.
+        old_seed(repo, coordinator, memory)
+        with repo.connection() as conn:
+            row = conn.execute(
+                "SELECT snapshot_id FROM source_snapshots WHERE kind = 'baseline'"
+            ).fetchone()
+            state["baseline"] = baseline.model_copy(update={"snapshot_id": row["snapshot_id"]})
+            conn.execute(
+                "UPDATE source_snapshots SET repository = %s, commit = %s, tree_hash = %s, "
+                "worktree_uri = %s, created_at = %s WHERE snapshot_id = %s",
+                (baseline.repository, baseline.commit, baseline.tree_hash, baseline.worktree_uri,
+                 baseline.created_at, row["snapshot_id"]),
+            )
+    monkeypatch.setattr(dispatch_tests, "seed_authority", seed)
+    return state
+
+
+def test_real_builder_to_budget_publication_and_job_completion(real_sources, request):
+    # Resolve after real_sources has replaced only the test source/seed factories.
+    dispatcher, intent_id = request.getfixturevalue("dispatch_case")
+    dispatcher.create(intent_id)
+    repo = dispatcher.repository
+    claims = PostgresFormalClaimStore(dispatcher, enabled=True)
+    claim = claims.claim(intent_id, "real-test-builder", ttl_seconds=300)
+    token = claim["claim_token"]
+    with repo.connection() as conn:
+        round_ = repo._search_round_authority(
+            conn.execute("SELECT * FROM search_rounds").fetchone()
+        )
+        row = conn.execute("SELECT * FROM round_candidates WHERE candidate_id = %s",
+                           (plans.FIRST_CANDIDATE_ID,)).fetchone()
+        member = RoundCandidate.model_validate(
+            {key: row[key] for key in RoundCandidate.model_fields}
+        )
+        hotspot = conn.execute("SELECT * FROM hotspots").fetchone()
+    repo.register_worker(WorkerRegister(
+        worker_id="real-test-builder", worker_type="build", adapter_profile=round_.adapter_profile,
+    ))
+    job = PostgresFormalBuildJobs(claims, intent_id, "real-test-builder", token).enqueue(
+        member.candidate_id,
+    )
+    reservation = RoundBudgetReservation(
+        reservation_id=uuid4(), round_id=round_.round_id, job_id=job["job_id"], attempt=1,
+        candidate_id=member.candidate_id, planned=BudgetUsage(build_attempts=1, wall_seconds=60),
+        state="reserved", idempotency_key=f"real-build-reserve:{job['job_id']}",
+    )
+    repo.reserve_round_budget(reservation, RoundBudgetLedgerEntry(
+        ledger_entry_id=uuid4(), reservation_id=reservation.reservation_id,
+        round_id=round_.round_id, entry_type="reserve", reserved=reservation.planned,
+        actual=BudgetUsage(), lease_held_seconds=0, harness_active_seconds=0,
+        raw_usage_evidence_hash=member.source_package_hash,
+        idempotency_key=f"real-build-ledger:{job['job_id']}", created_at=datetime.now(timezone.utc),
+    ))
+    # The real source package root used by the compiler/verifier is the fixture's packages folder.
+    package_root = request.getfixturevalue("tmp_path") / "packages"
+    output, profile = real_sources["output"], real_sources["profile"]
+    builder = FormalRoundCandidateBuilder(ManualOverlayCandidateBuilder(
+        real_sources["manager"], CandidateSourcePackageStore(
+            package_root, profile=profile, allowed_overlay_roots=("sglang",),
+            approved_mount_targets={plans.REPLACEMENT_POINT: plans.MOUNT_TARGET},
+        ), LocalArtifactStore(output / "artifacts", profile), LocalBuildCache(output / "cache"),
+        profile=profile,
+    ), store_id=member.source_package_store_id, store_hash=member.source_package_store_hash,
+        enabled=True)
+    consumer = FormalBuildConsumer(
+        PostgresFormalBuildJournal(claims, intent_id, "real-test-builder", token), builder,
+        PostgresFormalBuildStore(claims, enabled=True), enabled=True,
+    )
+    kwargs = dict(
+        reservation_id=reservation.reservation_id, round_authority=round_, member=member,
+        baseline=real_sources["baseline"], hotspot=hotspot["evidence"],
+        hotspot_intake_hash=hotspot["intake_hash"], output_dir=output,
+    )
+    result = consumer.execute_once(**kwargs)
+    assert consumer.execute_once(**kwargs) == result
+    artifact = file_uri_to_path(result.build.artifact.uri)
+    assert artifact.read_bytes() == real_sources["contents"][0]
+    assert result.build.artifact.content_hash == "sha256:" + hashlib.sha256(
+        artifact.read_bytes()
+    ).hexdigest()
+    assert artifact.stat().st_mode & 0o222 == 0
+    assert not any((output / "worktrees").iterdir())
+    assert canonical_source_hash(file_uri_to_path(real_sources["baseline"].worktree_uri)) == (
+        real_sources["baseline"].source_hash
+    )
+    assert source_helpers.git(
+        file_uri_to_path(real_sources["baseline"].worktree_uri), "status", "--porcelain=v1",
+    ) == ""
+    with repo.connection() as conn:
+        assert conn.execute("SELECT state FROM jobs").fetchone()["state"] == "succeeded"
+        assert conn.execute("SELECT count(*) AS n FROM artifacts").fetchone()["n"] == 1
+        assert conn.execute("SELECT state FROM round_budget_reservations").fetchone()[
+            "state"
+        ] == "settled"
+        assert conn.execute("SELECT count(*) AS n FROM round_budget_ledger "
+                            "WHERE entry_type = 'settle'").fetchone()["n"] == 1

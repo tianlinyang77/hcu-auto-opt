@@ -17,6 +17,7 @@ from hcuopt.storage.formal_build import PostgresFormalBuildStore
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
 from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
+from tests.unit.f1c_helpers import git
 
 pytestmark = [
     pytest.mark.postgres,
@@ -35,9 +36,29 @@ def build_record_case(dispatch_case, tmp_path):  # type: ignore[no-untyped-def] 
         member = conn.execute("SELECT * FROM round_candidates ORDER BY ordinal LIMIT 1").fetchone()
         round_ = conn.execute("SELECT * FROM search_rounds").fetchone()
         baseline = conn.execute("SELECT * FROM source_snapshots WHERE kind = 'baseline'").fetchone()
+    # Real Git ancestry even when the build result itself is a database fixture.
+    parent_path = tmp_path / "parent-git"
+    parent_path.mkdir()
+    git(parent_path, "init")
+    git(parent_path, "config", "user.name", "Test Builder")
+    git(parent_path, "config", "user.email", "builder@example.invalid")
+    (parent_path / "source.py").write_text("BASELINE = True\n", encoding="utf-8")
+    git(parent_path, "add", ".")
+    git(parent_path, "commit", "-m", "baseline fixture")
+    baseline_commit = git(parent_path, "rev-parse", "HEAD")
+    (parent_path / "source.py").write_text("CANDIDATE = True\n", encoding="utf-8")
+    git(parent_path, "commit", "-am", "candidate fixture")
+    candidate_commit = git(parent_path, "rev-parse", "HEAD")
+    candidate_tree = git(parent_path, "rev-parse", "HEAD^{tree}")
+    git(parent_path, "checkout", "--detach", baseline_commit)
+    with repo.connection() as conn:
+        conn.execute(
+            "UPDATE source_snapshots SET commit = %s, worktree_uri = %s WHERE snapshot_id = %s",
+            (baseline_commit, parent_path.as_uri(), baseline["snapshot_id"]),
+        )
     source = SourceSnapshot(
         snapshot_id=uuid4(), kind="candidate", repository=baseline["repository"],
-        commit=baseline["commit"], tree_hash="b" * 40,
+        commit=candidate_commit, tree_hash=candidate_tree,
         source_hash=member["candidate_source_hash"], worktree_uri="fixture://removed-worktree",
         clean=True, parent_snapshot_id=baseline["snapshot_id"],
     )
@@ -142,3 +163,20 @@ def test_invalid_parent_and_tampered_file_cannot_publish(build_record_case):  # 
         path.chmod(0o444)
     with pytest.raises(Conflict, match="content Hash"):
         store.record(intent_id, "builder", token, result)
+
+
+@pytest.mark.parametrize("fault", ["baseline_commit", "wrong_tree"])
+def test_git_ancestry_must_match_real_candidate(build_record_case, fault):
+    store, intent_id, token, result = build_record_case
+    with store.claims.dispatcher.repository.connection() as conn:
+        baseline = conn.execute(
+            "SELECT commit FROM source_snapshots WHERE kind = 'baseline'"
+        ).fetchone()
+    changes = {"commit": baseline["commit"]} if fault == "baseline_commit" else {
+        "tree_hash": "f" * 40,
+    }
+    changed = replace(result, build=result.build.model_copy(update={
+        "source": result.build.source.model_copy(update=changes),
+    }))
+    with pytest.raises(Conflict, match="Git parent or tree"):
+        store.record(intent_id, "builder", token, changed)

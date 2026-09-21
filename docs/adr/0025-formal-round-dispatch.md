@@ -308,3 +308,19 @@ Job 隔离领取/完成、有界执行与 Claim 生命周期、失败对账仍�
 claim_job 不识别新 lane，混部不安全。应用回退前停用所有队列写进程并保留数据库证据。
 网络恢复后，PostgreSQL 组合联验 13 项通过；本地定向 80 项、额外 Worker 回归 28 项通过。
 这些是夹具驱动的工程验证，不是实际 HCU 性能验收；ADR 仍待审，不能宣称整体完成。
+
+## 2026-09-21：真实 Git/Overlay 与数据库联验
+
+新增 Linux 联合测试，从临时 Git 基线和两份真实文件源码包生成冻结 Family 与测试授权，
+随后调用原 GitSourceManager/ManualOverlayCandidateBuilder/ArtifactStore，不模拟 Builder 返回值。
+通过专用 Job、预算预留、构建日志、用量结算、制品发布和 Job 完成；重复调用只重放结果，
+检查只读制品内容/Hash、worktree 清理、基线 Hash 和 Git 干净状态。
+
+联验发现旧发布校验错误地要求 Candidate Commit 等于 Baseline Commit，和真实 Builder
+创建新提交的行为冲突。改为在基线 Git 仓库读取候选提交的直接父提交与 Tree，分别匹配
+基线 Commit 与候选 SourceSnapshot.tree_hash；关闭 replace objects，命令有 30 秒超时。
+同 commit、错误树、缺失 Git 对象均不能首次发布；父快照、源码/制品 Hash 等原检查保留。
+Git 检查在发布事务内执行，部署必须保留可读基线仓库及候选对象；这是明确的部署依赖。
+
+这是实际源码构建与 PostgreSQL 的功能联验，但源码/授权仍为测试样例，未运行真实 SGLang
+请求、模型或 HCU；不产生正确性/性能结论，不替代后续当期实机验收。
