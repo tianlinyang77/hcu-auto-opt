@@ -227,3 +227,20 @@ RoundCandidateBuildTerminal 与完整 ManualCandidateBuildResult，不另造制�
 worktree 清理由原 Builder 的 finally 保证，不合成成功或伪造失败证据 Hash。
 该适配器不验部署授权、不预留预算、不写数据库；必须由后续受控构建 Worker 调用。
 尚待正式结果原子落库、预算与恢复语义、正确性推进及 Family 冻结串联。
+
+## 2026-09-21：Formal 构建成功结果原子落库（仍 Proposed）
+
+新增默认关闭的 PostgresFormalBuildStore.record，仅由受信部署调用；不新增 HTTP 写入口。
+重新验读 Claim/Intent/当前授权；同 Intent 锁内检查停止、期限和冻结成员，核对 Baseline
+父快照、源码 Hash、Manifest Hash、Profile 及制品普通只读文件与内容 Hash。
+事务内一起插入 SourceSnapshot、Artifact，更新 Candidate/RoundCandidate 为 built、
+Round 为 building，并追加 formal_candidate_build_recorded 审计。任何一步失败全部回滚。
+原样重复结果按完整结果 Hash 返回既有成员；相同成员的不同结果拒绝覆盖。
+
+事务仅覆盖数据库记录。之前已发布的内容寻址制品文件在数据库失败时保留，不自动删除；
+源码 worktree 清理由构建器负责。审计 hash 绑定完整构建输出，必须保存原始结果重放，
+不能重新构建后修改时间字段冒充同一结果。本方法要求仍有有效领取，不是过期后的恢复接口。
+
+只接受成功构建归档，不启动构建、不结算预算、不写 correctness_passed、不冻结 Family。
+正式构建 Worker 的执行日志、预算及失败归档仍待接线；不能据落库成功宣称受控构建闭环完成。
+原 Scripted 路径和 synthetic 保护保持不变，无数据库迁移或自动发布。
