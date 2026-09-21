@@ -36,7 +36,19 @@ python -m pytest tests/integration/test_formal_real_builder_postgres.py \
 只清理各例自己创建的 schema；未清空共享表、未启动或停止已有服务、未访问 HCU。
 Windows 已知只读临时 hardlink 清理问题未改，本联合测试显式限定 Linux。
 
-## 未覆盖
+## 后续：双候选构建与 Artifact Family 冻结
+
+联合测试已扩展为两个真实文件候选，分别创建 Job、预算预留、调用日志、制品与结算。
+首个候选完成时提前冻结被拒绝；两个候选完成后复用现有
+`freeze_search_round_artifact_family`，按持久化成员重算集合摘要，进入 `correctness`。
+验证重复冻结只产生一个冻结事件、错误集合 Hash 被拒绝、两个 Job 均成功，
+且 `automatic_release_allowed` 仍为 false。未新增生产开关或另一套冻结算法。
+
+Linux/Python 3.10/PostgreSQL 同组回归 **24 passed / 26.75 秒**，Ruff 通过。
+该次运行后仅对测试中一个断言折行，不改变执行语义。
+这证明整轮真实构建能够衔接正确性阶段入口，不证明正确性执行或性能评测完成。
+
+## 后续未覆盖
 
 测试用短 Python 源码不是业务优化候选；授权、热点和 Stage 0 为明确测试夹具。
 未加载模型、未做 SGLang 正确性/性能测试、未自动冻结 Family、未签核或发布生产候选。

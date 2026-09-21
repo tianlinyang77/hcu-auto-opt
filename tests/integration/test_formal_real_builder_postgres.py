@@ -21,12 +21,15 @@ from hcuopt.adapters.manual_candidate import (
     ManualOverlayCandidateBuilder,
 )
 from hcuopt.contracts.m2 import (
+    ArtifactFamilyFreezeRequest,
     BudgetUsage,
     RoundBudgetLedgerEntry,
     RoundBudgetReservation,
     RoundCandidate,
 )
 from hcuopt.contracts.v1 import WorkerRegister
+from hcuopt.domain.errors import Conflict
+from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 from hcuopt.storage.formal_build import PostgresFormalBuildStore
 from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
@@ -109,12 +112,47 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
     claims = PostgresFormalClaimStore(dispatcher, enabled=True)
     claim = claims.claim(intent_id, "real-test-builder", ttl_seconds=300)
     token = claim["claim_token"]
+    for index, candidate_id in enumerate([plans.FIRST_CANDIDATE_ID, plans.SECOND_CANDIDATE_ID]):
+        build_member(repo, claims, intent_id, token, real_sources, request, candidate_id, index)
+        if index == 0:
+            with repo.connection() as conn:
+                partial = conn.execute("SELECT * FROM search_rounds").fetchone()
+            with pytest.raises(Conflict, match="not ready"):
+                repo.freeze_search_round_artifact_family(ArtifactFamilyFreezeRequest(
+                    round_id=partial["round_id"],
+                    candidate_family_hash=partial["candidate_family_hash"],
+                    expected_artifact_family_hash="sha256:" + "0" * 64,
+                ))
+    with repo.connection() as conn:
+        round_row = conn.execute("SELECT * FROM search_rounds").fetchone()
+        members = conn.execute("SELECT * FROM round_candidates ORDER BY ordinal").fetchall()
+    freeze = ArtifactFamilyFreezeRequest(
+        round_id=round_row["round_id"], candidate_family_hash=round_row["candidate_family_hash"],
+        expected_artifact_family_hash=artifact_family_hash(round_row, members),
+    )
+    frozen = repo.freeze_search_round_artifact_family(freeze)
+    assert frozen["state"] == "correctness"
+    assert frozen["automatic_release_allowed"] is False
+    assert repo.freeze_search_round_artifact_family(freeze) == frozen
+    with pytest.raises(Conflict, match="Hash"):
+        repo.freeze_search_round_artifact_family(freeze.model_copy(update={
+            "expected_artifact_family_hash": "sha256:" + "0" * 64,
+        }))
+    with repo.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM task_events WHERE event_type = "
+                            "'m2_round_artifact_family_frozen'").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM jobs WHERE state = 'succeeded'").fetchone()[
+            "n"
+        ] == 2
+
+
+def build_member(repo, claims, intent_id, token, real_sources, request, candidate_id, index):
     with repo.connection() as conn:
         round_ = repo._search_round_authority(
             conn.execute("SELECT * FROM search_rounds").fetchone()
         )
         row = conn.execute("SELECT * FROM round_candidates WHERE candidate_id = %s",
-                           (plans.FIRST_CANDIDATE_ID,)).fetchone()
+                           (candidate_id,)).fetchone()
         member = RoundCandidate.model_validate(
             {key: row[key] for key in RoundCandidate.model_fields}
         )
@@ -160,7 +198,7 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
     result = consumer.execute_once(**kwargs)
     assert consumer.execute_once(**kwargs) == result
     artifact = file_uri_to_path(result.build.artifact.uri)
-    assert artifact.read_bytes() == real_sources["contents"][0]
+    assert artifact.read_bytes() == real_sources["contents"][index]
     assert result.build.artifact.content_hash == "sha256:" + hashlib.sha256(
         artifact.read_bytes()
     ).hexdigest()
@@ -173,10 +211,13 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         file_uri_to_path(real_sources["baseline"].worktree_uri), "status", "--porcelain=v1",
     ) == ""
     with repo.connection() as conn:
-        assert conn.execute("SELECT state FROM jobs").fetchone()["state"] == "succeeded"
-        assert conn.execute("SELECT count(*) AS n FROM artifacts").fetchone()["n"] == 1
-        assert conn.execute("SELECT state FROM round_budget_reservations").fetchone()[
+        assert conn.execute(
+            "SELECT state FROM jobs WHERE job_id = %s", (job["job_id"],),
+        ).fetchone()["state"] == "succeeded"
+        assert conn.execute("SELECT count(*) AS n FROM artifacts").fetchone()["n"] == index + 1
+        assert conn.execute("SELECT state FROM round_budget_reservations WHERE reservation_id = %s",
+                            (reservation.reservation_id,)).fetchone()[
             "state"
         ] == "settled"
         assert conn.execute("SELECT count(*) AS n FROM round_budget_ledger "
-                            "WHERE entry_type = 'settle'").fetchone()["n"] == 1
+                            "WHERE entry_type = 'settle'").fetchone()["n"] == index + 1
