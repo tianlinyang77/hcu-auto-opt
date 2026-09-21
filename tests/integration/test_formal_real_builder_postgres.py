@@ -7,6 +7,7 @@ No HCU, model, real SGLang workload, or performance conclusion is involved.
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -35,6 +36,7 @@ from hcuopt.storage.formal_build import PostgresFormalBuildStore
 from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
 from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
+from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
@@ -112,6 +114,11 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
     claims = PostgresFormalClaimStore(dispatcher, enabled=True)
     claim = claims.claim(intent_id, "real-test-builder", ttl_seconds=300)
     token = claim["claim_token"]
+    correctness_jobs = PostgresFormalCorrectnessJobs(
+        claims, intent_id, "real-test-builder", token,
+    )
+    with pytest.raises(Conflict, match="frozen correctness"):
+        correctness_jobs.enqueue(plans.FIRST_CANDIDATE_ID)
     for index, candidate_id in enumerate([plans.FIRST_CANDIDATE_ID, plans.SECOND_CANDIDATE_ID]):
         build_member(repo, claims, intent_id, token, real_sources, request, candidate_id, index)
         if index == 0:
@@ -144,6 +151,37 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         assert conn.execute("SELECT count(*) AS n FROM jobs WHERE state = 'succeeded'").fetchone()[
             "n"
         ] == 2
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        simultaneous = list(pool.map(
+            correctness_jobs.enqueue, [plans.FIRST_CANDIDATE_ID] * 2,
+        ))
+    job = simultaneous[0]
+    assert simultaneous[1] == job
+    assert correctness_jobs.enqueue(plans.FIRST_CANDIDATE_ID) == job
+    assert job["execution_lane"] == "formal"
+    assert job["job_type"] == "manual_correctness"
+    assert job["state"] == "queued" and job["attempts"] == 0
+    assert job["lease_scope"] == "shared" and job["max_attempts"] == 1
+    assert job["payload"]["artifact_family_hash"] == frozen["artifact_family_hash"]
+    repo.register_worker(WorkerRegister(
+        worker_id="ordinary-correctness", worker_type="gpu",
+        adapter_profile=frozen["adapter_profile"],
+    ))
+    assert repo.claim_job("ordinary-correctness") is None
+    with pytest.raises(Conflict):
+        PostgresFormalCorrectnessJobs(
+            claims, intent_id, "real-test-builder", uuid4(),
+        ).enqueue(plans.FIRST_CANDIDATE_ID)
+    with pytest.raises(Conflict):
+        correctness_jobs.enqueue(uuid4())
+    claims.request_stop(intent_id, requested_by="integration-test")
+    with pytest.raises(Conflict, match="stop"):
+        correctness_jobs.enqueue(plans.SECOND_CANDIDATE_ID)
+    with repo.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM jobs WHERE job_type = "
+                            "'manual_correctness'").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM job_events WHERE event_type = "
+                            "'formal_correctness_queued'").fetchone()["n"] == 1
 
 
 def build_member(repo, claims, intent_id, token, real_sources, request, candidate_id, index):

@@ -340,3 +340,20 @@ Task、Baseline、Target、Stage 0、Workload、源码与制品绑定。
 
 本地新增桥接与既有 M1 判断器组合回归：27 passed、1 skipped（Windows 环境）；
 Ruff 通过。使用明确测试证据，未调用 HCU 或真实业务候选。
+
+## 2026-09-21：正确性 Job 隔离入队
+
+`PostgresFormalCorrectnessJobs.enqueue` 在活跃、未停止的同部署 Claim 下，锁住
+Intent/Round，重验完整 Artifact Family 与持久化非 Synthetic 制品后创建
+`manual_correctness` Job。使用现有 `formal` lane、`gpu` Worker 类型、`shared`
+租约需求及 `max_attempts=1`；payload 固定候选、制品、集合和控制面 Owner/Token。
+重复或并发入队只返回同一个 Job。审计事件为 `formal_correctness_queued`，与 Job
+同事务写入，不新增迁移或公开 HTTP 写入口。
+
+这里的 queued 不表示执行授权，也不表示已取得 shared Lease。普通 Worker 不能领取，
+专用正确性 Consumer 的预算预留、Lease/Fence、持久化 invoking、结果与用量结算仍待接线；
+现阶段不得打开生产消费或把该 Job 手动转入 general lane。
+
+Linux/Python 3.10/PostgreSQL 组合回归 24 passed（41.14 秒）；覆盖真实双候选构建后
+入队、冻结前拒绝、并发幂等、错误 Token/域外候选/停止拒绝和普通 GPU Worker 隔离。
+未使用 HCU；Ruff 通过。
