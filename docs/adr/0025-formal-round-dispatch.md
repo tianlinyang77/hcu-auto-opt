@@ -135,3 +135,23 @@ Worker、期限和 `claimed / recovery_required`。原创建 outbox 不被改写
 超时标记后以 recovery_required 优先显示；停止请求的原始审计不被覆盖。
 本阶段不新增“清理通过”布尔字段：清理终态须复用 B 执行回执及真实资源身份验证，
 待接完整 phase/Attempt/Lease 绑定后才能收口；当前不允许重新入队或自动发布。
+
+## 2026-09-21：B 执行器检查点接线（仍 Proposed）
+
+既有 `M2FormalPhaseExecutionAdapter.run` 增加部署注入的可选 execution_checkpoint，
+在进入执行器、预算预留后且进入唯一 Harness 前、Harness 返回后各调用一次。
+`FormalClaimCheckpoint` 先绑定 Intent 的 Task/Round/Plan/授权 Hash 及候选成员，
+再调用持久化领取检查；不创建第二个调度器或计时 Harness。
+旧调用者没有注入时保持原行为；**新 Formal Consumer 必须显式注入**，默认部署未开放。
+
+预留前拒绝不采样、不预留预算；预留后拒绝走 B 既有清理、实际预算结算、失败回执。
+尚未进入 Harness 的路径记 harness_active_seconds=0，不能把检查/清理时间当作采样时间。
+采样返回后停止不发布成功 measurement_ref；清理失败继续记录 cleanup_failed。
+不由控制面领取 Token 替代设备 Fence，不据失败回执自动释放资源。
+
+发布后回读回执的不可变内容，核对完整 ExecutionBinding 与 request_hash；
+新增 `load_for_request` 允许后续 Consumer 对 Phase/Attempt/Lease/Fence 精确绑定验真。
+此操作只证明回执归属与内容，不证明当前资源已空闲。
+
+本切片没有自动扫描/启动器，没有持久化 phase-attempt 的执行中标记，
+也没有运行中强杀/协作中断线程。失联重试、当前租约清理验真及物理启动竞争仍需下一步。

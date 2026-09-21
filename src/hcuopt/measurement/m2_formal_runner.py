@@ -183,7 +183,10 @@ class M2FormalPhaseExecutionAdapter:
         member: RoundCandidate,
         request: M2FormalPhaseExecutionRequest,
         output_dir: Path,
+        execution_checkpoint: Callable[[M2FormalPhaseExecutionRequest], None] | None = None,
     ) -> M2FormalPhaseExecutionOutcome:
+        if execution_checkpoint is not None:
+            execution_checkpoint(request)
         now = self.clock()
         request_hash = m2_formal_phase_execution_request_hash(request)
         if (
@@ -228,7 +231,11 @@ class M2FormalPhaseExecutionAdapter:
         failure: Exception | None = None
         cleanup_evidence: dict[str, Any] | None = None
         actual_sample_count = 0
+        harness_started = False
         try:
+            if execution_checkpoint is not None:
+                execution_checkpoint(request)
+            harness_started = True
             result = ManualPerformanceEvidenceResult.model_validate(
                 self.harness.run_manual_performance(
                     self._harness_payload(
@@ -244,6 +251,8 @@ class M2FormalPhaseExecutionAdapter:
             cleanup_evidence = dict(result.cleanup_evidence)
             actual_sample_count = result.measurement.sample_count
             self._validate_harness_result(round_authority, member, request, result)
+            if execution_checkpoint is not None:
+                execution_checkpoint(request)
         except Exception as exc:
             failure = exc
             if isinstance(exc, M2FormalHarnessFailure):
@@ -287,6 +296,7 @@ class M2FormalPhaseExecutionAdapter:
                 )
 
         elapsed = max(0.0, (finished_ns - started_ns) / 1_000_000_000)
+        harness_elapsed = elapsed if harness_started else 0.0
         actual = self._actual_usage(
             request.binding.phase,
             actual_sample_count,
@@ -314,7 +324,7 @@ class M2FormalPhaseExecutionAdapter:
             finished_at=finished_at,
             actual=actual,
             lease_held_seconds=elapsed,
-            harness_active_seconds=elapsed,
+            harness_active_seconds=harness_elapsed,
             measurement_ref=measurement_ref,
             sample_count=actual_sample_count,
             cleanup_evidence=cleanup_evidence,
@@ -351,7 +361,7 @@ class M2FormalPhaseExecutionAdapter:
                 "planned": request.reservation.planned.model_dump(mode="json"),
                 "actual": actual.model_dump(mode="json"),
                 "lease_held_seconds": elapsed,
-                "harness_active_seconds": elapsed,
+                "harness_active_seconds": harness_elapsed,
                 "error_code": record.error_code,
                 "synthetic": False,
                 "producer_verdict": None,
@@ -365,12 +375,13 @@ class M2FormalPhaseExecutionAdapter:
                     entry_type=RoundBudgetEntryType.SETTLE,
                     actual=actual,
                     lease_held_seconds=elapsed,
-                    harness_active_seconds=elapsed,
+                    harness_active_seconds=harness_elapsed,
                     raw_usage_evidence_hash=usage_hash,
                 )
             )
         )
         receipt_ref = self.receipt_store.publish(record)
+        self.receipt_store.load_for_request(receipt_ref, request)
         if failure is not None:
             raise M2FormalExecutionFailure(str(failure), receipt_ref=receipt_ref) from failure
         return M2FormalPhaseExecutionOutcome(
