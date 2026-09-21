@@ -357,3 +357,19 @@ Intent/Round，重验完整 Artifact Family 与持久化非 Synthetic 制品后�
 Linux/Python 3.10/PostgreSQL 组合回归 24 passed（41.14 秒）；覆盖真实双候选构建后
 入队、冻结前拒绝、并发幂等、错误 Token/域外候选/停止拒绝和普通 GPU Worker 隔离。
 未使用 HCU；Ruff 通过。
+
+## 2026-09-21：正确性预算预留
+
+`PostgresFormalCorrectnessJobs.reserve` 复用现有 Round Budget API，为同一 Job 的
+Attempt 1 固定预留一次 correctness_attempt 和正数有限 wall_seconds。
+Reservation/ledger ID 从 Job 确定性派生，时间取持久化 Job.created_at；并发重放
+不会再扣一次，更改预算重放被拒绝。超出整轮预算时不创建 reservation/ledger，
+此前已入队的 Job 保留 queued，不能据此启动执行。
+
+预留不是执行授权。停止与账本事务并发时可能留下 reserved credit，消费者必须在
+实际启动前再次检查 Claim 和资源租约，余款需对账释放，不能擅自当成实际消耗为零。
+原资源检查入口拒绝 Formal Job；后续需专用领取/租约检查，不放宽 general lane 保护。
+
+Linux/Python 3.10/PostgreSQL 组合 24 passed（25.69 秒），验证并发一次预留、
+改预算拒绝、超预算无扣账；本地非法参数检查 7 passed，Ruff 通过。未获取 HCU 租约，
+未启动正确性进程或完成用量结算。

@@ -172,6 +172,17 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         PostgresFormalCorrectnessJobs(
             claims, intent_id, "real-test-builder", uuid4(),
         ).enqueue(plans.FIRST_CANDIDATE_ID)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reservations = list(pool.map(
+            lambda _: correctness_jobs.reserve(plans.FIRST_CANDIDATE_ID, wall_seconds=30),
+            range(2),
+        ))
+    assert reservations[0] == reservations[1]
+    assert reservations[0]["reservation"]["planned"]["correctness_attempts"] == 1
+    with pytest.raises(Conflict, match="other inputs"):
+        correctness_jobs.reserve(plans.FIRST_CANDIDATE_ID, wall_seconds=31)
+    with pytest.raises(Conflict, match="exhausted"):
+        correctness_jobs.reserve(plans.SECOND_CANDIDATE_ID, wall_seconds=604801)
     with pytest.raises(Conflict):
         correctness_jobs.enqueue(uuid4())
     claims.request_stop(intent_id, requested_by="integration-test")
@@ -179,9 +190,17 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         correctness_jobs.enqueue(plans.SECOND_CANDIDATE_ID)
     with repo.connection() as conn:
         assert conn.execute("SELECT count(*) AS n FROM jobs WHERE job_type = "
-                            "'manual_correctness'").fetchone()["n"] == 1
+                            "'manual_correctness'").fetchone()["n"] == 2
         assert conn.execute("SELECT count(*) AS n FROM job_events WHERE event_type = "
-                            "'formal_correctness_queued'").fetchone()["n"] == 1
+                            "'formal_correctness_queued'").fetchone()["n"] == 2
+        assert conn.execute(
+            "SELECT count(*) AS n FROM round_budget_reservations "
+            "WHERE planned->>'correctness_attempts' = '1'",
+        ).fetchone()["n"] == 1
+        assert conn.execute(
+            "SELECT count(*) AS n FROM round_budget_ledger "
+            "WHERE entry_type = 'reserve' AND reserved->>'correctness_attempts' = '1'",
+        ).fetchone()["n"] == 1
 
 
 def build_member(repo, claims, intent_id, token, real_sources, request, candidate_id, index):

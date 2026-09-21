@@ -2,9 +2,13 @@
 
 """Isolated correctness queue admission; never acquires a device or runs a verifier."""
 
-from uuid import UUID, uuid4
+import hashlib
+import math
+from uuid import UUID, uuid4, uuid5
 
+from hcuopt.contracts.m2 import BudgetUsage, RoundBudgetLedgerEntry, RoundBudgetReservation
 from hcuopt.domain.errors import Conflict
+from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator.formal_dispatch import prepare_formal_round
 from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
@@ -16,6 +20,44 @@ class PostgresFormalCorrectnessJobs:
                  worker_id: str, claim_token: UUID):
         self.claims, self.intent_id = claims, intent_id
         self.worker_id, self.claim_token = worker_id, claim_token
+
+    def reserve(self, candidate_id: UUID, *, wall_seconds: float) -> dict:
+        """Reserve one correctness attempt through the existing Round ledger.
+
+        This does not claim a device or invoke external work. A stop racing with
+        the ledger transaction may leave reserved credit; the future consumer
+        must recheck authority before running, and reconciliation releases credit.
+        """
+        if (isinstance(wall_seconds, bool) or not isinstance(wall_seconds, (int, float))
+                or not math.isfinite(wall_seconds) or wall_seconds <= 0):
+            raise ValueError("Formal correctness wall budget must be positive and finite")
+        job = self.enqueue(candidate_id)
+        if job["state"] != "queued" or job["attempts"] != 0:
+            raise Conflict("Formal correctness reservation requires an unstarted Job")
+        planned = BudgetUsage(correctness_attempts=1, wall_seconds=wall_seconds)
+        reservation_id = uuid5(job["job_id"], "formal-correctness-reservation-v1")
+        round_id = UUID(job["payload"]["round_id"])
+        request = RoundBudgetReservation(
+            reservation_id=reservation_id, round_id=round_id, job_id=job["job_id"],
+            attempt=1, candidate_id=candidate_id, planned=planned, state="reserved",
+            idempotency_key=f"formal-correctness-reserve:{job['job_id']}",
+        )
+        evidence_hash = "sha256:" + hashlib.sha256(canonical_json_bytes({
+            "job_id": str(job["job_id"]), "binding": job["payload"],
+            "planned": planned.model_dump(mode="json"),
+        })).hexdigest()
+        entry = RoundBudgetLedgerEntry(
+            ledger_entry_id=uuid5(reservation_id, "reserve-v1"),
+            reservation_id=reservation_id, round_id=round_id, entry_type="reserve",
+            reserved=planned, actual=BudgetUsage(), lease_held_seconds=0,
+            harness_active_seconds=0, raw_usage_evidence_hash=evidence_hash,
+            idempotency_key=f"formal-correctness-reserve-ledger:{job['job_id']}",
+            created_at=job["created_at"],
+        )
+        result = self.claims.dispatcher.repository.reserve_round_budget(request, entry)
+        if result["reservation"]["state"] != "reserved":
+            raise Conflict("Formal correctness budget already finalized; reconciliation required")
+        return result
 
     def enqueue(self, candidate_id: UUID) -> dict:
         """Bind a one-attempt Job to the complete frozen build family.
