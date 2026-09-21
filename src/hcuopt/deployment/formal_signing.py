@@ -11,10 +11,11 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+from hcuopt.contracts.formal_profile_authorization_v1 import FormalProfileGrantVerifierRef
 from hcuopt.contracts.m2_formal_start_v1 import FormalStartSignerRef
 from hcuopt.measurement.evidence import canonical_json_bytes
 
-SigningRole = Literal["actor", "execution", "evaluation"]
+SigningRole = Literal["owner", "actor", "execution", "evaluation"]
 SCHEME = "hcuopt-formal-ed25519-v1"
 
 
@@ -28,7 +29,7 @@ class FormalEd25519Verifier:
 
     def __init__(self, public_key: Ed25519PublicKey, *, role: SigningRole,
                  signer_id: str, key_id: str):
-        if role not in {"actor", "execution", "evaluation"}:
+        if role not in {"owner", "actor", "execution", "evaluation"}:
             raise ValueError("Unsupported Formal signing role")
         if not isinstance(public_key, Ed25519PublicKey):
             raise ValueError("Formal signing requires an Ed25519 key")
@@ -103,3 +104,43 @@ class FormalEd25519Signer:
         return base64.b64encode(
             self._private_key.sign(self._verifier._message(content_hash))
         ).decode("ascii")
+
+
+class FormalOwnerEd25519Verifier(FormalEd25519Verifier):
+    """Adapter for the pre-existing owner window-authorization verifier protocol."""
+
+    def __init__(self, public_key: Ed25519PublicKey, *, verifier_id: str, key_id: str):
+        super().__init__(public_key, role="owner", signer_id=verifier_id, key_id=key_id)
+
+    @property
+    def verifier_ref(self) -> FormalProfileGrantVerifierRef:
+        ref = self.signer_ref
+        return FormalProfileGrantVerifierRef(
+            verifier_id=ref.signer_id, verifier_version=ref.signer_version,
+            verifier_hash=ref.signer_hash, signature_scheme=ref.signature_scheme, key_id=ref.key_id,
+        )
+
+    def verify_signature(self, *, authorization_hash: str, signature: str) -> bool:
+        return super().verify_signature(content_hash=authorization_hash, signature=signature)
+
+
+class FormalOwnerEd25519Signer:
+    """Sign an already decided window digest; never create or approve the decision."""
+
+    def __init__(self, private_key: Ed25519PrivateKey, *, verifier_id: str, key_id: str):
+        self._signer = FormalEd25519Signer(
+            private_key, role="owner", signer_id=verifier_id, key_id=key_id,
+        )
+        self._verifier = FormalOwnerEd25519Verifier(
+            private_key.public_key(), verifier_id=verifier_id, key_id=key_id,
+        )
+
+    @property
+    def verifier_ref(self) -> FormalProfileGrantVerifierRef:
+        return self._verifier.verifier_ref
+
+    def verifier(self) -> FormalOwnerEd25519Verifier:
+        return self._verifier
+
+    def sign_authorization(self, *, authorization_hash: str) -> str:
+        return self._signer._sign(authorization_hash)

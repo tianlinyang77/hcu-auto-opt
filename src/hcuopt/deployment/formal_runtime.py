@@ -47,6 +47,26 @@ class FormalDeploymentRuntime:
         self.claims = PostgresFormalClaimStore(self.dispatcher, enabled=enabled)
         self.management = replace(management, dispatch_reader=self.dispatcher)
 
+    @classmethod
+    def from_deployment_files(
+        cls, repository: PostgresRepository, *, compiler, object_store,
+        deployment_root: Path, trust_path: Path, capabilities_path: Path,
+        enabled: bool = False, clock=None,
+    ) -> "FormalDeploymentRuntime":
+        """Load public trust and pre-signed access together, with no private keys.
+
+        compiler and object_store are trusted, already admitted deployment inputs.
+        This factory never creates authorization, migrates DB or starts workers.
+        """
+        from hcuopt.deployment.formal_trust import FormalPublicTrust
+
+        trust = FormalPublicTrust.from_file(deployment_root=deployment_root, path=trust_path)
+        coordinator = trust.coordinator(compiler, object_store=object_store, clock=clock)
+        management = FormalStartManagement.from_file(
+            coordinator, deployment_root=deployment_root, path=capabilities_path,
+        )
+        return cls(repository, management, enabled=enabled)
+
     def console(
         self,
         *,

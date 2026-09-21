@@ -113,3 +113,31 @@ HTTP 创建 Intent，再经统一 runtime 的 dispatcher 执行。签名和业�
 Linux/Python 3.10/cryptography 50.0.1 与 PostgreSQL 组合 50 passed（41.68 秒）；
 Ruff 通过。远程加密依赖安装在本次 CPU 测试临时目录，未升级容器系统库。
 没有生成生产密钥、升级 BW20 源库、启动 HCU 或签署生产授权。
+
+### owner 与公钥配置整体接线
+
+后续增量提供 `FormalOwnerEd25519Signer/Verifier`，适配现有 owner 窗口授权协议，
+只签署已经决策的 authorization_hash，不生成、延长或批准窗口。签名域仍为上述协议，
+role 固定为 owner，消息内 signer 是由 verifier 身份同字段映射得到的 FormalStartSignerRef。
+该适配器补充前文尚缺的 owner 密码学实现，但不代表生产 owner 授权已经签发。
+
+`FormalPublicTrust.from_file` 加载管理员选定的公钥配置，最大 16 KiB，格式为：
+schema_version=`formal-public-trust-v1`，owner/actor/execution/evaluation 四项各含
+identity_id、key_id、public_key_base64（原始 32 字节 Ed25519 公钥的标准 Base64）。
+四项必须使用不同身份和密钥；私钥字段、未知字段、错误编码、越界路径拒绝。
+公钥配置本身是信任根，管理员必须保护根目录及父目录；不能把请求上传的文件当可信配置。
+配置启动时加载，不热更新；轮换后需重启，旧签名不会自动匹配新密钥。
+
+部署可直接用 `FormalDeploymentRuntime.from_deployment_files(...)` 同时加载公钥配置
+和既有 capabilities 配置，传入已完成 Profile/readiness 准入的 compiler 与 object_store。
+工厂重新解析并验证 owner 授权内容及签名，再装配 actor/B/D verifier、管理入口和派发器。
+这是替代手工接线的入口，不替代 Profile 准入、当前资源窗口检查或生产部署评审；
+默认 disabled，构造时不迁移、不派发、不触碰硬件，不生成私钥或业务授权。
+
+测试签名链现包含四方独立临时密钥及公钥文件重载。测试 Profile/readiness、工作负载
+和签署决策仍是明确夹具，不是生产事实；部署重建重用原 capabilities 与 Intent，
+owner 签名篡改、内容篡改和不匹配的轮换密钥在建立 coordinator 前拒绝。
+
+本轮最终验证：本地组合 42 passed（4.71 秒），Linux/Python 3.10/PostgreSQL
+组合 61 passed（41.42 秒），Ruff 通过。重建验签器和 runtime 复用同一 Intent，
+不代表重启了真实数据库或生产服务。没有生成生产密钥、签署生产窗口或访问 HCU。
