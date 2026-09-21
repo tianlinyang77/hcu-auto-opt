@@ -49,3 +49,48 @@ Linux/Python 3.10/PostgreSQL 组合回归 **27 passed，36.68 秒**，Ruff 通�
 
 只安装迁移不会启动 HCU，但也不会自动补出这些授权、任务和执行证据。
 当前生产消费者保持关闭，不据本次演练声明实机页面联验完成。
+
+## BW20 真实备份恢复补验（2026-09-21）
+
+本节补充后续实测，不覆盖上文 CPU 夹具测试的范围说明。
+代码基线 `d3c9b00`；在同一项目 PostgreSQL 容器中，从源库 `hcuopt`
+执行 `pg_dump -Fc`，恢复到全新隔离数据库，再用单事务执行迁移 27–32。
+没有把任何服务或 Worker 接到验收库，没有升级源库或启动 HCU。
+
+| 检查 | 实测结果 |
+| --- | --- |
+| 私有备份文件 | `/home/github/hcuopt-formal-backup.SgdR2ATt/source.dump`（BW20 主机） |
+| 备份大小 | 886959 bytes |
+| SHA256 | `0b23ab8061fc2248e297cb37d6a4ca0e1995c503395c4fb7510613823727da99` |
+| 隔离验收库 | `hcuopt_formal_restore_20260921091500_479182` |
+| 恢复与迁移 | `pg_restore --exit-on-error --single-transaction` 成功；迁移后版本 32 |
+| 历史内容 | 52 张旧业务表，升级前后行数和规范化内容摘要一致 |
+| 旧 Jobs | 78 条；全部为新增默认通道 `general` |
+| 新增表 | 8 张派发、领取、停止、阶段和构建相关表均为零行 |
+| 源库复查 | 仍为版本 26 |
+
+比对方法：在恢复库升级前后，对各旧业务表的每行 `to_jsonb` 文本计算 MD5，
+按行摘要排序聚合后再计算摘要，同时核对行数；Job 比较仅排除新增
+`execution_lane`，迁移台账单独核验。这里 MD5 用于非对抗性数据变化检查，
+不是签名或安全完整性证明；备份文件另用 SHA256 标识。
+恢复库比对验证的是同一备份快照内升级前后的内容，不声称在线源库在此期间没有新增写入。
+
+第一次摘要比对退出 1：清单遗漏了 3 张新增空事件表
+（`formal_dispatch_claim_events`、`formal_phase_journal_events`、
+`formal_round_dispatch_events`），并非旧记录变化。保留原始前后摘要，
+修正清单后重新查询已升级验收库，52 张旧表全部一致，没有重复迁移或恢复。
+私有目录保留 `before.txt`、`after.txt`、`after-corrected.txt` 和 `migration.log`。
+
+备份目录权限 0700、文件权限 0600，原始业务数据未下载到本机或提交 Git。
+备份与源库仍在同一主机，**不是异机容灾备份**；数据库数据目录为 tmpfs，
+隔离验收库也不是持久部署成果。此次没有验证线上 DDL 锁等待、服务兼容性、
+真实 Authority 配置或 HCU 正确性执行；后续部署评审与受控联验仍需完成。
+
+## 可重复执行的结构检查入口
+
+新增 `python -m hcuopt.deployment.formal_schema_check`，用只读快照检查当前 schema
+的迁移序列、8 张新表及 Job 通道列，输出不包含业务行或凭据。
+详见 `docs/formal-schema-check.md`；它不是部署授权或完整 DDL 完整性证明。
+本地单元 3 passed，Ruff 通过；Linux/Python 3.10/PostgreSQL 隔离回归
+27 passed（36.35 秒），覆盖升级前拒绝、升级后结构通过以及迁移故障回滚。
+本次测试包包含本地未提交的检查器代码，基于 `d3c9b00`，不是该提交本身的原样回归。

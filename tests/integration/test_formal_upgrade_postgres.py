@@ -8,6 +8,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
+from hcuopt.deployment.formal_schema_check import inspect_formal_schema
 from hcuopt.storage import repository as module
 from hcuopt.storage.repository import PostgresRepository
 from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
@@ -27,6 +28,9 @@ def test_v26_upgrade_preserves_legacy_jobs_and_rolls_back_atomically(
         patch.setattr(module, "migration_plan", lambda: [(v, s) for v, s in plan if v <= 26])
         dsn = request.getfixturevalue("isolated_dsn")
     repo = PostgresRepository(dsn)
+    preflight = inspect_formal_schema(dsn)
+    assert preflight["schema_checks_passed"] is False
+    assert "migration_sequence_mismatch" in preflight["blockers"]
     task_id = uuid4()
     with repo.connection() as conn:
         conn.execute(
@@ -59,6 +63,9 @@ def test_v26_upgrade_preserves_legacy_jobs_and_rolls_back_atomically(
             assert conn.execute("SELECT * FROM jobs ORDER BY job_id").fetchall() == before
     repo.migrate()
     repo.migrate()
+    preflight = inspect_formal_schema(dsn)
+    assert preflight["schema_checks_passed"] is True
+    assert preflight["execution_authorized"] is False
     with repo.connection() as conn:
         after = conn.execute("SELECT * FROM jobs ORDER BY job_id").fetchall()
         assert all(row.pop("execution_lane") == "general" for row in after)
