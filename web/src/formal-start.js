@@ -61,6 +61,37 @@ export const FORMAL_CANDIDATE_STATES = {
   invalid: "候选无效",
 };
 
+export const FORMAL_RECOVERY_STATES = {
+  not_invoked: "尚无执行记录", invocation_unresolved: "执行状态待核实，禁止重试",
+  unknown_requires_manual_recovery: "结果未知，需人工核查资源",
+  result_ready: "结果已留存，等待部署侧收尾", settlement_pending: "已记录释放，等待补账",
+  completed: "执行与结算已完成（不等于候选接受）",
+  inconsistent: "记录不一致，暂停处理", ownership_or_budget_conflict: "资源归属或预算冲突",
+};
+
+export async function loadFormalRecovery(submission, receipt, token, fetchImpl = fetch) {
+  const frozen = freezeFormalSubmission(submission);
+  const status = await request("/v1/operator/formal-correctness-recovery", token, { method: "GET" }, fetchImpl);
+  const report = status?.report;
+  if (!status || status.schema_version !== "formal-recovery-observation-v1" ||
+      status.intent_id !== receipt.intent_id || status.round_id !== receipt.round_id ||
+      status.resolved_plan_hash !== frozen.resolved_plan_hash ||
+      Object.keys(frozen.expected_service_identity).some((key) => status.service_identity?.[key] !== frozen.expected_service_identity[key]) ||
+      status.web_reconciliation_allowed !== false ||
+      !report || report.schema_version !== "formal-correctness-recovery-v1" ||
+      !UUID.test(report.job_id) || !HASH.test(report.snapshot_hash) || !HASH.test(report.input_hash) ||
+      !Object.hasOwn(FORMAL_RECOVERY_STATES, report.status) ||
+      report.execution_retry_allowed !== false || report.automatic_release_allowed !== false ||
+      typeof report.resource_id !== "string" || typeof report.resource_state !== "string" ||
+      typeof report.budget_state !== "string" || typeof report.resource_owned_by_attempt !== "boolean" ||
+      typeof report.recorded_result !== "boolean" || typeof report.release_recorded !== "boolean" ||
+      report.reconciliation_allowed !== ["result_ready", "settlement_pending", "completed"].includes(report.status) ||
+      !Array.isArray(report.required_manual_checks) || report.required_manual_checks.some((item) => typeof item !== "string")) {
+    throw new Error("执行核查记录与原请求不匹配，不能据此恢复或释放资源。");
+  }
+  return status;
+}
+
 export async function loadFormalDispatch(submission, receipt, token, fetchImpl = fetch) {
   const frozen = freezeFormalSubmission(submission);
   const status = await request("/v1/operator/formal-round-dispatch", token, { method: "GET" }, fetchImpl);

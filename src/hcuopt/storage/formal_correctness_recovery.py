@@ -4,6 +4,7 @@
 
 import hashlib
 
+from hcuopt.contracts.formal_recovery_v1 import FormalRecoveryObservation
 from hcuopt.domain.errors import Conflict
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
@@ -19,6 +20,26 @@ class PostgresFormalCorrectnessRecovery:
         """Credential-free snapshot; no process inspection or cleanup is implied."""
         with self.repository.connection() as conn:
             return self._inspect(conn, input_hash)
+
+    def read_status(self, intent_id):
+        """One deployment-selected Job; browsers cannot choose ownership or input Hash."""
+        jobs = self.journal.lease.jobs
+        if intent_id != jobs.intent_id:
+            raise Conflict("Formal correctness recovery belongs to another Intent")
+        with self.repository.connection() as conn:
+            intent = jobs.claims._lock_deployment_intent(conn, intent_id)
+            rows = conn.execute(
+                "SELECT details FROM job_events WHERE job_id = %s "
+                "AND event_type = 'formal_correctness_invoking'", (self.journal.job_id,),
+            ).fetchall()
+            if len(rows) != 1:
+                raise Conflict("Formal correctness recovery requires one invocation record")
+            report = self._inspect(conn, rows[0]["details"]["input_hash"])
+            return FormalRecoveryObservation(
+                intent_id=intent.intent_id, round_id=intent.round_id,
+                resolved_plan_hash=intent.resolved_plan_hash,
+                service_identity=intent.service_identity, report=report,
+            )
 
     def _inspect(self, conn, input_hash):
         journal = self.journal

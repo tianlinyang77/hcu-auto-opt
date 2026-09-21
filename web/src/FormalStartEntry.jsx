@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import { useRef, useState } from "react";
-import { FORMAL_CANDIDATE_STATES, loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
+import { FORMAL_CANDIDATE_STATES, FORMAL_RECOVERY_STATES, loadFormalDispatch, loadFormalRecovery, loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
 
 const STATES = { awaiting_authority: "等待授权材料", ready_for_round_creation: "意图授权核对已完成（轮次进度见下方）", failed: "授权核对失败", cancelled: "意图已取消" };
 const DISPATCH = { not_created: "尚未创建正式轮次", queued: "正式轮次已创建，待执行模块接入", cancelled: "正式轮次已取消", claimed: "控制面已领取（不代表实机已开始）", recovery_required: "领取已超时，需恢复核验；禁止自动重试", stop_requested: "已请求停止（尚未证明执行已停止或资源已释放）" };
@@ -14,6 +14,8 @@ export function FormalStartEntry() {
   const [error, setError] = useState("");
   const [dispatch, setDispatch] = useState(null);
   const [dispatchError, setDispatchError] = useState("");
+  const [recovery, setRecovery] = useState(null);
+  const [recoveryError, setRecoveryError] = useState("");
   const lock = useRef(false);
   async function operate(submit) {
     if (lock.current || (submit && !confirmed)) return;
@@ -29,6 +31,13 @@ export function FormalStartEntry() {
     lock.current = true; setBusy(true); setDispatchError(""); setDispatch(null);
     try { setDispatch(await loadFormalDispatch(plan, receipt, token)); }
     catch (failure) { setDispatchError(failure.message); }
+    finally { setToken(""); lock.current = false; setBusy(false); }
+  }
+  async function refreshRecovery() {
+    if (lock.current) return;
+    lock.current = true; setBusy(true); setRecovery(null); setRecoveryError("");
+    try { setRecovery(await loadFormalRecovery(plan, receipt, token)); }
+    catch (failure) { setRecoveryError(failure.message); }
     finally { setToken(""); lock.current = false; setBusy(false); }
   }
   return <main className="workspace-panel" style={{ maxWidth: 960, margin: "40px auto", padding: 24 }}>
@@ -77,6 +86,21 @@ export function FormalStartEntry() {
             </>}
           </section>)}</>}
         {dispatchError && <p role="alert">轮次进度未知：{dispatchError} 原意图回执不受影响。</p>}
+        <h2>5. 正确性执行核查（只读）</h2>
+        <p>查询部署方绑定的执行任务，不会重新执行、补账或释放资源。需要重新输入同一操作凭据。</p>
+        <button className="primary-button" disabled={busy || !token} onClick={refreshRecovery}>查看执行核查</button>
+        {recovery && <section className="wizard-card" style={{ padding: 16, marginTop: 12 }}>
+          <h3>{FORMAL_RECOVERY_STATES[recovery.report.status]}</h3>
+          <p className="mono" style={{ overflowWrap: "anywhere" }}>任务：{recovery.report.job_id}</p>
+          <p>资源：{recovery.report.resource_id} / {recovery.report.resource_state}</p>
+          <p>本次任务仍持有资源记录：{recovery.report.resource_owned_by_attempt ? "是" : "否（不代表物理空闲）"}</p>
+          <p>预算状态：{recovery.report.budget_state}；结果已留存：{recovery.report.recorded_result ? "是" : "否"}；释放记录：{recovery.report.release_recorded ? "有" : "无"}</p>
+          <p>{recovery.report.reconciliation_allowed ? "可由可信部署入口核对后收尾；本页不提供执行权限。" : "禁止补账放行和自动重试，请先完成核查。"}</p>
+          {!!recovery.report.required_manual_checks.length && <p>需确认原执行器已被阻止继续启动，核查本任务容器与进程，留存新鲜清理和健康证据，并核算实际用量。</p>}
+          <p className="mono" style={{ overflowWrap: "anywhere" }}>核查快照：{recovery.report.snapshot_hash}</p>
+          <p>这是控制面记录，不是实机空闲证明或性能提升结论。</p>
+        </section>}
+        {recoveryError && <p role="alert">执行核查未知：{recoveryError} 不会转用演练数据。</p>}
       </section>}
     </section>
   </main>;

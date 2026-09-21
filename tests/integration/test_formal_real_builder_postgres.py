@@ -315,6 +315,11 @@ def test_real_builder_to_budget_publication_and_job_completion(
     unresolved = recovery.inspect(input_hash)
     assert unresolved["status"] == "invocation_unresolved"
     assert unresolved["execution_retry_allowed"] is False
+    observation = recovery.read_status(intent_id)
+    assert observation.report.status == "invocation_unresolved"
+    assert observation.round_id == frozen["round_id"]
+    with pytest.raises(Conflict, match="another Intent"):
+        recovery.read_status(uuid4())
     with pytest.raises(Conflict, match="another input"):
         journal.begin("sha256:" + "d" * 64)
     with pytest.raises(Conflict, match="stale"):

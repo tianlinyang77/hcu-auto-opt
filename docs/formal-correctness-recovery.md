@@ -1,6 +1,6 @@
 # Formal 正确性异常核查与补账
 
-本入口供持有当前 Job journal 的可信部署进程使用，尚不是网页按钮或公共 API。
+补账入口供持有当前 Job journal 的可信部署进程使用。网页仅提供受保护的只读核查。
 不接受外部提交的正确性判决、清理成功布尔值或新的资源身份。
 
 ## 操作
@@ -49,4 +49,23 @@ if report["reconciliation_allowed"]:
 不把未知用量当作零，不把 Unknown 改成正确性成功，不自动重新生成执行尝试。
 
 此步骤不运行模型、不动频率、不扩大 HCU 授权、不改 Round/member 的判决。
-实机恢复与网页接线仍是后续验收项。
+实机恢复仍是后续验收项。
+
+## 只读页面接线
+
+部署方选择原任务 journal 后，显式配置读取器（默认不启用）：
+
+```python
+from dataclasses import replace
+
+management = replace(management, recovery_reader=PostgresFormalCorrectnessRecovery(journal))
+```
+
+正式启动页面的“查看执行核查”通过 `GET /v1/operator/formal-correctness-recovery`
+读取该绑定任务。浏览器不能提交 Job、Owner、input Hash 或清理结果来选择其他任务。
+接口复用原独立 Bearer 凭据，重新验证签名、有效期、Intent/Round、计划 Hash 和服务身份；
+返回 no-store，查询后页面清空凭据，不写本地存储。
+
+此只读授权不包含补账或资源释放：没有对应 POST 入口，
+`web_reconciliation_allowed=false`。未配置读取器、尚无 invocation、凭据失效或绑定冲突
+都会显示未知，不回退到演练数据。本地 Vite 预览本身不代表真实后端已经配置该读取器。

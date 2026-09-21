@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import Field
 
 from hcuopt.contracts.formal_dispatch_v1 import FormalDispatchStatus
+from hcuopt.contracts.formal_recovery_v1 import FormalRecoveryObservation
 from hcuopt.contracts.m2_formal_start_v1 import (
     FormalStartActorAssertion,
     FormalStartIntentRequest,
@@ -69,11 +70,16 @@ class FormalDispatchReader(Protocol):
     def read_status(self, intent_id: UUID) -> FormalDispatchStatus: ...
 
 
+class FormalRecoveryReader(Protocol):
+    def read_status(self, intent_id: UUID) -> FormalRecoveryObservation: ...
+
+
 @dataclass(frozen=True)
 class FormalStartManagement:
     coordinator: FormalStartCoordinator
     capabilities: tuple[FormalIntentCapability, ...]
     dispatch_reader: FormalDispatchReader | None = None
+    recovery_reader: FormalRecoveryReader | None = None
 
     def __post_init__(self) -> None:
         digests = [item.token_sha256 for item in self.capabilities]
@@ -178,6 +184,32 @@ class FormalStartManagement:
                     != submission.expected_service_identity.model_dump(mode="json")
                 ):
                     raise HTTPException(409, "Formal dispatch observation binding differs")
+                response.headers["Cache-Control"] = "no-store"
+                return status
+
+        if self.recovery_reader is not None:
+
+            @router.get("/v1/operator/formal-correctness-recovery",
+                        response_model=FormalRecoveryObservation)
+            def recovery_status(request: Request, response: Response):
+                capability = authenticate(request)
+                submission = capability.submission
+                if submission is None:
+                    raise HTTPException(503, "Formal submission is not configured")
+                self.coordinator._verify_actor(
+                    capability.assertion, action="create",
+                    subject_digest=formal_start_content_hash(submission),
+                    now=self.coordinator._now(),
+                )
+                intent_id, _, round_id = derive_formal_start_ids(submission.idempotency_key)
+                status = FormalRecoveryObservation.model_validate(
+                    self.recovery_reader.read_status(intent_id).model_dump(mode="json"),
+                )
+                if (status.intent_id != intent_id or status.round_id != round_id
+                        or status.resolved_plan_hash != submission.resolved_plan_hash
+                        or status.service_identity.model_dump(mode="json")
+                        != submission.expected_service_identity.model_dump(mode="json")):
+                    raise HTTPException(409, "Formal recovery observation binding differs")
                 response.headers["Cache-Control"] = "no-store"
                 return status
 

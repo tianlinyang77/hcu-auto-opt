@@ -454,3 +454,9 @@ Unknown 无释放入口，仅返回必须完成的核查清单；不新增公共
 验证：Windows CPU 54 passed（9.13 秒），Linux/Python 3.10 CPU 54 passed（3.66 秒），
 隔离 PostgreSQL 25 passed（34.44 秒）。覆盖过期快照拒绝、请求不可改写、释放后补账失败恢复、
 并发幂等和 Unknown 拒绝。仍是 CPU/数据库证据，不代表物理恢复验收。
+
+后续接线：新增默认不注册的只读 recovery GET 和正式页面核查卡，部署方必须显式绑定
+原任务 journal。沿用签名能力凭据并检查 Intent/Round/Plan/Service，禁止浏览器选择 Owner
+或扩大为释放权限。只读接口不接受 POST；不存在网页补账入口。
+本轮 API/恢复测试 43 passed，前端 58 passed，PostgreSQL 25 passed（34.57 秒），
+Ruff、ESLint、前端构建通过。页面组件和数据链分别验证，不宣称实机页面联验完成。

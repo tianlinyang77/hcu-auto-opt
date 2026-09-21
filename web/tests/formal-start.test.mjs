@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { freezeFormalSubmission, loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "../src/formal-start.js";
+import { freezeFormalSubmission, loadFormalDispatch, loadFormalRecovery, loadFormalSubmission, submitFormalIntent } from "../src/formal-start.js";
 const id = "12345678-1234-1234-1234-123456789abc";
 const hash = "sha256:" + "a".repeat(64);
 const plan = { preview_id: id, idempotency_key: "formal-test-key", resolved_plan_hash: hash,
@@ -9,6 +9,29 @@ const plan = { preview_id: id, idempotency_key: "formal-test-key", resolved_plan
   expected_service_identity: { server_instance_id: id, source_commit: "a".repeat(40), profile_catalog_hash: hash, control_contract_version: "v1" } };
 const receipt = { ...plan, intent_id: id, round_id: id, service_identity: plan.expected_service_identity,
   round_creation_allowed: false, hcu_accessed: false, automatic_release_allowed: false, synthetic: false, state: "ready_for_round_creation" };
+
+test("recovery is scoped read-only and rejects broadened permissions", async () => {
+  const report = { schema_version: "formal-correctness-recovery-v1", job_id: id, input_hash: hash,
+    snapshot_hash: hash, status: "unknown_requires_manual_recovery", resource_id: "fixture",
+    resource_state: "active", budget_state: "reserved", resource_owned_by_attempt: true,
+    recorded_result: false, release_recorded: false, reconciliation_allowed: false,
+    execution_retry_allowed: false, automatic_release_allowed: false, required_manual_checks: ["inspect"] };
+  const observed = { schema_version: "formal-recovery-observation-v1", intent_id: id, round_id: id,
+    resolved_plan_hash: hash, service_identity: plan.expected_service_identity, report,
+    web_reconciliation_allowed: false };
+  const fetchStatus = (value) => async (url, options) => {
+    assert.equal(url, "/v1/operator/formal-correctness-recovery");
+    assert.equal(options.method, "GET"); assert.equal(options.body, undefined);
+    return { ok: true, json: async () => value };
+  };
+  assert.equal((await loadFormalRecovery(plan, receipt, "test-token", fetchStatus(observed))).report.status, report.status);
+  for (const value of [{ ...observed, web_reconciliation_allowed: true },
+    { ...observed, round_id: "other" },
+    { ...observed, report: { ...report, execution_retry_allowed: true } },
+    { ...observed, report: { ...report, reconciliation_allowed: true } }]) {
+    await assert.rejects(loadFormalRecovery(plan, receipt, "test-token", fetchStatus(value)), /不匹配/);
+  }
+});
 
 test("formal candidate progress shows persisted facts and rejects malformed evidence", async () => {
   const candidate = { candidate_id: id, round_candidate_id: id, state: "built", artifact_id: id, artifact_hash: hash };
