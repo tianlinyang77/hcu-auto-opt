@@ -253,3 +253,21 @@ Round 为 building，并追加 formal_candidate_build_recorded 审计。任何�
 不新增权限、数据库迁移或执行入口。前端接受旧服务缺失 candidates 时显示未知，
 拒绝重复身份、非法状态和残缺制品身份，不把 built 或 measured 解释成性能通过。
 数据库各查询是当次观测，不是整轮的终态证书；页面查询不触发运行。
+
+## 2026-09-21：构建调用日志与受控单次调用（仍 Proposed）
+
+迁移 31 为每个 Intent/Candidate 建立不可重试的构建槽位，绑定原 Claim、输入 Hash、
+已有预算 Reservation。调用前必须提交 invoking；同候选换 Job/Reservation 不能绕过。
+数据库触发器复检停止、Claim 期限、成员和预算，终态及身份不可改写、不可删除。
+FormalBuildConsumer 默认关闭，核对当期数据库 Round/Member/Baseline 后复用真实 Builder，
+先保存完整输出，再调用原 FormalBuildStore 原子发布；发布失败可用原输入重放已保存输出，
+不得重新调用 Builder。停止后保存输出仅供恢复，不能越过发布侧授权。
+
+异常结果一律 recovery_required，不把未知清理结果当作普通 build_failed，也不退回预算。
+输入 Hash 绑定完整调用参数，但不替代原始输入的部署侧持久化。日志不启动设备、不生成
+候选、不签核；数据库测试里的 Builder 输出是显式夹具，不是实机构建验收。
+
+此单次调用组件不是已上线 Worker：仍需隔离的真实 Job 领取、预算预留/实际用量结算、
+有界执行与 Claim 生命周期、失败证据和恢复操作接线。在这些完成前不得开启生产消费，
+不得将普通队列 Job 留给另一个 Worker 同时执行。保留 queued Job/Attempt 预算约束，
+不扩展 phase 枚举，不借用 search/holdout 日志冒充 build。Family 与正确性仍未自动推进。
