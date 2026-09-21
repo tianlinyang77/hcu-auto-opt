@@ -26,6 +26,17 @@ def verify_formal_correctness(
     reference: M1CorrectnessEvidenceReference, verifier: M1CorrectnessVerifier,
 ) -> M1CorrectnessVerificationResult:
     """Re-read raw evidence through D; never accept a producer's passed boolean."""
+    validate_formal_correctness_context(
+        round_authority=round_authority, members=members, context=context,
+    )
+    return verifier.verify(context, hotspot, reference)
+
+
+def validate_formal_correctness_context(
+    *, round_authority: SearchRound, members: Sequence[RoundCandidate],
+    context: M1VerificationContext,
+) -> None:
+    """Preflight the frozen bindings without needing producer output."""
     round_authority = SearchRound.model_validate(round_authority.model_dump(mode="json"))
     members = [RoundCandidate.model_validate(m.model_dump(mode="json")) for m in members]
     context = M1VerificationContext.model_validate(context.model_dump(mode="python"))
@@ -54,4 +65,3 @@ def verify_formal_correctness(
         for f in ("baseline_source_hash", "candidate_source_hash", "artifact_id", "artifact_hash")
     ):
         raise Conflict("Formal correctness context differs from frozen inputs")
-    return verifier.verify(context, hotspot, reference)

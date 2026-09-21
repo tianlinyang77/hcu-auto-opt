@@ -20,6 +20,10 @@ from tests.unit import test_m2_formal_execution as formal
 
 def inputs(tmp_path, delta=0.0):
     suite = evidence._Suite(tmp_path / "evidence", candidate_delta=delta)
+    return from_suite(suite)
+
+
+def from_suite(suite):
     context = suite.context
     round_ = formal._round(RoundPhase.SEARCH)
     fields = ("task_id", "baseline_epoch_id", "target_snapshot_id", "stage0_run_id",

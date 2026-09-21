@@ -89,7 +89,8 @@ class PostgresFormalCorrectnessLease:
                     or budget["phase"] is not None or budget["state"] != "reserved"):
                 raise Conflict("Formal correctness requires its reserved budget")
             usage = BudgetUsage.model_validate(budget["planned"])
-            expected_usage = BudgetUsage(correctness_attempts=1, wall_seconds=usage.wall_seconds)
+            expected_usage = BudgetUsage(correctness_attempts=1, wall_seconds=usage.wall_seconds,
+                                         exclusive_lease_seconds=usage.wall_seconds)
             if (not math.isfinite(usage.wall_seconds) or usage.wall_seconds <= 0
                     or usage != expected_usage):
                 raise Conflict("Formal correctness budget is not one bounded attempt")

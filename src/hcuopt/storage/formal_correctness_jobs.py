@@ -34,7 +34,9 @@ class PostgresFormalCorrectnessJobs:
         job = self.enqueue(candidate_id)
         if job["state"] != "queued" or job["attempts"] != 0:
             raise Conflict("Formal correctness reservation requires an unstarted Job")
-        planned = BudgetUsage(correctness_attempts=1, wall_seconds=wall_seconds)
+        # The current resource table has one owner even for shared correctness.
+        planned = BudgetUsage(correctness_attempts=1, wall_seconds=wall_seconds,
+                              exclusive_lease_seconds=wall_seconds)
         reservation_id = uuid5(job["job_id"], "formal-correctness-reservation-v1")
         round_id = UUID(job["payload"]["round_id"])
         request = RoundBudgetReservation(

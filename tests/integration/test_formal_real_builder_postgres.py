@@ -28,7 +28,8 @@ from hcuopt.contracts.m2 import (
     RoundBudgetReservation,
     RoundCandidate,
 )
-from hcuopt.contracts.v1 import WorkerRegister
+from hcuopt.contracts.platform_v1 import AdapterProvenance
+from hcuopt.contracts.v1 import ManualCorrectnessResult, WorkerRegister
 from hcuopt.domain.errors import Conflict
 from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
@@ -37,6 +38,7 @@ from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
 from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
+from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
 from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLease
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
@@ -107,7 +109,10 @@ def real_sources(tmp_path, monkeypatch):
     return state
 
 
-def test_real_builder_to_budget_publication_and_job_completion(real_sources, request, monkeypatch):
+@pytest.mark.parametrize("terminal", ["recorded", "unknown"])
+def test_real_builder_to_budget_publication_and_job_completion(
+    real_sources, request, monkeypatch, terminal,
+):
     # Resolve after real_sources has replaced only the test source/seed factories.
     dispatcher, intent_id = request.getfixturevalue("dispatch_case")
     dispatcher.create(intent_id)
@@ -254,6 +259,13 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         assert resource["expires_at"] <= claim["expires_at"]
         assert (resource["expires_at"] - claimed["claimed_at"]).total_seconds() <= 30
     lease.assert_live(claimed["job_id"], **checkpoint)
+    journal = PostgresFormalCorrectnessJournal(lease, claimed["job_id"], **checkpoint)
+    input_hash = "sha256:" + "c" * 64
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        starts = list(pool.map(journal.begin, [input_hash] * 2))
+    assert sum(acquired for _, acquired in starts) == 1
+    with pytest.raises(Conflict, match="another input"):
+        journal.begin("sha256:" + "d" * 64)
     with pytest.raises(Conflict, match="stale"):
         lease.assert_live(claimed["job_id"], **{**checkpoint, "token": uuid4()})
     with pytest.raises(Conflict, match="already started"):
@@ -273,6 +285,62 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         lease.assert_live(claimed["job_id"], **checkpoint)
     with pytest.raises(Conflict, match="stop"):
         correctness_jobs.enqueue(plans.SECOND_CANDIDATE_ID)
+    if terminal == "recorded":
+        # Explicit storage-only result fixture: no physical correctness claim.
+        result = ManualCorrectnessResult(
+            candidate_id=plans.FIRST_CANDIDATE_ID, verdict="incorrect",
+            protocol_version="storage-test-v1", raw_evidence_uri="fixture://raw",
+            raw_evidence_hash=input_hash, verification_artifact_uri="fixture://verification",
+            verification_artifact_hash=input_hash,
+            adapter_provenance=[AdapterProvenance(
+                profile=frozen["adapter_profile"], capability="kernel_correctness",
+                adapter_name="ExplicitStorageFixture", adapter_version="1",
+                implementation_kind="real",
+            )],
+            cleanup_evidence={
+                "fence": {"fenced": True, "resource_id": plan.authorized_resource_id,
+                          "fencing_token": claimed["fencing_token"]},
+                "health": {"healthy": True, "resource_id": plan.authorized_resource_id},
+            },
+        )
+        journal.record_result(input_hash, result, wall_seconds=0.2)
+        journal.record_result(input_hash, result, wall_seconds=0.2)
+        with pytest.raises(Conflict, match="immutable"):
+            journal.record_result(input_hash, result, wall_seconds=0.3)
+        def fail_settle(*args):
+            raise RuntimeError("injected settlement failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(repo, "finalize_round_budget", fail_settle)
+            with pytest.raises(RuntimeError, match="settlement failure"):
+                journal.finalize_recorded_result(input_hash)
+        with repo.connection() as conn:
+            assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
+                                (plan.authorized_resource_id,)).fetchone()["state"] == "available"
+            assert conn.execute("SELECT state FROM jobs WHERE job_id = %s",
+                                (job["job_id"],)).fetchone()["state"] == "running"
+        assert journal.finalize_recorded_result(input_hash) == result
+        assert journal.finalize_recorded_result(input_hash) == result
+        assert journal.begin(input_hash)[1] is False
+        with repo.connection() as conn:
+            assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
+                                (plan.authorized_resource_id,)).fetchone()["state"] == "available"
+            assert conn.execute("SELECT state FROM jobs WHERE job_id = %s",
+                                (job["job_id"],)).fetchone()["state"] == "succeeded"
+            assert conn.execute("SELECT state FROM search_rounds").fetchone()["state"] == (
+                "correctness"
+            )
+            assert conn.execute("SELECT count(*) AS n FROM job_events WHERE event_type = "
+                                "'formal_correctness_released'").fetchone()["n"] == 1
+            assert conn.execute("SELECT count(*) AS n FROM round_budget_ledger WHERE "
+                                "entry_type = 'settle' AND actual->>'correctness_attempts' = '1'"
+                                ).fetchone()["n"] == 1
+    else:
+        journal.mark_unknown(input_hash)
+        journal.mark_unknown(input_hash)
+        assert journal.begin(input_hash)[1] is False
+        with pytest.raises(Conflict, match="no recorded result"):
+            journal.finalize_recorded_result(input_hash)
     with repo.connection() as conn:
         assert conn.execute("SELECT count(*) AS n FROM jobs WHERE job_type = "
                             "'manual_correctness'").fetchone()["n"] == 2

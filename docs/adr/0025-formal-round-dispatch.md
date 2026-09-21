@@ -395,3 +395,32 @@ Lease/Fence 与数据库实际时间。不续租，不因过期释放资源，�
 冻结、入队、预算、授权资源领取和 checkpoint；新增并发单赢家、审计异常事务回滚、
 缺失预算、错误主机/资源、错误 Token、过期与停止拒绝。Ruff 通过。
 测试资源仅位于随机隔离 schema，未操作物理 HCU；授权/源码仍为显式测试夹具。
+
+## 2026-09-21：正确性消费、结果留存与结算
+
+新增默认关闭的 `FormalCorrectnessConsumer` 与 `PostgresFormalCorrectnessJournal`。
+Consumer 使用部署方提供的权威资料加载器，核对整轮、候选、制品、Job 和租约绑定，
+记录输入 Hash 与 invoking 事实后才调用原 `M1KernelCorrectnessWorkerAdapter`。
+启动前再读资料并检查活跃租约；原 D 适配器负责读取原始证据、校验清理绑定和判断。
+不新增正确性协议。Producer 异常或结果未知保留 unknown，不释放资源或自动重试。
+
+日志复用现有 job_events，在 Intent/Job 锁下串行写 invoking/result/unknown/released。
+此接口仅供可信部署进程使用，不是允许用户提交 verdict 的 API。结果及用量记录后，
+依绑定清理证据和当前 Lease/Fence 释放资源、同事务保存释放时刻的累计占用；随后复用
+原 Round ledger 幂等结算，最后将 Job 标记 succeeded。结算故障只补账，不重跑或二次释放。
+incorrect/invalid 也表示执行完成，不等于候选接受；本切片不改 Round/member 判决。
+
+当前 resources 表单资源单 Owner，shared 正确性同样占住整条资源。为兼容原账本
+“实际 Lease charge 等于 held time”约束，正确性预留同时保守计入
+exclusive_lease_seconds=wall_seconds，实际按领取至释放记录的时长结算。
+此前零 Lease 预算不能静默改写或消费，部署时需对未执行旧预留显式对账。
+
+验证：本地 Consumer+证据桥接+预算单元 22 passed，调用真实 M1 适配器和判断器，
+Producer/日志为明确 CPU 夹具；Linux PostgreSQL 组合 25 passed（34.57 秒），
+存储结果为明确夹具，验证并发一次 invocation、结果不可改写、未知禁止完成、
+过期/停止后留存清理证据、释放后结算失败再恢复、一次释放/结算及 Round 不越级推进。
+这两组分层验证不是同机真实 HCU 全链。Ruff 通过。
+
+部署权威资料加载器尚未提供，实时进程截止/停止协作、异常清理与人工恢复仍待接线；
+Consumer 不会硬中断运行中的 Producer，不能仅靠 Lease 到期认为进程停止。
+生产关闭、ADR 待审，不据此宣称实机验收或整轮优化完成。
