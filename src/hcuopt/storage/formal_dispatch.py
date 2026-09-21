@@ -54,6 +54,9 @@ class PostgresFormalDispatcher:
             row = connection.execute(
                 "SELECT * FROM formal_round_dispatches WHERE intent_id = %s", (intent_id,)
             ).fetchone()
+            claim = connection.execute(
+                "SELECT state FROM formal_dispatch_claims WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
         if row is not None and (
             row["round_id"] != intent.round_id
             or row["request_digest"] != intent.request_digest
@@ -65,7 +68,7 @@ class PostgresFormalDispatcher:
             intent_id=intent_id,
             round_id=intent.round_id,
             resolved_plan_hash=intent.resolved_plan_hash,
-            state="not_created" if row is None else row["state"],
+            state=(claim["state"] if claim else "not_created" if row is None else row["state"]),
             service_identity=intent.service_identity,
         )
 

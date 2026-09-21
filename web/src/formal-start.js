@@ -59,7 +59,7 @@ export async function loadFormalDispatch(submission, receipt, token, fetchImpl =
       status.intent_id !== receipt.intent_id || !UUID.test(status.round_id) ||
       status.round_id !== receipt.round_id || status.resolved_plan_hash !== frozen.resolved_plan_hash ||
       Object.keys(frozen.expected_service_identity).some((key) => status.service_identity?.[key] !== frozen.expected_service_identity[key]) ||
-      !["not_created", "queued", "cancelled"].includes(status.state) ||
+      !["not_created", "queued", "cancelled", "claimed", "recovery_required"].includes(status.state) ||
       status.execution_consumer_enabled !== false || status.automatic_release_allowed !== false) {
     throw new Error("派发状态与原请求不匹配，不能推断执行进度。");
   }

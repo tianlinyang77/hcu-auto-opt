@@ -28,6 +28,7 @@ MIGRATIONS = {
     25: "0025_endpoint_adjudication_jobs.sql",
     26: "0026_endpoint_campaign_signoff.sql",
     27: "0027_formal_round_dispatch.sql",
+    28: "0028_formal_dispatch_claim.sql",
 }
 
 

@@ -17,7 +17,7 @@ class FormalDispatchStatus(FrozenFormalStartModel):
     intent_id: UUID
     round_id: UUID
     resolved_plan_hash: str = Field(pattern=SHA256_PATTERN)
-    state: Literal["not_created", "queued", "cancelled"]
+    state: Literal["not_created", "queued", "cancelled", "claimed", "recovery_required"]
     service_identity: OperatorServiceIdentity
     execution_consumer_enabled: Literal[False] = False
     automatic_release_allowed: Literal[False] = False

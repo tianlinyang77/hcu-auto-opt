@@ -3,7 +3,7 @@ import { useRef, useState } from "react";
 import { loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
 
 const STATES = { awaiting_authority: "等待授权材料", ready_for_round_creation: "意图授权核对已完成（轮次进度见下方）", failed: "授权核对失败", cancelled: "意图已取消" };
-const DISPATCH = { not_created: "尚未创建正式轮次", queued: "正式轮次已创建，待执行模块接入", cancelled: "正式轮次已取消" };
+const DISPATCH = { not_created: "尚未创建正式轮次", queued: "正式轮次已创建，待执行模块接入", cancelled: "正式轮次已取消", claimed: "控制面已领取（不代表实机已开始）", recovery_required: "领取已超时，需恢复核验；禁止自动重试" };
 
 export function FormalStartEntry() {
   const [token, setToken] = useState("");

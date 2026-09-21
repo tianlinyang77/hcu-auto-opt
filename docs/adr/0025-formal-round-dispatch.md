@@ -102,3 +102,18 @@ Profile Catalog 为部署快照，撤销须更新部署并停用旧进程；不�
 
 验收矩阵见 `docs/plans/formal-dispatch-acceptance.md`。评审前可以开发隔离测试，
 不能通过删除现有保护条件抢先开放 Formal 执行。本提案不关闭 #102/#126/#167。
+
+## 2026-09-21：单次控制面领取切片（仍 Proposed）
+
+新增迁移 28，独立 `formal_dispatch_claims` 保存一个 Intent 的唯一领取 Token、
+Worker、期限和 `claimed / recovery_required`。原创建 outbox 不被改写成物理执行回执。
+领取默认关闭，在 Intent 锁内重验当前 Authority、精确成员 Family 和授权窗口。
+消息期限不能超过授权期限。重复领取直接拒绝，包括原 Worker 丢响应后的重试。
+本阶段没有重新入队、续租、成功完成或执行回调入口，故不授予 HCU 执行能力。
+
+领取与取消使用同一 Intent 锁。取消先提交则领取拒绝；领取先提交则旧取消路径被
+数据库守卫拒绝，不能把可能仍有执行者的任务标成安全取消。
+这不是受控停止已完成：停止请求、B Fence、资源清理证明与恢复后的重试仍待后续实现。
+超时只持久化 recovery_required，不释放设备，也不创建第二个 Attempt。
+读取页面可显示领取/恢复状态，`execution_consumer_enabled=false` 仍表示物理执行消费者未接。
+部署前必须迁移并同步升级全部读写进程；旧状态模型不能读取新领取状态。

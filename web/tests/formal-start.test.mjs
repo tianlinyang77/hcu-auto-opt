@@ -52,6 +52,12 @@ test("dispatch status is a scoped read, never a new submission", async () => {
     return { ok: true, json: async () => status };
   });
   assert.equal(observed.state, "queued");
+  for (const state of ["claimed", "recovery_required"]) {
+    const value = await loadFormalDispatch(plan, receipt, "test-token", async () =>
+      ({ ok: true, json: async () => ({ ...status, state }) }));
+    assert.equal(value.state, state);
+    assert.equal(value.execution_consumer_enabled, false);
+  }
   for (const change of [{ intent_id: "other" }, { state: "running" },
     { execution_consumer_enabled: true }, { automatic_release_allowed: true },
     { round_id: "22345678-1234-1234-1234-123456789abc" }]) {
