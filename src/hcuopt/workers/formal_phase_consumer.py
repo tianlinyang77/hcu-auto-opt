@@ -21,6 +21,10 @@ from hcuopt.measurement.m2_formal_runner import (
 )
 from hcuopt.measurement.m2_models import M2PhaseBudgetReservationPlan
 from hcuopt.storage.formal_phase_journal import PostgresFormalPhaseJournal
+from hcuopt.storage.formal_phase_materials import (
+    FormalPhaseMaterials,
+    PostgresFormalPhaseMaterialReader,
+)
 from hcuopt.workers.formal_checkpoint import FormalClaimCheckpoint
 from hcuopt.workers.formal_phase_prepare import prepare_formal_phase_request
 
@@ -32,8 +36,41 @@ class FormalPhaseConsumer:
         adapter: M2FormalPhaseExecutionAdapter,
         *,
         enabled: bool = False,
+        material_reader: PostgresFormalPhaseMaterialReader | None = None,
     ) -> None:
+        if material_reader is not None and material_reader.journal is not journal:
+            raise Conflict("Formal material reader belongs to another phase journal")
         self.journal, self.adapter, self.enabled = journal, adapter, enabled
+        self.material_reader = material_reader
+
+    def execute_current_once(
+        self,
+        *,
+        candidate_id: UUID,
+        authorization_id: UUID,
+        resolved_plan_hash: str,
+        reservation: M2PhaseBudgetReservationPlan,
+        deployment: Mapping[str, Any],
+        output_dir: Path,
+        harness_payload: Mapping[str, Any] | None = None,
+    ) -> M2FormalPhaseExecutionReceipt:
+        """Prepare from durable records, with a re-read at every B checkpoint."""
+        if not self.enabled:
+            raise Conflict("Formal phase consumer is disabled")
+        if self.material_reader is None:
+            raise Conflict("Formal current execution requires a deployment material reader")
+        materials = self.material_reader.load(candidate_id)
+        return self.prepare_and_execute_once(
+            round_authority=materials.round_authority,
+            formal_authority=materials.formal_authority,
+            member=materials.member,
+            authorization_id=authorization_id,
+            resolved_plan_hash=resolved_plan_hash,
+            reservation=reservation,
+            deployment=deployment,
+            output_dir=output_dir,
+            harness_payload=harness_payload,
+        )
 
     def prepare_and_execute_once(
         self,
@@ -94,12 +131,21 @@ class FormalPhaseConsumer:
                 M2FormalPhaseExecutionReceiptRef.model_validate(row["receipt_ref"]),
                 request,
             )
-        checkpoint = FormalClaimCheckpoint(
+        claim_checkpoint = FormalClaimCheckpoint(
             self.journal.claims,
             self.journal.intent_id,
             self.journal.worker_id,
             self.journal.claim_token,
         )
+
+        def checkpoint(current_request: M2FormalPhaseExecutionRequest) -> None:
+            claim_checkpoint(current_request)
+            if self.material_reader is not None:
+                current = self.material_reader.load(current_request.binding.candidate_id)
+                expected = FormalPhaseMaterials(round_authority, formal_authority, member)
+                if current != expected:
+                    raise Conflict("Formal phase durable materials changed; stop execution")
+
         try:
             try:
                 outcome = self.adapter.run(

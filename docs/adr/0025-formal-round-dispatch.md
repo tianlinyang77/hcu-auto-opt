@@ -195,3 +195,21 @@ Target Lock 字段白名单；不允许覆盖候选、制品、授权窗口或�
 
 没有新增 HTTP 权限、DB 表或自动扫描器。生产侧当前记录读取、构建/正确性阶段推进、
 真实租约采集与具体部署 wiring 尚未完成；不能把新增装配函数描述为生产准备链路已通。
+
+## 2026-09-21：数据库材料读取与执行检查点重读（仍 Proposed）
+
+新增 PostgresFormalPhaseMaterialReader，绑定同一个 Journal/Worker/Claim。
+在已有领取验权之后按 Intent 锁序读取 Round、精确成员、非 synthetic 制品记录和
+封存 Context；相关记录在单次读取事务内 FOR SHARE，不跨外部执行持锁。
+制品检查证明数据库关联与非合成标记，不替代制品文件 Hash、构建 Provenance 验真。
+
+Consumer.execute_current_once 不接收调用方提供的 Round/Member/Context 快照，
+从 Reader 获取后走现有请求准备和消费入口。启用 Reader 时，B 的三个检查点均重读
+并比较完整快照；若采样后发生漂移，走既有清理、预算结算与失败回执，不发布成功测量。
+历史日志回执重放仍不要求重新取得执行资格。旧入口不配置 Reader 时保持原行为，
+不能宣称全部执行入口已具有数据库材料重读保护。
+
+本切片没有修改构建状态：现有 record_round_candidate_build 明确要求 synthetic
+Artifact；正式构建须独立接入，不能放宽 Scripted 的保护来复用。现有通用预算存储
+还要求 queued Job/Attempt，正式 Consumer 尚未创建该 Job；具体预算部署适配也需接线。
+本次保持两处约束不变，不写假制品或通用 Job，不宣称生产轮次已可执行。
