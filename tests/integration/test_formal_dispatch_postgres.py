@@ -12,7 +12,6 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentRequest
 from hcuopt.domain.errors import Conflict
 from hcuopt.storage import formal_dispatch as dispatch_module
 from hcuopt.storage.formal_dispatch import PostgresFormalDispatcher, _insert
@@ -179,12 +178,26 @@ def dispatch_case(isolated_dsn, tmp_path, monkeypatch):  # type: ignore[no-untyp
     management, memory, payload = setup_management(tmp_path)
     coordinator = management.coordinator
     seed_authority(repository, coordinator, memory)
-    request = FormalStartIntentRequest(
-        **payload, actor_assertion=management.capabilities[0].assertion
-    )
-    result = coordinator.create(request, repository)
+    from fastapi.testclient import TestClient
+
+    from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentResult
+    from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
+    from tests.unit.test_formal_start_management_api import TOKEN
+
+    runtime = FormalDeploymentRuntime(repository, management, enabled=True)
+    static_root = tmp_path / "runtime-web"
+    (static_root / "assets").mkdir(parents=True)
+    (static_root / "index.html").write_text("CPU integration fixture", encoding="utf-8")
+    app = runtime.console(static_root=static_root, browser_origin="http://127.0.0.1:4198")
+    with TestClient(app, base_url="http://127.0.0.1:4198") as client:
+        response = client.post(
+            "/v1/operator/formal-start-intents", json=payload,
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 200, response.text
+        result = FormalStartIntentResult.model_validate(response.json())
     assert result.state == "ready_for_round_creation"
-    return PostgresFormalDispatcher(repository, coordinator, enabled=True), result.intent_id
+    return runtime.dispatcher, result.intent_id
 
 
 def test_atomic_concurrent_creation_replay_and_cancel(dispatch_case):  # type: ignore[no-untyped-def]

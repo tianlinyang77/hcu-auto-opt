@@ -57,3 +57,30 @@
 
 生产身份服务、真实 signer/verifier 配置及生产窗口证据尚未部署；不能据此宣布生产签名链已完成。
 所有执行禁止字段保持 false。本工具不创建 Round/Job/Lease，不访问 HCU。
+
+## 统一部署装配
+
+部署代码使用 `hcuopt.deployment.formal_runtime.FormalDeploymentRuntime` 收拢接线：
+
+```python
+runtime = FormalDeploymentRuntime(repository, management, enabled=False)
+app = runtime.console(static_root=frontend_dist, browser_origin=origin)
+```
+
+`management` 必须已经装配可信 coordinator 与已签访问配置，不能预先混入 reader。
+同一 runtime 提供 `dispatcher`、`claims` 和控制台，统一使用同一仓库及 coordinator。
+构造对象没有迁移、派发、资源领取或后台执行副作用；`enabled=True` 也不代替签名、
+窗口或预算授权，且不新增 Web 执行写接口。
+
+正确性执行后，可在装配控制台时传入 `correctness_journal=原日志对象`，
+将只读恢复查询接上该次执行。日志必须沿同一个 `runtime.claims` 构造，否则拒绝；
+不允许拿另一条执行链的日志给当前页面展示。重启须从原始持久化身份重新装配，
+不新建领取或自动重试未知执行。
+
+这只是统一装配入口，不是完整自动调度循环。生产签名、B/D 部署配置、真实资源执行、
+阶段推进和最终签核仍沿既有组件集成，不能把创建 runtime 当作这些工作已验收。
+
+2026-09-21 组合验证：接口/控制台/恢复读 API 本地 18 passed；Linux/Python 3.10/
+PostgreSQL 32 passed（41.70 秒）。派发及真实 Git/Overlay 构建测试的共同入口现从
+HTTP 创建 Intent，再经统一 runtime 的 dispatcher 执行。签名和业务源仍为明确测试夹具，
+正确性日志测试中的结果也不代表 HCU 执行；本轮没有真实模型、性能或浏览器视觉验收。
