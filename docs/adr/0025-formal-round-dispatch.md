@@ -155,3 +155,26 @@ Worker、期限和 `claimed / recovery_required`。原创建 outbox 不被改写
 
 本切片没有自动扫描/启动器，没有持久化 phase-attempt 的执行中标记，
 也没有运行中强杀/协作中断线程。失联重试、当前租约清理验真及物理启动竞争仍需下一步。
+
+## 2026-09-21：持久化阶段日志与单阶段消费入口（仍 Proposed）
+
+迁移 30 新增 formal_phase_journal 和追加式事件。唯一业务槽位是
+Intent/Candidate/Phase，另存 execution_id、完整请求和 Hash、Worker/claim_token。
+故障后改变 Job/Attempt 不能绕过唯一槽位。当前没有自动重试或重新开启槽位的方法。
+
+调用 B 之前先提交 invoking：其含义是“可能已调用”，不是 HCU 已运行的证明。
+事务回滚意味着没有取得调用权；提交后崩溃则保留 invoking，重复消费拒绝调用，
+需恢复核验。外部调用与数据库提交不是原子操作，选择保守停住而不是重复执行。
+收到经现有 Store 验真的终态回执后提交 receipt_recorded；该回执可能是失败的，
+不能从日志终态推导 D 通过、资源释放或性能收益。
+未知异常转 recovery_required，迟到回执不得覆盖恢复状态。终态和审计不可修改删除。
+
+FormalPhaseConsumer 默认关闭，只处理部署方已准备好的单阶段请求，不扫描队列、
+不申请 HCU 资源、不自动生成 Artifact/Holdout，也不创建通用 Job。
+调用时强制注入 FormalClaimCheckpoint；同一日志已有回执只回读文件，不再次调用 B。
+已有 invoking/recovery_required 直接拒绝，保留原阶段日志。
+失效领取不允许新调用；历史回执只读重放不授予新权限。
+
+尚缺生产扫描/调度装配、从 Round 到完整 B PhaseRequest 的真实准备、
+运行中协作停止以及当前资源清理/恢复验收。旧执行器直调入口不在此日志保护范围，
+不能据新 Consumer 单测宣称所有物理执行都 exactly-once。

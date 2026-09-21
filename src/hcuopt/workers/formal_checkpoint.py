@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from hcuopt.contracts.m2_formal_execution_v1 import M2FormalPhaseExecutionRequest
-from hcuopt.domain.errors import Conflict
+from hcuopt.operator.formal_phase_binding import require_claimed_phase_binding
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 
 
@@ -23,17 +23,5 @@ class FormalClaimCheckpoint:
 
     def __call__(self, request: M2FormalPhaseExecutionRequest) -> None:
         intent = self.claims.dispatcher.repository.get_formal_start_intent(self.intent_id)
-        binding = request.binding
-        if (
-            binding.task_id != intent.task_id
-            or binding.round_id != intent.round_id
-            or binding.resolved_plan_hash != intent.resolved_plan_hash
-            or binding.formal_authorization_hash != intent.formal_authorization_hash
-            or not any(
-                member.candidate_id == binding.candidate_id
-                and member.round_candidate_id == binding.round_candidate_id
-                for member in intent.candidate_bindings
-            )
-        ):
-            raise Conflict("Formal phase differs from its claimed Intent")
+        require_claimed_phase_binding(intent, request)
         self.claims.assert_active(self.intent_id, self.worker_id, self.claim_token)
