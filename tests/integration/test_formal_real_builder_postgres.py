@@ -37,6 +37,7 @@ from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
 from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
+from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLease
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
@@ -106,7 +107,7 @@ def real_sources(tmp_path, monkeypatch):
     return state
 
 
-def test_real_builder_to_budget_publication_and_job_completion(real_sources, request):
+def test_real_builder_to_budget_publication_and_job_completion(real_sources, request, monkeypatch):
     # Resolve after real_sources has replaced only the test source/seed factories.
     dispatcher, intent_id = request.getfixturevalue("dispatch_case")
     dispatcher.create(intent_id)
@@ -185,7 +186,91 @@ def test_real_builder_to_budget_publication_and_job_completion(real_sources, req
         correctness_jobs.reserve(plans.SECOND_CANDIDATE_ID, wall_seconds=604801)
     with pytest.raises(Conflict):
         correctness_jobs.enqueue(uuid4())
+    lease = PostgresFormalCorrectnessLease(correctness_jobs, enabled=True)
+    reservation_id = reservations[0]["reservation"]["reservation_id"]
+    with pytest.raises(Conflict, match="disabled"):
+        PostgresFormalCorrectnessLease(correctness_jobs).claim(
+            plans.FIRST_CANDIDATE_ID, reservation_id, executor_id="ordinary-correctness",
+        )
+    with pytest.raises(Conflict, match="authorized host"):
+        lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id,
+                    executor_id="ordinary-correctness")
+    preview = dispatcher.coordinator.validate_for_dispatch(
+        repo.get_formal_start_intent(intent_id), repo,
+    )[0]
+    plan = preview.resolved_plan
+    repo.register_worker(WorkerRegister(
+        worker_id="formal-correctness", worker_type="gpu",
+        adapter_profile=frozen["adapter_profile"], capabilities={
+            "host_id": plan.authorized_host_id, "resource_id": plan.authorized_resource_id,
+        },
+    ))
+    # Only a control-plane resource inside this random test schema, not hardware.
+    with repo.connection() as conn:
+        conn.execute("UPDATE resources SET state = 'quarantined' WHERE resource_id = %s",
+                     (plan.authorized_resource_id,))
+    with pytest.raises(Conflict, match="unavailable"):
+        lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id, executor_id="formal-correctness")
+    with repo.connection() as conn:
+        assert conn.execute("SELECT state FROM jobs WHERE job_id = %s", (job["job_id"],)
+                            ).fetchone()["state"] == "queued"
+        conn.execute("UPDATE resources SET state = 'available' WHERE resource_id = %s",
+                     (plan.authorized_resource_id,))
+    with pytest.raises(Conflict, match="reserved budget"):
+        lease.claim(plans.FIRST_CANDIDATE_ID, uuid4(), executor_id="formal-correctness")
+    from hcuopt.storage import formal_correctness_lease as lease_module
+
+    def fail_audit(*args):
+        raise RuntimeError("injected audit write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lease_module, "_insert", fail_audit)
+        with pytest.raises(RuntimeError, match="audit write"):
+            lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id, executor_id="formal-correctness")
+    with repo.connection() as conn:
+        assert conn.execute("SELECT state FROM jobs WHERE job_id = %s", (job["job_id"],)
+                            ).fetchone()["state"] == "queued"
+        assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
+                            (plan.authorized_resource_id,)).fetchone()["state"] == "available"
+
+    def concurrent_claim(_):
+        try:
+            return lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id,
+                               executor_id="formal-correctness")
+        except Conflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(concurrent_claim, range(2)))
+    successes = [outcome for outcome in outcomes if outcome is not None]
+    assert len(successes) == 1
+    claimed = successes[0]
+    checkpoint = dict(executor_id="formal-correctness", token=claimed["claim_token"],
+                      lease_id=claimed["lease_id"], fencing_token=claimed["fencing_token"])
+    assert claimed["state"] == "running" and claimed["attempts"] == 1
+    with repo.connection() as conn:
+        resource = conn.execute("SELECT * FROM resources WHERE resource_id = %s",
+                                (plan.authorized_resource_id,)).fetchone()
+        assert resource["expires_at"] <= claim["expires_at"]
+        assert (resource["expires_at"] - claimed["claimed_at"]).total_seconds() <= 30
+    lease.assert_live(claimed["job_id"], **checkpoint)
+    with pytest.raises(Conflict, match="stale"):
+        lease.assert_live(claimed["job_id"], **{**checkpoint, "token": uuid4()})
+    with pytest.raises(Conflict, match="already started"):
+        lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id, executor_id="formal-correctness")
+    with repo.connection() as conn:
+        conn.execute("UPDATE resources SET expires_at = clock_timestamp() - interval '1 second' "
+                     "WHERE resource_id = %s", (plan.authorized_resource_id,))
+    with pytest.raises(Conflict, match="stale"):
+        lease.assert_live(claimed["job_id"], **checkpoint)
+    with repo.connection() as conn:
+        assert conn.execute("SELECT state FROM resources WHERE resource_id = %s",
+                            (plan.authorized_resource_id,)).fetchone()["state"] == "active"
+        assert conn.execute("SELECT count(*) AS n FROM job_events WHERE event_type = "
+                            "'formal_correctness_claimed'").fetchone()["n"] == 1
     claims.request_stop(intent_id, requested_by="integration-test")
+    with pytest.raises(Conflict, match="stop"):
+        lease.assert_live(claimed["job_id"], **checkpoint)
     with pytest.raises(Conflict, match="stop"):
         correctness_jobs.enqueue(plans.SECOND_CANDIDATE_ID)
     with repo.connection() as conn:

@@ -373,3 +373,25 @@ Reservation/ledger ID 从 Job 确定性派生，时间取持久化 Job.created_a
 Linux/Python 3.10/PostgreSQL 组合 24 passed（25.69 秒），验证并发一次预留、
 改预算拒绝、超预算无扣账；本地非法参数检查 7 passed，Ruff 通过。未获取 HCU 租约，
 未启动正确性进程或完成用量结算。
+
+## 2026-09-21：预算到专用领取及活跃租约检查
+
+`PostgresFormalCorrectnessLease` 默认关闭。复用原 resources/jobs 表，不放宽普通
+Worker 对 formal lane 的拒绝。领取在 Intent/授权复核后按 Round、预算、Job、资源
+顺序锁行，要求一次未开始的 correctness Job、完整 reserved 预算，以及注册在授权
+host/resource 上的在线 GPU Worker。资源必须 available 且无旧 Owner/Lease。
+
+同一事务写 running/Attempt 1、新 Job Token、Lease ID、递增 Fencing Token 与
+`formal_correctness_claimed` 审计；任何审计失败整体回滚。重复领取或响应丢失不重试，
+需检查持久化 running 事实并人工恢复。数据库锁只保护控制面，不证明物理隔离。
+Lease 截止时间取预留 wall budget、控制面 Claim 和授权有效期的最早者，不提供续租。
+
+执行前 `assert_live` 重验当前授权、停止状态、Round、reserved 预算、Job Owner/Token、
+Lease/Fence 与数据库实际时间。不续租，不因过期释放资源，不启动或杀死任何进程。
+资源清理、原始证据生产、结果日志/结算与原子推进仍须由后续 Consumer 接入；
+不能将 running 当成 HCU 已执行，也不能将 claimed 事件当作 producer invocation 日志。
+
+最终 Linux/Python 3.10/PostgreSQL 组合回归 24 passed（30.38 秒），包含双候选真实构建、
+冻结、入队、预算、授权资源领取和 checkpoint；新增并发单赢家、审计异常事务回滚、
+缺失预算、错误主机/资源、错误 Token、过期与停止拒绝。Ruff 通过。
+测试资源仅位于随机隔离 schema，未操作物理 HCU；授权/源码仍为显式测试夹具。
