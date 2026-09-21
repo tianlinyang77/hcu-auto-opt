@@ -117,3 +117,21 @@ Worker、期限和 `claimed / recovery_required`。原创建 outbox 不被改写
 超时只持久化 recovery_required，不释放设备，也不创建第二个 Attempt。
 读取页面可显示领取/恢复状态，`execution_consumer_enabled=false` 仍表示物理执行消费者未接。
 部署前必须迁移并同步升级全部读写进程；旧状态模型不能读取新领取状态。
+
+## 2026-09-21：持久化停止请求及执行前检查（仍 Proposed）
+
+迁移 29 增加追加式停止请求，唯一绑定当前 Intent/Worker/claim_token，
+请求人与固定原因枚举保存为审计；身份与 Token 从数据库读取，客户端不能指定。
+这是受信部署服务方法，**没有把旧 Web Intent capability 扩大成停止权限**。
+没有领取的任务仍走旧 queued 取消；已领取任务可以记录停止请求，但不能据此释放资源。
+重复同请求返回原事实，修改请求人或原因拒绝；授权/领取过期仍允许同部署请求停止。
+
+`assert_active` 在每个阶段之前重验签名、Authority、Intent 版本、Worker/Token、
+有效期和停止请求。它不调用执行器，不申请设备，不签发 B Lease/Fence。
+停止请求若在检查后才到达，仍需后续执行器协作取消以及 B Fence；
+数据库检查与外部进程启动不是原子操作，不能宣称消除了这一竞争。
+
+只读页面增加 stop_requested，文字明确“不代表已停止或资源已释放”。
+超时标记后以 recovery_required 优先显示；停止请求的原始审计不被覆盖。
+本阶段不新增“清理通过”布尔字段：清理终态须复用 B 执行回执及真实资源身份验证，
+待接完整 phase/Attempt/Lease 绑定后才能收口；当前不允许重新入队或自动发布。

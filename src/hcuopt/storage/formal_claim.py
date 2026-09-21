@@ -6,6 +6,9 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from psycopg import Connection
+
+from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentView
 from hcuopt.domain.errors import Conflict
 from hcuopt.operator.formal_dispatch import prepare_formal_round
 from hcuopt.storage.formal_dispatch import PostgresFormalDispatcher, _insert
@@ -122,3 +125,105 @@ class PostgresFormalClaimStore:
                 },
             )
             return True
+
+    def request_stop(
+        self,
+        intent_id: UUID,
+        *,
+        requested_by: str,
+        reason: str = "operator_request",
+    ) -> dict[str, Any]:
+        """Trusted deployment operation, not a Web capability or cleanup action.
+
+        Capture the owner from storage, never from an untrusted request. Replays
+        return the original fact; changed actor/reason conflicts rather than
+        rewriting audit history. This remains available after claim expiry.
+        """
+        if not self.enabled:
+            raise Conflict("Formal claiming is disabled")
+        if not isinstance(requested_by, str) or not requested_by.strip() or len(requested_by) > 128:
+            raise ValueError("requested_by must contain 1-128 characters")
+        if reason not in {"operator_request", "deployment_shutdown"}:
+            raise ValueError("unsupported Formal stop reason")
+        repository = self.dispatcher.repository
+        with repository.connection() as connection:
+            self._lock_deployment_intent(connection, intent_id)
+            previous = connection.execute(
+                "SELECT * FROM formal_dispatch_stop_requests WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
+            if previous is not None:
+                if previous["requested_by"] != requested_by or previous["reason"] != reason:
+                    raise Conflict("Formal stop request differs from its recorded audit")
+                return dict(previous)
+            claim = connection.execute(
+                "SELECT * FROM formal_dispatch_claims WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
+            if claim is None:
+                raise Conflict("Unclaimed Formal intent must use queued cancellation")
+            _insert(
+                connection,
+                "formal_dispatch_stop_requests",
+                {
+                    "intent_id": intent_id,
+                    "claim_token": claim["claim_token"],
+                    "worker_id": claim["worker_id"],
+                    "requested_by": requested_by,
+                    "reason": reason,
+                },
+            )
+            return dict(
+                connection.execute(
+                    "SELECT * FROM formal_dispatch_stop_requests WHERE intent_id = %s", (intent_id,)
+                ).fetchone()
+            )
+
+    def assert_active(self, intent_id: UUID, worker_id: str, claim_token: UUID) -> None:
+        """Checkpoint only: does not authorize or atomically start external work.
+
+        Recheck before each phase. A stop after this check still needs cooperative
+        cancellation and B fencing; this method cannot close that external race.
+        """
+        dispatcher = self.dispatcher
+        if not self.enabled or not dispatcher.enabled:
+            raise Conflict("Formal claiming is disabled")
+        repository = dispatcher.repository
+        original = repository.get_formal_start_intent(intent_id)
+        if original.service_identity != dispatcher.coordinator.service_identity:
+            raise Conflict("Formal claim belongs to another deployment")
+        prepared = prepare_formal_round(dispatcher.coordinator, original, repository)
+        with repository.connection() as connection:
+            current = self._lock_deployment_intent(connection, intent_id)
+            if current != prepared.intent:
+                raise Conflict("Formal Intent changed before checkpoint")
+            claim = connection.execute(
+                "SELECT * FROM formal_dispatch_claims WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
+            if (
+                claim is None
+                or claim["worker_id"] != worker_id
+                or claim["claim_token"] != claim_token
+                or claim["state"] != "claimed"
+            ):
+                raise Conflict("Formal claim owner or state is stale")
+            if connection.execute(
+                "SELECT 1 FROM formal_dispatch_stop_requests WHERE intent_id = %s", (intent_id,)
+            ).fetchone():
+                raise Conflict("Formal stop requested; do not start another phase")
+            dispatcher._revalidate_locked(connection, prepared)
+            now = connection.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+            if now >= claim["expires_at"]:
+                raise Conflict("Formal claim expired; recovery required")
+
+    def _lock_deployment_intent(
+        self, connection: Connection, intent_id: UUID
+    ) -> FormalStartIntentView:
+        row = connection.execute(
+            "SELECT * FROM formal_operator_start_intents WHERE intent_id = %s FOR UPDATE",
+            (intent_id,),
+        ).fetchone()
+        if row is None:
+            raise Conflict("Formal claim is unavailable")
+        intent = self.dispatcher.repository._formal_start_intent(row)
+        if intent.service_identity != self.dispatcher.coordinator.service_identity:
+            raise Conflict("Formal claim belongs to another deployment")
+        return intent

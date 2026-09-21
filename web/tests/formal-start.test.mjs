@@ -52,7 +52,7 @@ test("dispatch status is a scoped read, never a new submission", async () => {
     return { ok: true, json: async () => status };
   });
   assert.equal(observed.state, "queued");
-  for (const state of ["claimed", "recovery_required"]) {
+  for (const state of ["claimed", "recovery_required", "stop_requested"]) {
     const value = await loadFormalDispatch(plan, receipt, "test-token", async () =>
       ({ ok: true, json: async () => ({ ...status, state }) }));
     assert.equal(value.state, state);

@@ -57,6 +57,9 @@ class PostgresFormalDispatcher:
             claim = connection.execute(
                 "SELECT state FROM formal_dispatch_claims WHERE intent_id = %s", (intent_id,)
             ).fetchone()
+            stop = connection.execute(
+                "SELECT 1 FROM formal_dispatch_stop_requests WHERE intent_id = %s", (intent_id,)
+            ).fetchone()
         if row is not None and (
             row["round_id"] != intent.round_id
             or row["request_digest"] != intent.request_digest
@@ -64,11 +67,14 @@ class PostgresFormalDispatcher:
             or row["service_identity"] != intent.service_identity.model_dump(mode="json")
         ):
             raise Conflict("Formal dispatch stored bindings differ")
+        state = claim["state"] if claim else "not_created" if row is None else row["state"]
+        if stop and state == "claimed":
+            state = "stop_requested"
         return FormalDispatchStatus(
             intent_id=intent_id,
             round_id=intent.round_id,
             resolved_plan_hash=intent.resolved_plan_hash,
-            state=(claim["state"] if claim else "not_created" if row is None else row["state"]),
+            state=state,
             service_identity=intent.service_identity,
         )
 
