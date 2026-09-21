@@ -16,7 +16,9 @@ from hcuopt.contracts.m2 import (
     RoundCandidate,
 )
 from hcuopt.contracts.platform_v1 import SourceSnapshot
+from hcuopt.contracts.v1 import WorkerRegister
 from hcuopt.domain.errors import Conflict
+from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
 from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration.test_formal_build_postgres import build_record_case  # noqa: F401
@@ -34,7 +36,6 @@ INPUT_HASH = "sha256:" + "a" * 64
 def journal_case(build_record_case):  # noqa: F811
     store, intent_id, token, result = build_record_case
     repo = store.claims.dispatcher.repository
-    job_id = uuid4()
     intent = repo.get_formal_start_intent(intent_id)
     with repo.connection() as conn:
         # Older dispatch fixtures use a SHA-prefixed placeholder for a Git tree.
@@ -43,12 +44,17 @@ def journal_case(build_record_case):  # noqa: F811
             "UPDATE source_snapshots SET tree_hash = %s WHERE kind = 'baseline'",
             ("a" * 40,),
         )
-        conn.execute(
-            "INSERT INTO jobs (job_id, task_id, job_type, accepted_worker_type, "
-            "lease_scope, payload, idempotency_key) "
-            "VALUES (%s, %s, 'manual_build', 'cpu', 'none', '{}', %s)",
-            (job_id, intent.task_id, f"build-journal-test:{job_id}"),
-        )
+        profile = conn.execute("SELECT adapter_profile FROM search_rounds").fetchone()[
+            "adapter_profile"
+        ]
+    repo.register_worker(WorkerRegister(
+        worker_id="builder", worker_type="build", adapter_profile=profile,
+    ))
+    jobs = PostgresFormalBuildJobs(store.claims, intent_id, "builder", token)
+    job = jobs.enqueue(result.build.candidate_id)
+    assert jobs.enqueue(result.build.candidate_id) == job
+    assert repo.claim_job("builder") is None
+    job_id = job["job_id"]
     reservation = RoundBudgetReservation(
         reservation_id=uuid4(), round_id=intent.round_id, job_id=job_id, attempt=1,
         candidate_id=result.build.candidate_id, planned=BudgetUsage(build_attempts=1),
@@ -111,13 +117,14 @@ def test_missing_budget_wrong_owner_and_stop_prevent_invocation(journal_case):
     intruder = PostgresFormalBuildJournal(
         journal.claims, journal.intent_id, "intruder", journal.claim_token,
     )
-    with pytest.raises(psycopg.errors.RaiseException, match="live claim"):
+    with pytest.raises(Conflict, match="isolated queued Job"):
         intruder.begin(candidate, reservation.reservation_id, INPUT_HASH)
     journal.claims.request_stop(journal.intent_id, requested_by="operator")
     with pytest.raises(psycopg.errors.RaiseException, match="live claim"):
         journal.begin(candidate, reservation.reservation_id, INPUT_HASH)
     with journal.claims.dispatcher.repository.connection() as conn:
         assert conn.execute("SELECT count(*) AS n FROM formal_build_journal").fetchone()["n"] == 0
+        assert conn.execute("SELECT state FROM jobs").fetchone()["state"] == "queued"
 
 
 def test_consumer_replays_output_after_publication_failure(journal_case, tmp_path, monkeypatch):
@@ -166,6 +173,12 @@ def test_consumer_replays_output_after_publication_failure(journal_case, tmp_pat
     assert consumer.execute_once(**args) == result
     assert len(calls) == 1
     with repo.connection() as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE job_id = %s",
+                           (reservation.job_id,)).fetchone()
+        assert job["state"] == "succeeded" and job["attempts"] == 1
+        assert conn.execute(
+            "SELECT count(*) AS n FROM job_events WHERE event_type = 'formal_build_completed'"
+        ).fetchone()["n"] == 1
         rows = conn.execute(
             "SELECT * FROM round_budget_ledger WHERE entry_type = 'settle'"
         ).fetchall()

@@ -32,6 +32,7 @@ MIGRATIONS = {
     29: "0029_formal_dispatch_stop.sql",
     30: "0030_formal_phase_journal.sql",
     31: "0031_formal_build_journal.sql",
+    32: "0032_formal_job_lane.sql",
 }
 
 

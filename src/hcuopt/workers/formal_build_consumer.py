@@ -32,7 +32,8 @@ class FormalBuildConsumer:
 
         Budget reservation must already exist. Successful build usage is settled
         before publication, including replay. Unknown failures require reconciliation.
-        Job ownership/completion remain deployment responsibilities.
+        The journal owns isolated Job claiming/completion. Creation and budget
+        reservation remain explicit deployment operations.
         """
         if not self.enabled or not self.builder.enabled or not self.store.enabled:
             raise Conflict("Formal build consumer is disabled")
@@ -103,4 +104,5 @@ class FormalBuildConsumer:
         journal.settle_recorded_result(*args)
         # Publication errors retain exact output for replay, not another build.
         self.store.record(journal.intent_id, journal.worker_id, journal.claim_token, result)
+        journal.complete_published_job(*args)
         return result

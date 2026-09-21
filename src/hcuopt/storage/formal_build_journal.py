@@ -15,6 +15,7 @@ from hcuopt.contracts.v1 import ManualCandidateBuildResult
 from hcuopt.domain.errors import Conflict
 from hcuopt.measurement.evidence import canonical_json_bytes
 from hcuopt.operator.formal_dispatch import prepare_formal_round
+from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_dispatch import _insert
 
@@ -77,6 +78,9 @@ class PostgresFormalBuildJournal:
                 or budget["planned"].get("build_attempts") != 1
             ):
                 raise Conflict("Formal build requires its reserved build budget")
+            PostgresFormalBuildJobs(
+                self.claims, self.intent_id, self.worker_id, self.claim_token,
+            )._claim_reserved(conn, budget)
             _insert(conn, "formal_build_journal", {
                 "intent_id": self.intent_id, "candidate_id": candidate_id,
                 "worker_id": self.worker_id, "claim_token": self.claim_token,
@@ -164,6 +168,56 @@ class PostgresFormalBuildJournal:
         # Do not nest the repository's Round->Reservation locking transaction
         # under the journal's Intent lock. The result and input identity are immutable.
         return repo.finalize_round_budget(entry)
+
+    def complete_published_job(self, candidate_id: UUID, reservation_id: UUID,
+                               input_hash: str) -> None:
+        """Record a completed build fact, not whole-Round or workflow completion."""
+        repo = self.claims.dispatcher.repository
+        with repo.connection() as conn:
+            intent, row = self._locked(conn, candidate_id, reservation_id, input_hash)
+            if row is None or row["state"] != "result_recorded":
+                raise Conflict("Formal Job completion requires recorded build output")
+            terminal = RoundCandidateBuildTerminal.model_validate(row["result"]["terminal"])
+            published = conn.execute(
+                "SELECT 1 FROM round_candidates m "
+                "JOIN artifacts a ON a.artifact_id = m.artifact_id "
+                "WHERE m.round_id = %s AND m.candidate_id = %s AND m.artifact_id = %s "
+                "AND m.artifact_hash = %s AND a.content_hash = m.artifact_hash "
+                "AND a.synthetic = false AND a.task_id = %s AND a.candidate_id = m.candidate_id",
+                (intent.round_id, candidate_id, terminal.artifact_id,
+                 terminal.artifact_hash, intent.task_id),
+            ).fetchone()
+            budget = conn.execute(
+                "SELECT * FROM round_budget_reservations WHERE reservation_id = %s FOR SHARE",
+                (reservation_id,),
+            ).fetchone()
+            if published is None or budget is None or budget["state"] != "settled":
+                raise Conflict("Formal Job completion requires publication and settled usage")
+            job = conn.execute(
+                "SELECT * FROM jobs WHERE job_id = %s FOR UPDATE", (budget["job_id"],),
+            ).fetchone()
+            expected_binding = PostgresFormalBuildJobs(
+                self.claims, self.intent_id, self.worker_id, self.claim_token,
+            ).binding(candidate_id)
+            if job is None or (
+                job["execution_lane"] != "formal" or job["payload"] != expected_binding
+                or job["claim_token"] != self.claim_token or job["claimed_by"] != self.worker_id
+            ):
+                raise Conflict("Formal Job completion owner differs")
+            result = {"artifact_id": str(terminal.artifact_id),
+                      "artifact_hash": terminal.artifact_hash, "input_hash": input_hash}
+            if job["state"] == "succeeded" and job["result"] == result:
+                return
+            if job["state"] != "running":
+                raise Conflict("Formal Job completion requires its running Attempt")
+            conn.execute(
+                "UPDATE jobs SET state = 'succeeded', result = %s, "
+                "finished_at = clock_timestamp(), "
+                "updated_at = clock_timestamp() WHERE job_id = %s", (Jsonb(result), job["job_id"]),
+            )
+            _insert(conn, "job_events", {
+                "job_id": job["job_id"], "event_type": "formal_build_completed", "details": result,
+            })
 
     def mark_unknown(self, candidate_id: UUID, reservation_id: UUID, input_hash: str) -> None:
         with self.claims.dispatcher.repository.connection() as conn:

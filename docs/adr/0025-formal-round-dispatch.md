@@ -287,3 +287,24 @@ Ledger ID/幂等键/时间来自持久化结果，不以每次重放的当前时
 本切片不新增迁移；result JSONB 增加 usage，旧版本不得继续消费新结算流程。
 Job 隔离领取/完成、有界执行与 Claim 生命周期、失败对账仍待实现。生产 Consumer
 保持关闭；预算预留必须由原 queued Job/Attempt 路径产生，不绕过其守卫。
+
+## 2026-09-21：Formal 构建 Job 隔离（仍 Proposed）
+
+迁移 32 给 jobs 增加不可变 execution_lane，既有记录默认 general。Formal 构建 Job 由
+受信部署在有效 Claim 下显式创建，绑定 Intent/Candidate/Worker/Token，最多一次 Attempt。
+旧通用创建接口不增加可选 lane 参数；领取、失联恢复、未推进成功 Job 扫描均排除 formal，
+通用心跳/完成/失败所有权路径拒绝 formal。禁止将 Formal 行改回 general 绕过隔离。
+
+流程：专用 enqueue → 原预算 API 对 queued Job 预留 → journal.begin 的同一事务将 Job
+变为 running 并保存 invoking → 构建/用量结算/制品发布 → 专用完成记录。领取要求已注册的
+同 Profile CPU Worker；DB 触发器拒绝没有精确运行 Job 的构建日志。入队与预算预留不是
+一个事务，预留失败只留下不可被通用 Worker 消费的排队记录，不启动外部工作。
+
+完成入口仅确认制品已归档且预算已结算，再记 succeeded 和审计；不完成 Task/Round，
+不触发旧 Workflow。未知失败 Job 保留 running 与 recovery_required 日志，不由普通
+超时恢复器重排。尚缺有界执行/Claim 生命周期与失败恢复操作，不启用生产自动扫描。
+
+升级必须停旧 Worker，迁移后统一更新所有读取/恢复进程，再恢复普通队列；旧版本
+claim_job 不识别新 lane，混部不安全。应用回退前停用所有队列写进程并保留数据库证据。
+网络恢复后，PostgreSQL 组合联验 13 项通过；本地定向 80 项、额外 Worker 回归 28 项通过。
+这些是夹具驱动的工程验证，不是实际 HCU 性能验收；ADR 仍待审，不能宣称整体完成。
