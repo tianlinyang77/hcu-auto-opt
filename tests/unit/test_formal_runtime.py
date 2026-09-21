@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
 from hcuopt.domain.errors import Conflict
-from tests.unit.test_formal_start_management_api import TOKEN, setup_management
+from tests.unit.formal_signed_fixture import setup_signed_management as setup_management
+from tests.unit.test_formal_start_management_api import TOKEN
 
 
 def test_runtime_composes_console_without_implicit_dispatch(tmp_path):
@@ -55,3 +56,29 @@ def test_runtime_rejects_truthy_string_enable(tmp_path):
     management, repo, _ = setup_management(tmp_path)
     with pytest.raises(ValueError, match="boolean"):
         FormalDeploymentRuntime(repo, management, enabled="false")
+
+
+@pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
+def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
+    management, repo, payload = setup_management(tmp_path)
+    if role == "actor":
+        capability = management.capabilities[0]
+        management = replace(management, capabilities=(replace(
+            capability, assertion=capability.assertion.model_copy(update={"signature": "A" * 88}),
+        ),))
+    else:
+        store = management.coordinator.object_store
+        authority = getattr(store, role)
+        setattr(store, role, authority.model_copy(update={"signature": "A" * 88}))
+    runtime = FormalDeploymentRuntime(repo, management)
+    root = tmp_path / "signed-web"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("fixture", encoding="utf-8")
+    with TestClient(runtime.console(static_root=root, browser_origin="http://127.0.0.1:4198"),
+                    base_url="http://127.0.0.1:4198") as client:
+        response = client.post("/v1/operator/formal-start-intents", json=payload,
+                               headers={"Authorization": f"Bearer {TOKEN}"})
+    assert response.status_code != 200 or response.json()["state"] != "ready_for_round_creation"
+    assert all(intent.state != "ready_for_round_creation" for intent in repo.intents.values())
+    if role == "actor":
+        assert not repo.intents

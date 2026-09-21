@@ -19,7 +19,7 @@ from hcuopt.storage.repository import PostgresRepository
 from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
 from tests.unit import test_formal_operator_plans as plans
 from tests.unit import test_formal_operator_start as starts
-from tests.unit.test_formal_start_management_api import setup_management
+from tests.unit.formal_signed_fixture import setup_signed_management
 
 pytestmark = [
     pytest.mark.postgres,
@@ -175,7 +175,7 @@ def dispatch_case(isolated_dsn, tmp_path, monkeypatch):  # type: ignore[no-untyp
     monkeypatch.setattr(plans, "WINDOW_START", now - timedelta(minutes=5))
     monkeypatch.setattr(plans, "WINDOW_END", now + timedelta(hours=1))
     monkeypatch.setattr(starts, "NOW", now)
-    management, memory, payload = setup_management(tmp_path)
+    management, memory, payload = setup_signed_management(tmp_path)
     coordinator = management.coordinator
     seed_authority(repository, coordinator, memory)
     from fastapi.testclient import TestClient

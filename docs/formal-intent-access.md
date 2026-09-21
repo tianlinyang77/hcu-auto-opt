@@ -84,3 +84,32 @@ app = runtime.console(static_root=frontend_dist, browser_origin=origin)
 PostgreSQL 32 passed（41.70 秒）。派发及真实 Git/Overlay 构建测试的共同入口现从
 HTTP 创建 Intent，再经统一 runtime 的 dispatcher 执行。签名和业务源仍为明确测试夹具，
 正确性日志测试中的结果也不代表 HCU 执行；本轮没有真实模型、性能或浏览器视觉验收。
+
+## 标准签名适配与信任边界
+
+`hcuopt.deployment.formal_signing` 提供 `FormalEd25519Signer` 与仅持公钥的
+`FormalEd25519Verifier`，安装可选依赖 `.[formal]`。使用 cryptography 的标准 Ed25519，
+不是自实现密码算法。部署可信配置提供密钥对象、signer_id、key_id 和固定角色
+`actor / execution / evaluation`；请求不能选择密钥或角色。
+
+- B/D 原有 issuer 使用 `sign_authority(content_hash=...)`；身份服务使用
+  `sign_assertion(content_hash=...)`。错误角色调用拒绝。
+- Coordinator 只注入 `signer.verifier()` 返回的公钥对象，不向 API 进程传入签名器。
+- 协议名为 `hcuopt-formal-ed25519-v1`。签名消息是既有 `canonical_json_bytes` 编码的
+  `{domain, role, signer, content_hash}` 对象；`signer` 为完整 FormalStartSignerRef。
+  摘要限定小写 SHA256，签名为 64 字节 Ed25519 签名的规范标准 Base64。
+- `signer_hash` 是原始 32 字节公钥的 SHA256。重用同一密钥但修改角色或名字不会
+  变成独立密钥身份；Coordinator 原有角色分离检查继续生效。
+- 适配器不生成或落盘生产密钥，不给操作者授予权限，不批准机器窗口，不签发 owner
+  Authorization 或替代 Holdout/独立裁决证明。密钥保管、撤销、轮换和角色职责隔离
+  仍需部署方配置；不同密钥不自动证明不同管理主体。
+
+统一 runtime 的单元和 PostgreSQL 派发/构建联验已改用临时生成的独立 actor/B/D 密钥
+进行真实密码学签名验证。输入 Authority、owner 验签、源工作负载及环境证据仍是测试夹具，
+不能称为生产授权链部署完成。篡改 actor/B/D 签名均不能得到 ready 状态，actor 验签失败
+不创建 Intent。该可选适配器仍随 Draft PR 评审，不更改 ADR 的 Proposed 状态。
+
+本轮验证：Windows/Python 3.12/cryptography 50.0.0 本地组合 31 passed；
+Linux/Python 3.10/cryptography 50.0.1 与 PostgreSQL 组合 50 passed（41.68 秒）；
+Ruff 通过。远程加密依赖安装在本次 CPU 测试临时目录，未升级容器系统库。
+没有生成生产密钥、升级 BW20 源库、启动 HCU 或签署生产授权。
