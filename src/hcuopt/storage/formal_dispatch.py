@@ -8,7 +8,7 @@ from uuid import UUID
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from hcuopt.contracts.formal_dispatch_v1 import FormalDispatchStatus
+from hcuopt.contracts.formal_dispatch_v1 import FormalCandidateProgress, FormalDispatchStatus
 from hcuopt.domain.enums import SearchRoundRunMode
 from hcuopt.domain.errors import Conflict, NotFound
 from hcuopt.operator.formal_dispatch import PreparedFormalRound, prepare_formal_round
@@ -60,6 +60,20 @@ class PostgresFormalDispatcher:
             stop = connection.execute(
                 "SELECT 1 FROM formal_dispatch_stop_requests WHERE intent_id = %s", (intent_id,)
             ).fetchone()
+            members = connection.execute(
+                "SELECT candidate_id, round_candidate_id, state, artifact_id, artifact_hash "
+                "FROM round_candidates WHERE round_id = %s ORDER BY ordinal",
+                (intent.round_id,),
+            ).fetchall() if row is not None else []
+            expected_members = {
+                (item.candidate_id, item.round_candidate_id) for item in intent.candidate_bindings
+            }
+            if row is not None and (
+                len(members) != len(expected_members)
+                or {(item["candidate_id"], item["round_candidate_id"]) for item in members}
+                != expected_members
+            ):
+                raise Conflict("Formal dispatch candidate bindings differ")
         if row is not None and (
             row["round_id"] != intent.round_id
             or row["request_digest"] != intent.request_digest
@@ -76,6 +90,7 @@ class PostgresFormalDispatcher:
             resolved_plan_hash=intent.resolved_plan_hash,
             state=state,
             service_identity=intent.service_identity,
+            candidates=tuple(FormalCandidateProgress.model_validate(item) for item in members),
         )
 
     def create(self, intent_id: UUID) -> dict[str, Any]:

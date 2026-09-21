@@ -52,6 +52,15 @@ export async function submitFormalIntent(submission, token, fetchImpl = fetch) {
   return receipt;
 }
 
+export const FORMAL_CANDIDATE_STATES = {
+  intake_accepted: "已接收，等待构建", building: "构建中", build_failed: "构建失败",
+  built: "制品已归档，尚未通过正确性验证", correctness_failed: "正确性验证失败",
+  correctness_passed: "正确性已通过，等待性能评测", search_failed: "搜索评测失败",
+  search_measured: "搜索样本已记录，尚非收益结论", not_promoted: "未进入留出集验证",
+  holdout_failed: "留出集评测失败", holdout_measured: "留出集样本已记录，等待裁决",
+  invalid: "候选无效",
+};
+
 export async function loadFormalDispatch(submission, receipt, token, fetchImpl = fetch) {
   const frozen = freezeFormalSubmission(submission);
   const status = await request("/v1/operator/formal-round-dispatch", token, { method: "GET" }, fetchImpl);
@@ -62,6 +71,18 @@ export async function loadFormalDispatch(submission, receipt, token, fetchImpl =
       !["not_created", "queued", "cancelled", "claimed", "recovery_required", "stop_requested"].includes(status.state) ||
       status.execution_consumer_enabled !== false || status.automatic_release_allowed !== false) {
     throw new Error("派发状态与原请求不匹配，不能推断执行进度。");
+  }
+  if (status.candidates !== undefined) {
+    const candidates = status.candidates;
+    if (!Array.isArray(candidates) || candidates.length > 4 || candidates.some((item) =>
+      !item || !UUID.test(item.candidate_id) || !UUID.test(item.round_candidate_id) ||
+      !Object.hasOwn(FORMAL_CANDIDATE_STATES, item.state) ||
+      ((item.artifact_id == null) !== (item.artifact_hash == null)) ||
+      (item.artifact_id != null && (!UUID.test(item.artifact_id) || !/^sha256:[a-f0-9]{64}$/.test(item.artifact_hash)))) ||
+      new Set(candidates.map((item) => item.candidate_id)).size !== candidates.length ||
+      new Set(candidates.map((item) => item.round_candidate_id)).size !== candidates.length) {
+      throw new Error("候选进度格式不匹配，不能推断执行进度。");
+    }
   }
   return status;
 }

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import { useRef, useState } from "react";
-import { loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
+import { FORMAL_CANDIDATE_STATES, loadFormalDispatch, loadFormalSubmission, submitFormalIntent } from "./formal-start.js";
 
 const STATES = { awaiting_authority: "等待授权材料", ready_for_round_creation: "意图授权核对已完成（轮次进度见下方）", failed: "授权核对失败", cancelled: "意图已取消" };
 const DISPATCH = { not_created: "尚未创建正式轮次", queued: "正式轮次已创建，待执行模块接入", cancelled: "正式轮次已取消", claimed: "控制面已领取（不代表实机已开始）", recovery_required: "领取已超时，需恢复核验；禁止自动重试", stop_requested: "已请求停止（尚未证明执行已停止或资源已释放）" };
@@ -65,7 +65,17 @@ export function FormalStartEntry() {
         <p>重新输入同一操作凭据后查询。查询不会创建或启动任务；未配置读取接口时保留“未知”，不推断已运行。</p>
         <button className="primary-button" disabled={busy || !token} onClick={refreshDispatch}>查询持久化派发状态</button>
         {dispatch && <><p>{DISPATCH[dispatch.state]}</p><p className="mono">预定轮次：{dispatch.round_id}</p>
-          <p>当前部署尚未接入执行消费者；不表示 HCU 已运行或性能验证已通过。</p></>}
+          <p>当前部署尚未接入自动执行消费者；下方是已持久化的候选事实，不表示 HCU 已运行或性能验证已通过。</p>
+          <h3>候选进度</h3>
+          {!dispatch.candidates?.length && <p>暂无候选明细，不能据此判断已完成。</p>}
+          {dispatch.candidates?.map((candidate) => <section key={candidate.candidate_id} className="wizard-card" style={{ padding: 16, marginTop: 12 }}>
+            <p className="mono" style={{ overflowWrap: "anywhere" }}>候选：{candidate.candidate_id}</p>
+            <p>{FORMAL_CANDIDATE_STATES[candidate.state]}</p>
+            {candidate.artifact_id && <>
+              <p className="mono" style={{ overflowWrap: "anywhere" }}>制品：{candidate.artifact_id}</p>
+              <p className="mono" style={{ overflowWrap: "anywhere" }}>{candidate.artifact_hash}</p>
+            </>}
+          </section>)}</>}
         {dispatchError && <p role="alert">轮次进度未知：{dispatchError} 原意图回执不受影响。</p>}
       </section>}
     </section>

@@ -244,3 +244,12 @@ Round 为 building，并追加 formal_candidate_build_recorded 审计。任何�
 只接受成功构建归档，不启动构建、不结算预算、不写 correctness_passed、不冻结 Family。
 正式构建 Worker 的执行日志、预算及失败归档仍待接线；不能据落库成功宣称受控构建闭环完成。
 原 Scripted 路径和 synthetic 保护保持不变，无数据库迁移或自动发布。
+
+## 2026-09-21：候选只读进度投影（仍 Proposed）
+
+既有受保护 FormalDispatchStatus 增量增加 candidates（默认空，最多 4 项），
+只返回精确绑定 Intent 的 Candidate ID、RoundCandidate ID、状态及 Artifact ID/Hash。
+不返回源码、凭据、内部文件路径；制品身份必须成对。读取时核对完整成员集合，
+不新增权限、数据库迁移或执行入口。前端接受旧服务缺失 candidates 时显示未知，
+拒绝重复身份、非法状态和残缺制品身份，不把 built 或 measured 解释成性能通过。
+数据库各查询是当次观测，不是整轮的终态证书；页面查询不触发运行。

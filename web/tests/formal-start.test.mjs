@@ -9,6 +9,20 @@ const plan = { preview_id: id, idempotency_key: "formal-test-key", resolved_plan
   expected_service_identity: { server_instance_id: id, source_commit: "a".repeat(40), profile_catalog_hash: hash, control_contract_version: "v1" } };
 const receipt = { ...plan, intent_id: id, round_id: id, service_identity: plan.expected_service_identity,
   round_creation_allowed: false, hcu_accessed: false, automatic_release_allowed: false, synthetic: false, state: "ready_for_round_creation" };
+
+test("formal candidate progress shows persisted facts and rejects malformed evidence", async () => {
+  const candidate = { candidate_id: id, round_candidate_id: id, state: "built", artifact_id: id, artifact_hash: hash };
+  const status = { schema_version: "formal-dispatch-status-v1", intent_id: id, round_id: id,
+    resolved_plan_hash: hash, service_identity: plan.expected_service_identity, state: "claimed",
+    execution_consumer_enabled: false, automatic_release_allowed: false, candidates: [candidate] };
+  const fetchStatus = (value) => async () => ({ ok: true, json: async () => value });
+  const value = await loadFormalDispatch(plan, receipt, "test-token", fetchStatus(status));
+  assert.equal(value.candidates[0].state, "built");
+  for (const candidates of [[candidate, candidate], [{ ...candidate, state: "speedup_confirmed" }],
+    [{ ...candidate, artifact_hash: null }], [{ ...candidate, candidate_id: "wrong" }], null]) {
+    await assert.rejects(loadFormalDispatch(plan, receipt, "test-token", fetchStatus({ ...status, candidates })), /不匹配/);
+  }
+});
 test("formal preparation uses protected same-origin read and frozen refs", async () => {
   const loaded = await loadFormalSubmission("test-token", async (url, options) => {
     assert.equal(url, "/v1/operator/formal-start-submission");

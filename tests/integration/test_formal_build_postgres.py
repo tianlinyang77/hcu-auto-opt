@@ -79,6 +79,11 @@ def test_atomic_success_and_exact_replay(build_record_case):  # type: ignore[no-
     first = store.record(intent_id, "builder", token, result)
     assert first["state"] == "built"
     assert store.record(intent_id, "builder", token, result) == first
+    progress = store.claims.dispatcher.read_status(intent_id)
+    candidate = next(c for c in progress.candidates if c.candidate_id == result.build.candidate_id)
+    assert candidate.state == "built"
+    assert candidate.artifact_id == result.build.artifact.artifact_id
+    assert candidate.artifact_hash == result.build.artifact.content_hash
     changed_artifact = result.build.artifact.model_copy(update={"build_recipe": {"changed": True}})
     changed = replace(result, build=result.build.model_copy(update={"artifact": changed_artifact}))
     with pytest.raises(Conflict, match="another result"):
