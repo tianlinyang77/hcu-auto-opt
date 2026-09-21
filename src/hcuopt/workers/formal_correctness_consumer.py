@@ -21,12 +21,23 @@ class FormalCorrectnessConsumer:
             raise TypeError("Formal correctness requires the independent M1 Worker adapter")
         self.journal, self.adapter, self.enabled = journal, adapter, enabled
 
+    def execute_current_once(self, *, output_dir: Path):
+        """Deployment entry: load authoritative materials from this Job's PostgreSQL."""
+        from hcuopt.storage.formal_correctness_materials import (
+            PostgresFormalCorrectnessMaterialReader,
+        )
+
+        return self.execute_once(
+            load_materials=PostgresFormalCorrectnessMaterialReader(self.journal).load,
+            output_dir=output_dir,
+        )
+
     def execute_once(self, *, load_materials, output_dir: Path):
         """load_materials is deployment-owned, never an HTTP payload callback.
 
         It must load current authoritative (Round, all frozen build members,
         M1 payload), including trusted target/source/hotspot/Stage0 records.
-        This function does not implement that deployment-specific loader.
+        Deployments should use execute_current_once for the PostgreSQL loader.
         """
         if not self.enabled:
             raise Conflict("Formal correctness consumer is disabled")

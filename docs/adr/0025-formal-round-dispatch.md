@@ -421,6 +421,15 @@ Producer/日志为明确 CPU 夹具；Linux PostgreSQL 组合 25 passed（34.57 
 过期/停止后留存清理证据、释放后结算失败再恢复、一次释放/结算及 Round 不越级推进。
 这两组分层验证不是同机真实 HCU 全链。Ruff 通过。
 
-部署权威资料加载器尚未提供，实时进程截止/停止协作、异常清理与人工恢复仍待接线；
+部署权威资料加载器已提供：`execute_current_once` 从同一 PostgreSQL 加载领取 Job、
+冻结 Family、真实 Artifact/Source、干净且冻结的 Baseline、Target、Hotspot 及 Formal
+Stage0 报告引用。校验 Owner/Lease/Fence、源码父子关系、环境指纹和报告 Hash；
+缺失报告、脏源码或未冻结基线拒绝加载。加载不授予执行权限，Consumer 仍复检活租约，
+执行前再次加载并比较完整输入，已记录结果可在停止后只补账而不重新执行。
+资料中的文件内容由独立 M1 验证器校验，数据库引用检查不替代文件证据验证。
+该接线回归：本地 23 passed；Linux/Python 3.10/PostgreSQL 25 passed（34.40 秒），
+Ruff 通过。使用随机隔离 schema 和明确 fixture Stage0 报告引用，不代表 HCU 验收。
+
+实时进程截止/停止协作、异常清理与人工恢复仍待接线；
 Consumer 不会硬中断运行中的 Producer，不能仅靠 Lease 到期认为进程停止。
 生产关闭、ADR 待审，不据此宣称实机验收或整轮优化完成。

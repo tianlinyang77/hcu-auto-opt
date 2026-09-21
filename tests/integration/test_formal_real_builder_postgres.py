@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
+from psycopg.errors import RaiseException
+from psycopg.types.json import Jsonb
 
 from hcuopt.adapters.build_cache import LocalBuildCache
 from hcuopt.adapters.formal_candidate_builder import FormalRoundCandidateBuilder
@@ -40,6 +42,8 @@ from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
 from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
 from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLease
+from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
+from hcuopt.targets import target_fingerprint
 from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
@@ -70,10 +74,11 @@ def real_sources(tmp_path, monkeypatch):
     git(origin, "commit", "-m", "test source")
     output = tmp_path / "build-output"
     manager = GitSourceManager(profile)
-    baseline = manager.prepare_baseline(source_helpers.target_for(
+    target_spec = source_helpers.target_for(
         origin, tmp_path / "baseline", git(origin, "rev-parse", "HEAD"),
-    ), output)
-    digests = {"baseline-source": baseline.source_hash}
+    )
+    baseline = manager.prepare_baseline(target_spec, output)
+    digests = {"baseline-source": baseline.source_hash, "target": target_fingerprint(target_spec)}
     contents = [b"def free_v1(value):\n    return value\n",
                 b"def free_v2(value):\n    return value + 0\n"]
     for label, candidate_id, content in zip(
@@ -95,6 +100,15 @@ def real_sources(tmp_path, monkeypatch):
         # Set up test authority before Intent signing/dispatch; never rewrite frozen intake.
         old_seed(repo, coordinator, memory)
         with repo.connection() as conn:
+            conn.execute("UPDATE target_snapshots SET specification = %s",
+                         (Jsonb(target_spec.model_dump(mode="json")),))
+            conn.execute(
+                "UPDATE stage0_evidence SET report = report || jsonb_build_object("
+                "'machine_report_uri', 'fixture://stage0-report', "
+                "'machine_report_hash', %s::text), "
+                "evidence = evidence || jsonb_build_object('input_digest', %s::text)",
+                ("sha256:" + "a" * 64, "sha256:" + "b" * 64),
+            )
             row = conn.execute(
                 "SELECT snapshot_id FROM source_snapshots WHERE kind = 'baseline'"
             ).fetchone()
@@ -260,6 +274,36 @@ def test_real_builder_to_budget_publication_and_job_completion(
         assert (resource["expires_at"] - claimed["claimed_at"]).total_seconds() <= 30
     lease.assert_live(claimed["job_id"], **checkpoint)
     journal = PostgresFormalCorrectnessJournal(lease, claimed["job_id"], **checkpoint)
+    reader = PostgresFormalCorrectnessMaterialReader(journal)
+    loaded_round, loaded_members, payload = reader.load()
+    assert loaded_round.round_id == frozen["round_id"]
+    assert len(loaded_members) == 2
+    assert payload["candidate_id"] == str(plans.FIRST_CANDIDATE_ID)
+    assert payload["artifact"]["content_hash"] == job["payload"]["artifact_hash"]
+    assert payload["baseline_source"]["source_hash"] == real_sources["baseline"].source_hash
+    # Missing authoritative report blocks loading; restore only this isolated fixture.
+    with repo.connection() as conn:
+        conn.execute("UPDATE stage0_evidence SET report = report - 'machine_report_uri'")
+    with pytest.raises(Conflict, match="hashed Stage0"):
+        reader.load()
+    with repo.connection() as conn:
+        conn.execute("UPDATE stage0_evidence SET report = report || "
+                     "'{\"machine_report_uri\": \"fixture://stage0-report\"}'::jsonb")
+    assert reader.load()[2] == payload
+    for table, column, changed, restored, reason in [
+        ("source_snapshots", "clean", False, True, "ancestry"),
+    ]:
+        with repo.connection() as conn:
+            conn.execute(f"UPDATE {table} SET {column} = %s", (changed,))
+        with pytest.raises(Conflict, match=reason):
+            reader.load()
+        with repo.connection() as conn:
+            conn.execute(f"UPDATE {table} SET {column} = %s", (restored,))
+    assert reader.load()[2] == payload
+    # The database itself prohibits unfreezing an existing baseline.
+    with pytest.raises(RaiseException, match="immutable"):
+        with repo.connection() as conn:
+            conn.execute("UPDATE baseline_epochs SET frozen = false")
     input_hash = "sha256:" + "c" * 64
     with ThreadPoolExecutor(max_workers=2) as pool:
         starts = list(pool.map(journal.begin, [input_hash] * 2))

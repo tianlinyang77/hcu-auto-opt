@@ -129,6 +129,17 @@ def test_disabled_consumer_never_loads_materials(tmp_path):
     producer.produce_manual_correctness_evidence.assert_not_called()
 
 
+def test_deployment_entry_uses_database_reader(tmp_path, monkeypatch):
+    from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
+
+    consumer, journal, producer, kwargs = setup(tmp_path)
+    loader = Mock(return_value=kwargs["load_materials"]())
+    monkeypatch.setattr(PostgresFormalCorrectnessMaterialReader, "load", loader)
+    assert consumer.execute_current_once(output_dir=kwargs["output_dir"]).verdict == "correct"
+    assert loader.call_count == 2
+    assert producer.produce_manual_correctness_evidence.call_count == 1
+
+
 def test_changed_materials_after_journal_prevent_execution(tmp_path):
     consumer, journal, producer, kwargs = setup(tmp_path)
     original = kwargs["load_materials"]()
