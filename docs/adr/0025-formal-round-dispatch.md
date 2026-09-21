@@ -213,3 +213,17 @@ Consumer.execute_current_once 不接收调用方提供的 Round/Member/Context �
 Artifact；正式构建须独立接入，不能放宽 Scripted 的保护来复用。现有通用预算存储
 还要求 queued Job/Attempt，正式 Consumer 尚未创建该 Job；具体预算部署适配也需接线。
 本次保持两处约束不变，不写假制品或通用 Job，不宣称生产轮次已可执行。
+
+## 2026-09-21：Formal business 候选复用真实 Overlay 构建（仍 Proposed）
+
+新增默认关闭的 FormalRoundCandidateBuilder，要求 Formal intake_closed/building、
+冻结 Candidate Family、business 类型、未构建成员及干净 Baseline。先核对候选包
+Store 身份、Manifest Hash、Package Hash、热点与替换点，再调用现有
+ManualOverlayCandidateBuilder；不派生或放宽 Scripted Builder。
+构建后重验真实 Source/Artifact 结果、来源 Profile 和冻结 Manifest，返回既有
+RoundCandidateBuildTerminal 与完整 ManualCandidateBuildResult，不另造制品格式。
+
+只构建启动 Overlay，不编译 GPU kernel，不产生正确性/性能结论。异常直接失败，
+worktree 清理由原 Builder 的 finally 保证，不合成成功或伪造失败证据 Hash。
+该适配器不验部署授权、不预留预算、不写数据库；必须由后续受控构建 Worker 调用。
+尚待正式结果原子落库、预算与恢复语义、正确性推进及 Family 冻结串联。
