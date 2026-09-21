@@ -23,6 +23,7 @@ from hcuopt.contracts.platform_v1 import (
     SourceSnapshot,
     TargetSpec,
 )
+from hcuopt.deployment.guarded_correctness_command import run_guarded_correctness_command
 from hcuopt.domain.enums import LeaseScope
 from hcuopt.domain.errors import ExecutionSafetyError
 from hcuopt.evaluation.m1_protocol import (
@@ -630,6 +631,9 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         output_dir: Path,
     ) -> M1CorrectnessEvidenceSubmission:
         job = _job_context(payload, LeaseScope.SHARED, self.deployment_policy)
+        assert_live = job.get("assert_live_lease")
+        if assert_live is not None and not callable(assert_live):
+            raise ExecutionSafetyError("correctness live lease guard must be callable")
         target = TargetSpec.model_validate(payload["target"])
         if (
             target != self.target
@@ -673,6 +677,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
                     spec_bytes=file_uri_to_path(spec_file.uri).read_bytes(),
                     run_root=run_root,
                     context=context,
+                    assert_live=assert_live,
                 )
             )
             executions.append(
@@ -684,15 +689,29 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
                     spec_bytes=file_uri_to_path(spec_file.uri).read_bytes(),
                     run_root=run_root,
                     context=context,
+                    assert_live=assert_live,
                 )
             )
         except BaseException as exc:
             failure = exc
         finally:
-            cleanup = {
-                "fence": self.cleaner.fence(str(job["resource_id"]), int(job["fencing_token"])),
-                "health": self.cleaner.health_check(str(job["resource_id"])),
-            }
+            cleanup = {}
+            for name, action in (
+                ("fence", lambda: self.cleaner.fence(
+                    str(job["resource_id"]), int(job["fencing_token"]),
+                )),
+                ("health", lambda: self.cleaner.health_check(str(job["resource_id"]))),
+            ):
+                try:
+                    cleanup[name] = dict(action())
+                except Exception as exc:
+                    cleanup[name] = {
+                        "resource_id": str(job["resource_id"]),
+                        "fencing_token": int(job["fencing_token"]),
+                        "fenced" if name == "fence" else "healthy": False,
+                        "error_type": type(exc).__name__,
+                    }
+                    failure = failure or ExecutionSafetyError("correctness cleanup is unconfirmed")
         if failure is not None:
             write_evidence(
                 run_root / "failure.json",
@@ -771,6 +790,7 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         spec_bytes: bytes,
         run_root: Path,
         context: M1VerificationContext,
+        assert_live: Callable[[], None] | None = None,
     ) -> M1ProcessEvidence:
         variant_root = run_root / variant
         cache_root = run_root / "cache" / variant
@@ -813,16 +833,16 @@ class Nmz36M1AllocatorCorrectnessEvidenceProducer(M1CorrectnessEvidenceProducer)
         )
         if artifact is not None:
             argv.extend(("--expected-artifact-hash", artifact.content_hash))
-        completed = subprocess.run(
+        completed = run_guarded_correctness_command(
             tuple(argv),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=self.protocol.protocol.max_execution_seconds,
-            check=False,
-            shell=False,
+            assert_live=assert_live or (lambda: None),
+            stdout_path=variant_root / "stdout.log",
+            stderr_path=variant_root / "stderr.log",
         )
-        stdout_ref = write_evidence_bytes(variant_root / "stdout.log", completed.stdout)
-        write_evidence_bytes(variant_root / "stderr.log", completed.stderr)
+        stdout_ref = _raw_reference(
+            variant_root / "stdout.log", _sha256(variant_root / "stdout.log"),
+        )
         observations = []
         for raw_line in completed.stdout.decode("utf-8", errors="strict").splitlines():
             value = json.loads(raw_line)

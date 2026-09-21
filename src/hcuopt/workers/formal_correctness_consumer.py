@@ -92,11 +92,16 @@ class FormalCorrectnessConsumer:
             if current != snapshot:
                 raise Conflict("Formal correctness durable materials changed before invocation")
             started = time.monotonic()
-            result = self.adapter.run_manual_correctness(payload, output_dir)
+            # Runtime callbacks are deployment-owned, not serialized evidence or user input.
+            execution_payload = {**payload, "_job_context": {
+                **payload["_job_context"],
+                "assert_live_lease": lambda: journal.lease.assert_live(journal.job_id, **owner),
+            }}
+            result = self.adapter.run_manual_correctness(execution_payload, output_dir)
             elapsed = time.monotonic() - started
             # Retain completed evidence even after stop/expiry; do not run a second time.
             journal.record_result(input_hash, result, wall_seconds=elapsed)
-        except Exception:
+        except BaseException:
             journal.mark_unknown(input_hash)
             raise
         # A settlement/release failure retains the known result for reconciliation.

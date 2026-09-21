@@ -110,6 +110,25 @@ def test_unknown_producer_failure_cannot_retry(tmp_path):
     assert producer.produce_manual_correctness_evidence.call_count == 1
 
 
+def test_runtime_callback_is_trusted_and_interrupt_keeps_unknown(tmp_path):
+    consumer, journal, producer, kwargs = setup(tmp_path)
+    original_payload = kwargs["load_materials"]()[2]
+
+    def interrupt(payload, *args):
+        guard = payload["_job_context"]["assert_live_lease"]
+        guard()
+        raise KeyboardInterrupt()
+
+    producer.produce_manual_correctness_evidence.side_effect = interrupt
+    with pytest.raises(KeyboardInterrupt):
+        consumer.execute_once(**kwargs)
+    assert "assert_live_lease" not in original_payload["_job_context"]
+    assert journal.lease.assert_live.call_count == 2
+    assert "formal_correctness_unknown" in journal.events
+    with pytest.raises(Conflict, match="uncertain"):
+        consumer.execute_once(**kwargs)
+
+
 def test_wrong_claimed_artifact_never_invokes_producer(tmp_path):
     consumer, journal, producer, kwargs = setup(tmp_path)
     journal.job["payload"]["artifact_hash"] = "sha256:" + "f" * 64

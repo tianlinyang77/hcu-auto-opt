@@ -430,6 +430,19 @@ Stage0 报告引用。校验 Owner/Lease/Fence、源码父子关系、环境指�
 该接线回归：本地 23 passed；Linux/Python 3.10/PostgreSQL 25 passed（34.40 秒），
 Ruff 通过。使用随机隔离 schema 和明确 fixture Stage0 报告引用，不代表 HCU 验收。
 
-实时进程截止/停止协作、异常清理与人工恢复仍待接线；
-Consumer 不会硬中断运行中的 Producer，不能仅靠 Lease 到期认为进程停止。
+正确性 Producer 已接运行中停止协作：Consumer 只在调用时注入可信租约检查回调，
+不把函数写入持久化输入。reference/candidate 命令启动前、等待中及退出后均检查；
+等待片段最多 0.5 秒，单次只读检查最多等待 5 秒，并受本次命令剩余截止时间约束。
+检查超时/异常或协议截止触发时，终止并等待本次 CLI，保留 stdout/stderr，再执行
+原有 Resource/Fence 标签限定的容器清理与健康检查。CLI 退出不是容器已清理证明。
+清理步骤抛错也保留失败回执并继续健康检查；Consumer 中断进入 unknown，不自动重试、
+释放或推进 Round。已知结果仍走原有一次结算流程。
+
+本次回归：Windows CPU 45 passed（10.44 秒）；Linux/Python 3.10 CPU 45 passed
+（3.80 秒）；隔离 PostgreSQL 25 passed（35.42 秒）；Ruff 通过。
+覆盖真实 CPU 子进程终止、停止/失租/检查故障、截止、检查阻塞、双阶段清理失败留证、
+KeyboardInterrupt 不重试。GPU 进程和容器清理仍需实机验证，不能外推 CPU 结论。
+宿主进程被 SIGKILL/主机失联不在协作停止保证内；unknown 的人工核查与恢复入口仍待接线，
+过期本身不代表安全释放。检查阻塞可能留下一个只读 daemon 线程直到底层调用返回，
+不会继续启动命令或自行释放资源。
 生产关闭、ADR 待审，不据此宣称实机验收或整轮优化完成。
