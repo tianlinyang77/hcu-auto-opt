@@ -178,7 +178,7 @@ def test_handoff_still_rejects_duplicate_current_round_audit(handoff_case):
         driver.handoff_family(entries=entries)
 
 
-def test_search_reader_refuses_to_close_before_each_correct_member_has_receipt(
+def test_search_reader_refuses_to_close_before_full_search_materials_exist(
     handoff_case, tmp_path,
 ):
     """A correctness handoff alone must never masquerade as performance evidence."""
@@ -188,5 +188,7 @@ def test_search_reader_refuses_to_close_before_each_correct_member_has_receipt(
         driver.runtime.claims, driver.intent_id, driver.worker_id, driver.claim_token,
         M2FormalPhaseExecutionReceiptStore(tmp_path / "formal-search-receipts"),
     ))
-    with pytest.raises(Conflict, match="terminal Search receipt"):
+    # This fixture deliberately has neither the B-phase authority context nor a
+    # Search receipt.  Both are required; a partial handoff is not a closeable batch.
+    with pytest.raises(Conflict):
         reader.load()
