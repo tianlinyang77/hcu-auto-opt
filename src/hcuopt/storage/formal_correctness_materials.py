@@ -3,6 +3,7 @@
 """Read-only deployment loader for Formal correctness; no user-supplied payload."""
 
 import re
+from contextlib import nullcontext
 from uuid import UUID
 
 from hcuopt.adapters.m1_verification import _correctness_context
@@ -17,7 +18,7 @@ class PostgresFormalCorrectnessMaterialReader:
     def __init__(self, journal: PostgresFormalCorrectnessJournal):
         self.journal = journal
 
-    def load(self):
+    def load(self, *, connection=None):
         """Load all identities under one transaction; execution separately checks live lease.
 
         Allows exact historical result replay after stop/expiry; this method alone
@@ -26,7 +27,9 @@ class PostgresFormalCorrectnessMaterialReader:
         journal = self.journal
         jobs = journal.lease.jobs
         repo = jobs.claims.dispatcher.repository
-        with repo.connection() as conn:
+        # A deployment handoff may reuse its publication transaction, avoiding
+        # a separate connection blocked on its own Intent lock.
+        with (repo.connection() if connection is None else nullcontext(connection)) as conn:
             intent = jobs.claims._lock_deployment_intent(conn, jobs.intent_id)
             job = conn.execute(
                 "SELECT * FROM jobs WHERE job_id = %s FOR SHARE", (journal.job_id,)

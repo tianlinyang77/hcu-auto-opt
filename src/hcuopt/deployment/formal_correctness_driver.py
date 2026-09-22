@@ -118,3 +118,9 @@ class FormalCorrectnessDriver:
         journal = self.prepare(candidate_id=candidate_id, executor_id=executor_id,
                                wall_seconds=wall_seconds)
         return self.execute_prepared(journal=journal, adapter=adapter, output_dir=output_dir)
+
+    def handoff_family(self, *, entries):
+        """Reverify every completed member and atomically make Search eligible."""
+        from hcuopt.deployment.formal_correctness_handoff import FormalCorrectnessHandoff
+
+        return FormalCorrectnessHandoff(self).execute(entries=entries)
