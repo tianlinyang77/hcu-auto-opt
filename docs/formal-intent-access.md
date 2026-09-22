@@ -199,3 +199,62 @@ Linux/Python 3.10/PostgreSQL 组合 81 passed（44.84 秒）；Ruff 通过。
 远程包包含本轮工作区增量，不是之前 HEAD 的纯净快照。
 Windows 新进程导入须显式设置本仓库 `src` 为 PYTHONPATH，避免命中其他 checkout
 的已安装包；在该设置下完成独立进程导入检查。
+
+### 配置驱动的本机服务入口（2026-09-22）
+
+`python -m hcuopt.deployment.formal_service` 自动装配真实
+`CandidateSourcePackageStore` / `BusinessCandidateFamilyVerifier`、磁盘预览/B/D
+授权存储和 PostgreSQL repository。不再要求操作者手写 Python 对象接线。
+启动前读取候选包实际字节并校验 Family，随后进行只读数据库结构检查。
+缺包、包内容篡改、Store 身份不符、过期授权或 schema 不匹配均拒绝启动。
+编译阶段仍会重新校验包；启动前通过不是对未来磁盘内容的永久担保。
+
+管理员准备 `service.json`（64 KiB 上限，未知字段拒绝）：
+
+```json
+{
+  "schema_version": "formal-service-configuration-v1",
+  "compiler_path": "compiler.json",
+  "trust_path": "trust.json",
+  "capabilities_path": "capabilities.json",
+  "package_root": "packages",
+  "preview_root": "previews",
+  "authority_root": "authorities",
+  "static_root": "web",
+  "package_profile": "<approved-adapter-profile>",
+  "store_id": "<approved-store-id>",
+  "store_hash": "<approved-sha256-identity>",
+  "allowed_overlay_roots": ["<approved-source-root>"],
+  "approved_mount_targets": {"<approved-replacement-point>": "<approved-mount-target>"},
+  "port": 4205
+}
+```
+
+这是字段示例，不是可用的生产授权；尖括号内容必须取自已审定部署资料。
+目录须预先存在，位于部署根目录内且不是链接；`web` 须包含构建后的 `index.html`
+和 `assets/`。配置文件、存储根及父目录由管理员保护，不接受浏览器上传。
+数据库连接只通过 `HCUOPT_DATABASE_URL` 环境配置注入，不写入这个 JSON 或命令行。
+配置中也不包含模型 API Key 或签名私钥。
+
+```bash
+python -m hcuopt.deployment.formal_service \
+  --deployment-root /srv/hcuopt/formal \
+  --configuration service.json \
+  --source-commit <independently-pinned-release-commit>
+```
+
+应使用与发布 Commit 对应的安装包/源码运行；CLI 参数匹配本身不证明安装代码未变。
+入口固定监听 `127.0.0.1`，不提供外网监听、自动迁移、自动签署或启用派发的开关。
+预检错误输出脱敏错误码，不输出 DSN 或原始配置异常。Ctrl+C 正常停止服务。
+
+此入口提供 Formal Intent 管理 HTTP 服务，不启动 Agent、Build、Correctness 或
+Performance worker，也不替代最终裁决/签核服务。已有签名 capabilities 继续控制
+Intent 操作权限；空 capabilities 仅允许展示静态页，不能提交合法 Intent。
+因此服务能启动不等于完整真实优化任务已跑通。
+
+新增 PostgreSQL 联验使用合成授权、真实临时候选包和隔离 schema，实际启动
+Uvicorn 临时本机端口，验证 HTTP 页面、跨站拦截、没有自动创建 Job/dispatch/claim，
+最后停止服务。不将此测试称为生产页面部署、真实模型调用或 HCU 验收。
+
+本轮验证：本地组合 52 passed；Linux/Python 3.10/PostgreSQL 组合 89 passed
+（46.64 秒）；Ruff 通过。远程测试包包含本轮工作区增量。
