@@ -74,7 +74,16 @@ def fixture():
         "formal_round_evidence_bundles": dict(
             common,
             payload_hash=source.evidence_bundle_hash,
-            payload={"multiple_comparison_id": str(comparison_id)},
+            payload={
+                "multiple_comparison_id": str(comparison_id),
+                "summary": {
+                    "endpoint_selection": {
+                        "rule": "frozen_search_rank_after_batch_d_v1",
+                        "selected_candidate_id": str(source.candidate_id),
+                        "status": "selected",
+                    },
+                },
+            },
         ),
         "artifacts": dict(
             task_id=source.task_id,
@@ -154,3 +163,28 @@ def test_missing_durable_records_fail_closed():
             EndpointValidationRepositoryMixin._verify_formal_endpoint_source(
                 Connection(missing), source
             )
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        None,
+        {},
+        {
+            "rule": "frozen_search_rank_after_batch_d_v1",
+            "status": "selected",
+            "selected_candidate_id": str(uuid4()),
+        },
+        {
+            "rule": "holdout_best",
+            "status": "selected",
+        },
+    ],
+)
+def test_source_requires_signed_search_selection(selection):
+    source, rows = fixture()
+    rows["formal_round_evidence_bundles"]["payload"]["summary"] = {
+        "endpoint_selection": selection,
+    }
+    with pytest.raises(Conflict, match="Search-selected"):
+        EndpointValidationRepositoryMixin._verify_formal_endpoint_source(Connection(rows), source)

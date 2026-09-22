@@ -94,6 +94,13 @@ class EndpointValidationRepositoryMixin:
         }, "Signoff")
         evidence = rows["formal_round_evidence_bundles"]
         require(evidence, {**common, "payload_hash": source.evidence_bundle_hash}, "Evidence")
+        selection = evidence["payload"].get("summary", {}).get("endpoint_selection")
+        if not isinstance(selection, dict) or (
+            selection.get("rule") != "frozen_search_rank_after_batch_d_v1"
+            or selection.get("status") != "selected"
+            or selection.get("selected_candidate_id") != str(source.candidate_id)
+        ):
+            raise Conflict("Formal endpoint Candidate is not the signed Search-selected winner")
         require(rows["artifacts"], {
             "task_id": source.task_id, "candidate_id": source.candidate_id,
             "content_hash": source.artifact_hash, "synthetic": False,

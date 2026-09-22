@@ -70,3 +70,15 @@ nmz36 CPU 验证容器的 SSH 本次连接超时，未在那里执行测试，�
 
 新增来源拒绝测试与既有 Endpoint 回归合计 59 passed，Ruff 通过。
 BW20 SSH 连接超时，本次没有实机执行或新的性能结论。
+
+### Search 排名承接增量
+
+新增 `formal-search-selection-v1`，绑定 Round、Artifact Family、规则 Hash 和 Search
+测量引用；按 Search mean effect 降序、UUID 升序确定顺序。Formal Finalizer 从已校验
+Hash 的 Search 输入读取排名，在批级 D 通过的成员中选择一个，将选择结果写进待签署
+EvidenceBundle。没有通过成员时明确 `not_applicable`；旧摘要不自动获得新资格。
+仓库来源校验进一步要求候选就是签署材料中的 Search 入选者。
+
+该代码已接 Finalizer，但 Search producer 尚需实际产出新格式，Campaign/Worker 写链仍未
+开放。此增量不代表实机或全链验收。针对性回归 55 passed、1 skipped，Ruff 通过；
+BW20 SSH 仍超时。没有额外模型请求，也未操作 HCU 或他人进程。
