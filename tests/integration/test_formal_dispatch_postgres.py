@@ -2,6 +2,7 @@
 
 """Real transactions and authority rows; signatures and source inputs are fixtures."""
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -182,9 +183,38 @@ def dispatch_case(isolated_dsn, tmp_path, monkeypatch):  # type: ignore[no-untyp
 
     from hcuopt.contracts.m2_formal_start_v1 import FormalStartIntentResult
     from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
+    from hcuopt.operator.formal_start_store import (
+        DeploymentFormalStartAuthorityStore,
+        FileFormalStartPreviewStore,
+    )
     from tests.unit.test_formal_start_management_api import TOKEN
 
-    runtime = FormalDeploymentRuntime(repository, management, enabled=True)
+    memory_store = coordinator.object_store
+    preview_root, authority_root = tmp_path / "previews", tmp_path / "authorities"
+    previews = FileFormalStartPreviewStore(preview_root)
+    previews.publish_preview(memory_store.preview)
+    authorities = DeploymentFormalStartAuthorityStore(authority_root, preview_store=previews)
+    authorities.publish_execution_authority(memory_store.execution)
+    authorities.publish_evaluation_authority(memory_store.evaluation)
+    access_path = tmp_path / "capabilities.json"
+    capability = management.capabilities[0]
+    access_path.write_text(json.dumps({
+        "schema_version": "formal-intent-capabilities-v1", "capabilities": [{
+            "token_sha256": capability.token_sha256,
+            "assertion": capability.assertion.model_dump(mode="json"), "submission": payload,
+        }],
+    }), encoding="utf-8")
+
+    def reload_runtime():
+        return FormalDeploymentRuntime.from_deployment_files(
+            repository, compiler=coordinator.compiler,
+            object_store=DeploymentFormalStartAuthorityStore(
+                authority_root, preview_store=FileFormalStartPreviewStore(preview_root),
+            ), deployment_root=tmp_path, trust_path=tmp_path / "public-trust.json",
+            capabilities_path=access_path, enabled=True, clock=coordinator.clock,
+        )
+
+    runtime = reload_runtime()
     static_root = tmp_path / "runtime-web"
     (static_root / "assets").mkdir(parents=True)
     (static_root / "index.html").write_text("CPU integration fixture", encoding="utf-8")
@@ -196,6 +226,15 @@ def dispatch_case(isolated_dsn, tmp_path, monkeypatch):  # type: ignore[no-untyp
         )
         assert response.status_code == 200, response.text
         result = FormalStartIntentResult.model_validate(response.json())
+    runtime = reload_runtime()
+    with TestClient(runtime.console(static_root=static_root,
+                                   browser_origin="http://127.0.0.1:4198"),
+                    base_url="http://127.0.0.1:4198") as client:
+        replay = client.post("/v1/operator/formal-start-intents", json=payload,
+                             headers={"Authorization": f"Bearer {TOKEN}"})
+        assert replay.status_code == 200, replay.text
+        replayed = FormalStartIntentResult.model_validate(replay.json())
+        assert replayed.replayed and replayed.intent_id == result.intent_id
     assert result.state == "ready_for_round_creation"
     return runtime.dispatcher, result.intent_id
 

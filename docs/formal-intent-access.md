@@ -141,3 +141,25 @@ owner 签名篡改、内容篡改和不匹配的轮换密钥在建立 coordinato
 本轮最终验证：本地组合 42 passed（4.71 秒），Linux/Python 3.10/PostgreSQL
 组合 61 passed（41.42 秒），Ruff 通过。重建验签器和 runtime 复用同一 Intent，
 不代表重启了真实数据库或生产服务。没有生成生产密钥、签署生产窗口或访问 HCU。
+
+### 预览与授权磁盘重载（2026-09-22）
+
+`FileFormalStartPreviewStore` 补齐原先只有 Protocol 的部署预览存储。
+管理员将 compiler 生成的预览传入 `publish_preview`，按 UUID 原子发布固定字节；
+重复发布同内容幂等，同 ID 不同内容拒绝。读取重新解析 Contract 并核对完整计划 Hash，
+缺失、路径重定向、内容/身份不匹配拒绝。复用现有不可覆盖文件发布机制，单预览限制
+512 KiB，不提供 HTTP 上传入口或新的执行许可。
+
+与 `DeploymentFormalStartAuthorityStore(preview_store=...)` 配合，服务重建后可以从
+磁盘加载同一预览及 B/D 授权，而不依赖测试内存 Store。过期记录仍可用于审计读取，
+是否可执行继续由 coordinator 的当前时间及权威重验决定。存储根和父目录须由管理员
+保护；它不是抵御管理员恶意替换文件的签名存储系统。
+
+PostgreSQL 整合测试已改为：四方签名 → 预览/B/D 授权落盘 → 公钥/能力配置加载 →
+HTTP 创建 Intent → 重新实例化全部文件 Store、runtime 和 app → HTTP 重放同一 Intent →
+后续派发及构建测试。没有重启真实数据库或 OS 进程，测试 compiler、源负载和授权决策
+仍是夹具，不能将这条重载验证称为生产部署或 HCU 验收。
+
+验证：本地存储测试 8 passed / 1 skipped（Windows 符号链接测试跳过）；
+Linux/Python 3.10/PostgreSQL 整合 70 passed（44.74 秒），包括存储测试和上述
+文件重载后的 HTTP/派发/构建链，Ruff 通过。源库和生产服务未修改。
