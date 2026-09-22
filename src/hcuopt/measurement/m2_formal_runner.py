@@ -87,9 +87,7 @@ class M2FormalTargetLockRefreshProbe(Protocol):
 class M2FormalExecutionAuthorityReader(Protocol):
     """Deployment-owned re-read boundary for the exact A1 and A2a objects."""
 
-    def load_authorization(
-        self, authorization_id: UUID
-    ) -> FormalProfileWindowAuthorization: ...
+    def load_authorization(self, authorization_id: UUID) -> FormalProfileWindowAuthorization: ...
 
     def load_resolved_plan(self, resolved_plan_hash: str) -> FormalResolvedRoundPlan: ...
 
@@ -191,8 +189,7 @@ class M2FormalPhaseExecutionAdapter:
         request_hash = m2_formal_phase_execution_request_hash(request)
         if (
             self.adapter_profile.profile_id != request.binding.adapter_profile
-            or self.adapter_profile.profile_version
-            != request.binding.adapter_profile_version
+            or self.adapter_profile.profile_version != request.binding.adapter_profile_version
             or self.adapter_profile.profile_hash != request.binding.adapter_profile_hash
             or self.provenance.profile != self.adapter_profile.profile_id
             or self.provenance.adapter_version != self.adapter_profile.profile_version
@@ -348,6 +345,19 @@ class M2FormalPhaseExecutionAdapter:
                 }
             )
 
+        cleanup_uri, cleanup_hash = self._write_payload(
+            output_dir / "cleanup" / "terminal",
+            request.reservation.reservation_id,
+            {
+                "schema_version": "m2a-formal-phase-cleanup-v1",
+                "binding": request.binding.model_dump(mode="json"),
+                "status": record.status,
+                "cleanup_status": record.cleanup_status,
+                "cleanup_evidence": cleanup_evidence,
+                "synthetic": False,
+                "automatic_release_allowed": False,
+            },
+        )
         usage_uri, usage_hash = self._write_payload(
             output_dir / "budget" / "usage",
             request.reservation.reservation_id,
@@ -367,6 +377,14 @@ class M2FormalPhaseExecutionAdapter:
                 "producer_verdict": None,
                 "performance_conclusion": "not_measured",
             },
+        )
+        record = record.model_copy(
+            update={
+                "usage_evidence_uri": usage_uri,
+                "usage_evidence_hash": usage_hash,
+                "cleanup_evidence_uri": cleanup_uri,
+                "cleanup_evidence_hash": cleanup_hash,
+            }
         )
         settled = self.budget_authority.finalize(
             RoundBudgetFinalizeRequest(
@@ -457,9 +475,7 @@ class M2FormalPhaseExecutionAdapter:
                     "expired Formal Lease recovery failed closed"
                 ) from error
             if not self._cleanup_is_healthy(recovery, binding):
-                raise MeasurementSafetyError(
-                    "expired Formal Lease did not recover its resource"
-                )
+                raise MeasurementSafetyError("expired Formal Lease did not recover its resource")
             raise MeasurementSafetyError("Formal execution Lease expired and was recovered")
         if not (binding.window.starts_at <= now < binding.window.expires_at):
             raise MeasurementSafetyError("Formal execution is outside its approved window")
@@ -502,9 +518,7 @@ class M2FormalPhaseExecutionAdapter:
             or refresh.lease_id != binding.lease_id
             or refresh.fencing_token != binding.fencing_token
         ):
-            raise MeasurementSafetyError(
-                "Target Lock refresh and Formal execution bindings differ"
-            )
+            raise MeasurementSafetyError("Target Lock refresh and Formal execution bindings differ")
         if (
             refresh.synthetic
             or refresh.status != "matched"
@@ -625,8 +639,7 @@ class M2FormalPhaseExecutionAdapter:
             or resolved_member.source_package_store_hash != member.source_package_store_hash
             or resolved_member.source_package_ref.candidate_source_hash
             != member.candidate_source_hash
-            or resolved_member.source_package_ref.source_package_hash
-            != member.source_package_hash
+            or resolved_member.source_package_ref.source_package_hash != member.source_package_hash
             or resolved_member.source_package_ref.manifest_hash != member.source_manifest_hash
             or resolved_member.baseline_source_hash != member.baseline_source_hash
             or resolved_member.hotspot_id != round_authority.hotspot_id
