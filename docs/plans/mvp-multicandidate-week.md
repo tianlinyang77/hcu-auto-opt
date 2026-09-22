@@ -97,3 +97,14 @@ D verifier 重读证据，由 restart effects 计算 Search 排名，发布新�
 
 本地相关回归 62 passed、1 skipped，Ruff 通过。当前 verifier 为部署注入接口，尚未与
 后台消费者及实机 D adapter 组合运行；没有新 HCU 验收，也没有新增公开 HTTP 准入入口。
+
+### 复用实际 D 校验器
+
+新增 `FormalSearchVerifier`，绑定部署加载的 Round、候选、独立正确性上下文和性能
+上下文，复用 `M1CorrectnessVerifier` 与 `M1PerformanceVerifier` 重读原始证据。
+拒绝跨轮次、跨制品、过期 fencing 引用及 Search/Holdout 混用；不接受生产者的通过
+标记代替 D 复核。原始证据 Hash 或正确性 Hash 被改动时返回 invalid。
+
+CPU 测试已覆盖“原始证据文件 → 实际 D 校验器 → Search 排名 → Barrier 保存调用”，
+共 22 passed，Ruff 通过。证据文件来自测试夹具，不是新的 BW20 测量。
+数据库材料加载器与后台消费者仍未接入此桥接；本增量不表示实机闭环完成。
