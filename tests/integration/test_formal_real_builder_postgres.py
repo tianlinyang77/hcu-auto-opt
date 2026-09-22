@@ -26,14 +26,13 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.contracts.v1 import ManualCorrectnessResult, WorkerRegister
+from hcuopt.deployment.formal_correctness_driver import FormalCorrectnessDriver
 from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
 from hcuopt.domain.errors import Conflict
 from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
-from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
-from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
 from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLease
 from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
 from hcuopt.storage.formal_correctness_recovery import PostgresFormalCorrectnessRecovery
@@ -124,12 +123,16 @@ def test_real_builder_to_budget_publication_and_job_completion(
     dispatcher, intent_id = request.getfixturevalue("dispatch_case")
     dispatcher.create(intent_id)
     repo = dispatcher.repository
-    claims = PostgresFormalClaimStore(dispatcher, enabled=True)
+    runtime = FormalDeploymentRuntime(
+        repo, FormalStartManagement(dispatcher.coordinator, ()), enabled=True,
+    )
+    claims = runtime.claims
     claim = claims.claim(intent_id, "real-test-builder", ttl_seconds=300)
     token = claim["claim_token"]
-    correctness_jobs = PostgresFormalCorrectnessJobs(
-        claims, intent_id, "real-test-builder", token,
+    driver = FormalCorrectnessDriver(
+        runtime, intent_id=intent_id, worker_id="real-test-builder", claim_token=token,
     )
+    correctness_jobs = driver.jobs
     with pytest.raises(Conflict, match="frozen correctness"):
         correctness_jobs.enqueue(plans.FIRST_CANDIDATE_ID)
     for index, candidate_id in enumerate([plans.FIRST_CANDIDATE_ID, plans.SECOND_CANDIDATE_ID]):
@@ -150,10 +153,14 @@ def test_real_builder_to_budget_publication_and_job_completion(
         round_id=round_row["round_id"], candidate_family_hash=round_row["candidate_family_hash"],
         expected_artifact_family_hash=artifact_family_hash(round_row, members),
     )
-    frozen = repo.freeze_search_round_artifact_family(freeze)
+    frozen = driver.freeze_family(
+        expected_artifact_family_hash=freeze.expected_artifact_family_hash,
+    )
     assert frozen["state"] == "correctness"
     assert frozen["automatic_release_allowed"] is False
-    assert repo.freeze_search_round_artifact_family(freeze) == frozen
+    assert driver.freeze_family(
+        expected_artifact_family_hash=freeze.expected_artifact_family_hash,
+    ) == frozen
     with pytest.raises(Conflict, match="Hash"):
         repo.freeze_search_round_artifact_family(freeze.model_copy(update={
             "expected_artifact_family_hash": "sha256:" + "0" * 64,
@@ -198,7 +205,7 @@ def test_real_builder_to_budget_publication_and_job_completion(
         correctness_jobs.reserve(plans.SECOND_CANDIDATE_ID, wall_seconds=604801)
     with pytest.raises(Conflict):
         correctness_jobs.enqueue(uuid4())
-    lease = PostgresFormalCorrectnessLease(correctness_jobs, enabled=True)
+    lease = driver.lease
     reservation_id = reservations[0]["reservation"]["reservation_id"]
     with pytest.raises(Conflict, match="disabled"):
         PostgresFormalCorrectnessLease(correctness_jobs).claim(
@@ -247,8 +254,8 @@ def test_real_builder_to_budget_publication_and_job_completion(
 
     def concurrent_claim(_):
         try:
-            return lease.claim(plans.FIRST_CANDIDATE_ID, reservation_id,
-                               executor_id="formal-correctness")
+            return driver.prepare(candidate_id=plans.FIRST_CANDIDATE_ID,
+                                  executor_id="formal-correctness", wall_seconds=30)
         except Conflict:
             return None
 
@@ -256,7 +263,10 @@ def test_real_builder_to_budget_publication_and_job_completion(
         outcomes = list(pool.map(concurrent_claim, range(2)))
     successes = [outcome for outcome in outcomes if outcome is not None]
     assert len(successes) == 1
-    claimed = successes[0]
+    prepared_journal = successes[0]
+    with repo.connection() as conn:
+        claimed = conn.execute("SELECT * FROM jobs WHERE job_id = %s",
+                               (prepared_journal.job_id,)).fetchone()
     checkpoint = dict(executor_id="formal-correctness", token=claimed["claim_token"],
                       lease_id=claimed["lease_id"], fencing_token=claimed["fencing_token"])
     assert claimed["state"] == "running" and claimed["attempts"] == 1
@@ -266,7 +276,7 @@ def test_real_builder_to_budget_publication_and_job_completion(
         assert resource["expires_at"] <= claim["expires_at"]
         assert (resource["expires_at"] - claimed["claimed_at"]).total_seconds() <= 30
     lease.assert_live(claimed["job_id"], **checkpoint)
-    journal = PostgresFormalCorrectnessJournal(lease, claimed["job_id"], **checkpoint)
+    journal = prepared_journal
     reader = PostgresFormalCorrectnessMaterialReader(journal)
     loaded_round, loaded_members, payload = reader.load()
     assert loaded_round.round_id == frozen["round_id"]

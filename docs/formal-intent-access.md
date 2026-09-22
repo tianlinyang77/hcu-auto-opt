@@ -341,3 +341,31 @@ invocation JSON 契约为 `formal-build-invocation-v1`，字段是 `intent_id`�
 Linux/Python 3.10/PostgreSQL 115 passed（63.93 秒），Ruff 与独立 CLI 加载检查通过。
 包含首个候选完成后停止的测试：保留一个成功 Job/Artifact，不创建第二个构建 Job。
 远程测试包包含本轮工作区增量。没有生产库迁移、真实模型调用、HCU 执行或自动发布。
+
+### 构建到正确性阶段的驱动接线（2026-09-22）
+
+`FormalCorrectnessDriver` 复用同一 runtime 的 claims，提供以下显式操作：
+
+- `freeze_family(expected_artifact_family_hash=...)`：沿用原有完整制品集合冻结校验，
+  必须提供调用方核对过的 Hash，不自行宣称制品正确。
+- `prepare(candidate_id, executor_id, wall_seconds)`：复用原正确性预算和原子资源领取，
+  返回绑定准确 Job/token/lease/fencing 的 journal；不代表已取得物理隔离证明。
+- `execute_prepared(journal, adapter, output_dir)`：只接受本驱动的 journal 和匹配目标
+  Profile 的独立 M1 Correctness adapter，使用数据库材料入口执行。
+- `execute_candidate(...)`：单次串联准备与执行；adapter 类型、Profile 和真实来源
+  先验证再申请资源，不包含自动重试循环。
+
+重复 `prepare` 不接管 running/expired Job。若领取后响应丢失或执行状态未知，保留
+数据库所有权及预算，用既有 recovery 检查/恢复；禁止再次申请一个 attempt 掩盖旧任务。
+已经完成的证据沿原 journal 完成清理/结算；驱动不自行强制释放资源，也不自动进入
+性能、Holdout、裁决或发布。此轮没有增加可从 Web 指定任意可执行代码的接口。
+
+测试已将真实 Git/Overlay/PostgreSQL 链中的制品冻结、并发准备及后续恢复切换到
+该驱动入口，检查只有一个领取成功，原有资源隔离、过期、停止、结算和不明状态规则
+仍成立。驱动到 Consumer 的调用使用单元替身验证；M1 adapter 数值验证另用 CPU
+证据夹具测试。PostgreSQL 中的正确性结果仍是明确的存储测试结果，**没有运行 HCU**。
+生产 correctness producer 的部署接线和实际运行仍未完成，不能将控制面租约当成
+真实设备隔离验收，或将本轮结果称为真实 Agent 优化正确性通过。
+
+最终验证：本地相关组合 24 passed；Linux/Python 3.10/PostgreSQL 130 passed
+（66.11 秒）；Ruff、提交规范和独立进程导入检查通过。远程源码含本轮增量。
