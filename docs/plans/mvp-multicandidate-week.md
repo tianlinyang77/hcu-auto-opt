@@ -56,3 +56,17 @@
 验证：本轮 Endpoint 来源、旧 M1 控制面、D 裁决、签署身份及 Console 单元回归 44 passed；
 前端 Campaign 3 passed；Ruff 通过。新引用目前不接收于旧 Endpoint API，不改变现有签署。
 nmz36 CPU 验证容器的 SSH 本次连接超时，未在那里执行测试，不能报告 PostgreSQL 或 HCU 本轮验收。
+
+### 服务级来源校验增量
+
+已增加仓库层 `_verify_formal_endpoint_source`：在调用者事务中重读并锁定 Round、Task、
+人工签署、EvidenceBundle、Baseline、Artifact、Round 成员与批级 D 结果。拒绝未签署、
+错基线/候选/制品、合成证据，以及非 faster 的成员。它只检查来源资格，不创建 Job，
+也不等于已通过执行授权；尚未接入新 Campaign 写入口。
+
+发现现有 D `recommended_candidate_id` 按 Holdout 下界排序，不能直接作为本计划的
+服务级候选选择。历史结果保持不变；新路径必须根据冻结 Search 排名，在通过整批 D 的
+成员中选一个，并绑定进本轮签署材料。该选择及持久化接线仍待完成。
+
+新增来源拒绝测试与既有 Endpoint 回归合计 59 passed，Ruff 通过。
+BW20 SSH 连接超时，本次没有实机执行或新的性能结论。

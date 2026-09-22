@@ -23,6 +23,7 @@ from hcuopt.contracts.endpoint_control_v1 import (
     EndpointValidationRunCreate,
     endpoint_create_plan_hash,
 )
+from hcuopt.contracts.endpoint_source_v1 import FormalEndpointSource
 from hcuopt.domain.enums import (
     CandidateState,
     JobState,
@@ -38,6 +39,93 @@ from hcuopt.domain.transitions import transition_task
 
 class EndpointValidationRepositoryMixin:
     """Durable endpoint Run authority layered on the generic Job/Lease queue."""
+
+    @staticmethod
+    def _verify_formal_endpoint_source(
+        connection: Any, source: FormalEndpointSource,
+    ) -> None:
+        """Check durable provenance, not execution authority or winner selection.
+
+        Call inside the admission transaction. A passing reference alone must
+        never enqueue a job: frozen Search selection and the current execution
+        authorization must also pass before admitting a Formal Campaign.
+        """
+        queries = (
+            ("search_rounds", "round_id", source.round_id),
+            ("tasks", "task_id", source.task_id),
+            ("formal_round_signoffs", "round_signoff_id", source.round_signoff_id),
+            ("formal_round_evidence_bundles", "round_evidence_bundle_id",
+             source.round_evidence_bundle_id),
+            ("artifacts", "artifact_id", source.artifact_id),
+            ("baseline_epochs", "baseline_epoch_id", source.baseline_epoch_id),
+        )
+        rows = {}
+        for table, key, value in queries:
+            # Identifiers are exclusively the static literals above.
+            row = connection.execute(
+                f"SELECT * FROM {table} WHERE {key} = %s FOR SHARE", (value,),
+            ).fetchone()
+            if row is None:
+                raise Conflict(f"Formal endpoint source is missing {table}")
+            rows[table] = row
+
+        def require(row: dict, expected: dict, label: str) -> None:
+            if any(row.get(key) != value for key, value in expected.items()):
+                raise Conflict(f"Formal endpoint source {label} differs")
+
+        require(rows["search_rounds"], {
+            "task_id": source.task_id, "state": "completed", "run_mode": "formal",
+            "baseline_epoch_id": source.baseline_epoch_id,
+            "target_snapshot_id": source.target_snapshot_id,
+            "automatic_release_allowed": False,
+        }, "Round")
+        require(rows["tasks"], {
+            "state": "completed", "target_snapshot_id": source.target_snapshot_id,
+            "automatic_release_allowed": False,
+        }, "Task")
+        common = {"round_id": source.round_id, "task_id": source.task_id,
+                  "run_mode": "formal", "synthetic": False,
+                  "automatic_release_allowed": False}
+        require(rows["formal_round_signoffs"], {
+            **common, "decision": "approved",
+            "round_evidence_bundle_id": source.round_evidence_bundle_id,
+            "evidence_bundle_hash": source.evidence_bundle_hash,
+            "decision_artifact_hash": source.decision_artifact_hash,
+        }, "Signoff")
+        evidence = rows["formal_round_evidence_bundles"]
+        require(evidence, {**common, "payload_hash": source.evidence_bundle_hash}, "Evidence")
+        require(rows["artifacts"], {
+            "task_id": source.task_id, "candidate_id": source.candidate_id,
+            "content_hash": source.artifact_hash, "synthetic": False,
+        }, "Artifact")
+        require(rows["baseline_epochs"], {"task_id": source.task_id}, "Baseline")
+        member = connection.execute(
+            "SELECT * FROM round_candidates WHERE round_id = %s "
+            "AND candidate_id = %s FOR SHARE", (source.round_id, source.candidate_id),
+        ).fetchone()
+        if member is None:
+            raise Conflict("Formal endpoint Candidate is not a Round member")
+        require(member, {
+            "candidate_source_hash": source.candidate_source_hash,
+            "artifact_id": source.artifact_id, "artifact_hash": source.artifact_hash,
+        }, "Candidate")
+        comparison = connection.execute(
+            "SELECT * FROM formal_multiple_comparison_results WHERE round_id = %s FOR SHARE",
+            (source.round_id,),
+        ).fetchone()
+        if comparison is None:
+            raise Conflict("Formal endpoint source has no batch D result")
+        require(comparison, {"run_mode": "formal", "synthetic": False,
+                             "automatic_release_allowed": False}, "D authority")
+        if str(comparison["multiple_comparison_id"]) != str(
+            evidence["payload"].get("multiple_comparison_id")
+        ):
+            raise Conflict("Formal endpoint D result is not in signed evidence")
+        eligible = [item for item in comparison["payload"].get("candidate_results", ())
+                    if item.get("candidate_id") == str(source.candidate_id)
+                    and item.get("verdict") == "faster" and item.get("synthetic") is False]
+        if len(eligible) != 1:
+            raise Conflict("Formal endpoint Candidate did not pass batch D")
 
     @staticmethod
     def _verify_signed_m1(connection: Any, request: EndpointValidationRunCreate) -> None:
