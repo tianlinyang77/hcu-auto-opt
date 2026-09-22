@@ -82,3 +82,18 @@ EvidenceBundle。没有通过成员时明确 `not_applicable`；旧摘要不自�
 该代码已接 Finalizer，但 Search producer 尚需实际产出新格式，Campaign/Worker 写链仍未
 开放。此增量不代表实机或全链验收。针对性回归 55 passed、1 skipped，Ruff 通过；
 BW20 SSH 仍超时。没有额外模型请求，也未操作 HCU 或他人进程。
+
+网络恢复后的增量：BW20 API 健康，最新备份经独立恢复后 61 张表一致；Python 3.10
+CPU/PostgreSQL 回归 80 passed、12 subtests passed。详见
+[`mvp-recovery-regression-20260922.md`](../evidence/mvp-recovery-regression-20260922.md)。
+原库仍在 tmpfs，此处不是持久化切换或 HCU 验收完成。
+
+### Formal Search producer 增量
+
+新增 D 侧 `close_formal_search`，核对完整候选批及真实 RoundMeasurementRef，调用受信任
+D verifier 重读证据，由 restart effects 计算 Search 排名，发布新格式摘要后调用
+`record_formal_barrier`。无正收益正常关闭，D invalid 留在批内成为失败成员；缺引用、
+错阶段、错制品、结果错绑或清理证据不匹配均禁止保存 Barrier。
+
+本地相关回归 62 passed、1 skipped，Ruff 通过。当前 verifier 为部署注入接口，尚未与
+后台消费者及实机 D adapter 组合运行；没有新 HCU 验收，也没有新增公开 HTTP 准入入口。
