@@ -72,12 +72,21 @@ class LocalArtifactStore:
                 os.fsync(temporary.fileno())
             temporary_path.chmod(0o444)
             try:
-                os.link(temporary_path, destination)
+                if os.name == "nt":
+                    # Windows rename refuses an existing destination. Unlike a
+                    # hard link, it leaves no read-only temporary name to unlink.
+                    os.rename(temporary_path, destination)
+                else:
+                    os.link(temporary_path, destination)
             except OSError as error:
                 if error.errno != errno.EEXIST:
                     raise
         finally:
             if temporary_path is not None:
+                if os.name == "nt" and temporary_path.exists():
+                    # On collision/failure this is still our private temporary
+                    # file, never a hard link to the published immutable object.
+                    temporary_path.chmod(0o600)
                 temporary_path.unlink(missing_ok=True)
 
     @classmethod

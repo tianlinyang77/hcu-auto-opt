@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,31 @@ def test_publish_is_content_addressed_immutable_and_idempotent(tmp_path: Path) -
     assert published_path.stat().st_mode & 0o222 == 0
     assert first.metadata["immutable"] is True
     assert first.metadata["adapter_provenance"][-1]["capability"] == "artifact_store"
+    assert not list(store.root.rglob(".publish-*"))
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_atomic_publish_preserves_destination_and_cleans_temp(tmp_path, monkeypatch, collision):
+    source = tmp_path / "source"
+    source.write_bytes(b"new content")
+    destination = tmp_path / "destination"
+    if collision:
+        destination.write_bytes(b"existing content")
+        destination.chmod(0o444)
+    else:
+        def fail(*args):
+            raise OSError(errno.EIO, "injected publication failure")
+        monkeypatch.setattr(os, "rename" if os.name == "nt" else "link", fail)
+    if collision:
+        LocalArtifactStore._publish_atomic(source, destination)
+        assert destination.read_bytes() == b"existing content"
+        assert destination.stat().st_mode & 0o222 == 0
+    else:
+        with pytest.raises(OSError, match="injected publication failure"):
+            LocalArtifactStore._publish_atomic(source, destination)
+        assert not destination.exists()
+    assert source.read_bytes() == b"new content"
+    assert not list(tmp_path.glob(".publish-*"))
 
 
 def test_publish_rejects_manifest_hash_mismatch(tmp_path: Path) -> None:

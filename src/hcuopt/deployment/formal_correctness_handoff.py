@@ -66,8 +66,9 @@ class FormalCorrectnessHandoff:
             driver.lease._lock_authority(conn, prepared)
             previous = conn.execute(
                 "SELECT details FROM task_events WHERE task_id = %s "
-                "AND event_type = 'formal_correctness_family_handoff'",
-                (prepared.intent.task_id,),
+                "AND event_type = 'formal_correctness_family_handoff' "
+                "AND details->>'round_id' = %s",
+                (prepared.intent.task_id, str(prepared.intent.round_id)),
             ).fetchall()
             if previous:
                 if len(previous) != 1:

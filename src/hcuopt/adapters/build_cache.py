@@ -64,7 +64,10 @@ class LocalBuildCache:
                 os.fsync(temporary.fileno())
             temporary_path.chmod(0o444)
             try:
-                os.link(temporary_path, destination)
+                if os.name == "nt":
+                    os.rename(temporary_path, destination)
+                else:
+                    os.link(temporary_path, destination)
             except FileExistsError:
                 existing = destination.read_bytes()
                 if existing != encoded:
@@ -73,6 +76,8 @@ class LocalBuildCache:
                     ) from None
         finally:
             if temporary_path is not None:
+                if os.name == "nt" and temporary_path.exists():
+                    temporary_path.chmod(0o600)
                 temporary_path.unlink(missing_ok=True)
 
     def _entry_path(self, cache_key: str) -> Path:

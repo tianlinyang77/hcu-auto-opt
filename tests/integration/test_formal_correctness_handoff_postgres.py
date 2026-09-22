@@ -4,6 +4,7 @@
 
 import os
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -132,3 +133,43 @@ def test_atomic_handoff_and_refusals(handoff_case, monkeypatch, fault):
                             "'formal_correctness_family_handoff'").fetchone()["n"] == (
                                 0 if fault else 1
                             )
+
+
+def test_handoff_ignores_other_rounds_on_same_task(handoff_case):
+    driver, entries = handoff_case
+    repo = driver.runtime.repository
+    intent = repo.get_formal_start_intent(driver.intent_id)
+    historical_round = str(uuid4())
+    with repo.connection() as conn:
+        module._insert(conn, "task_events", {
+            "task_id": intent.task_id,
+            "event_type": "formal_correctness_family_handoff",
+            "details": {"round_id": historical_round, "historical_fixture": True},
+        })
+    report = driver.handoff_family(entries=entries)
+    assert report["round_id"] == str(intent.round_id)
+    assert driver.handoff_family(entries=list(reversed(entries))) == report
+    with repo.connection() as conn:
+        records = conn.execute(
+            "SELECT details FROM task_events WHERE task_id = %s "
+            "AND event_type = 'formal_correctness_family_handoff'",
+            (intent.task_id,),
+        ).fetchall()
+    assert len(records) == 2
+    assert {r["details"]["round_id"] for r in records} == {
+        historical_round, str(intent.round_id),
+    }
+
+
+def test_handoff_still_rejects_duplicate_current_round_audit(handoff_case):
+    driver, entries = handoff_case
+    report = driver.handoff_family(entries=entries)
+    repo = driver.runtime.repository
+    intent = repo.get_formal_start_intent(driver.intent_id)
+    with repo.connection() as conn:
+        module._insert(conn, "task_events", {
+            "task_id": intent.task_id,
+            "event_type": "formal_correctness_family_handoff", "details": report,
+        })
+    with pytest.raises(Conflict, match="duplicate audit records"):
+        driver.handoff_family(entries=entries)
