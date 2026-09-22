@@ -133,16 +133,39 @@ class FormalDeploymentRuntime:
         )
 
     def search_consumer(
-        self, *, intent_id, worker_id, claim_token, material_reader, verifier, publisher
+        self,
+        *,
+        intent_id,
+        worker_id,
+        claim_token,
+        verifier,
+        publisher,
+        material_reader=None,
+        receipt_store=None,
     ):
         """Bind D's Search close step to this Runtime's current dispatch claim.
 
-        The supplied reader must derive its batch from durable phase receipts and
-        correctness results. This factory does not accept browser-provided
-        candidates, acquire HCU, or grant endpoint execution permission.
+        A caller may supply a reviewed reader, or supply the registered receipt
+        Store and use the deployment reader. Both paths derive their batch from
+        durable phase receipts and correctness results. This factory does not
+        accept browser-provided candidates, acquire HCU, or grant endpoint
+        execution permission.
         """
+        from hcuopt.storage.formal_phase_journal import PostgresFormalPhaseJournal
+        from hcuopt.storage.formal_search_materials import (
+            PostgresFormalSearchBatchMaterialReader,
+        )
         from hcuopt.workers.formal_search_consumer import FormalSearchConsumer
 
+        if material_reader is None:
+            if receipt_store is None:
+                raise Conflict(
+                    "Formal Search runtime requires a durable receipt Store or reader"
+                )
+            journal = PostgresFormalPhaseJournal(
+                self.claims, intent_id, worker_id, claim_token, receipt_store
+            )
+            material_reader = PostgresFormalSearchBatchMaterialReader(journal)
         return FormalSearchConsumer(
             self.claims,
             intent_id=intent_id,

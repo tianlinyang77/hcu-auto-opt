@@ -125,6 +125,26 @@ def test_search_factory_shares_claims_and_stays_disabled(tmp_path):
         )
 
 
+def test_search_factory_builds_its_durable_reader(tmp_path):
+    from hcuopt.measurement.m2_formal_receipt import M2FormalPhaseExecutionReceiptStore
+    from hcuopt.storage.formal_search_materials import PostgresFormalSearchBatchMaterialReader
+
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    store = M2FormalPhaseExecutionReceiptStore(tmp_path / "search-receipts")
+    consumer = runtime.search_consumer(
+        intent_id=None,
+        worker_id="search-worker",
+        claim_token=None,
+        receipt_store=store,
+        verifier=object(),
+        publisher=object(),
+    )
+    assert isinstance(consumer.material_reader, PostgresFormalSearchBatchMaterialReader)
+    assert consumer.material_reader.journal.claims is runtime.claims
+    assert consumer.material_reader.journal.receipt_store is store
+
+
 @pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
 def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
     management, repo, payload = setup_management(tmp_path)
