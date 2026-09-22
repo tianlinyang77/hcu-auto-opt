@@ -163,3 +163,39 @@ HTTP 创建 Intent → 重新实例化全部文件 Store、runtime 和 app → H
 验证：本地存储测试 8 passed / 1 skipped（Windows 符号链接测试跳过）；
 Linux/Python 3.10/PostgreSQL 整合 70 passed（44.74 秒），包括存储测试和上述
 文件重载后的 HTTP/派发/构建链，Ruff 通过。源库和生产服务未修改。
+
+### 从部署配置重建编译器（2026-09-22）
+
+`FormalDeploymentRuntime.from_configuration(...)` 不再要求调用方预先构造内存
+compiler。`compiler_path` 指向管理员保护的 JSON，最大 2 MiB，使用
+`FormalCompilerConfiguration` 契约，包含：
+
+- `schema_version`: `formal-compiler-configuration-v1`。
+- `source_commit`、稳定的 `server_instance_id`。
+- 三项 `profiles`，既有 owner `authorization`。
+- `readiness_manifest`、`readiness_report`、`candidate_family`。
+
+加载器复用 `build_formal_operator_profile_catalog` 的签名、窗口及 readiness 准入，
+不直接构造私有 Catalog。源码 Commit 必须等于启动方独立提供的
+`expected_source_commit`；配置自报的 Commit 不是运行代码身份的证明。
+候选 Family Hash 必须匹配 owner 授权；清单按固定 JSON 保存，每次读取重新解析。
+候选包实际字节仍由原有 verifier 在编译时重新核验。
+
+这个入口与已有 `trust_path`、`capabilities_path` 一起完成 runtime 装配，默认 disabled，
+不迁移数据库、不产生授权、不启动执行。调用方仍须提供真实 repository、object_store
+和 candidate_family_verifier；它尚不是单凭配置文件启动完整生产服务的 CLI。
+
+新增测试覆盖重复加载身份稳定、默认禁止派发、错误发布版本、过期授权、签名篡改、
+readiness/Family 篡改，以及未知/私钥字段、超限文件、越界路径和缺失文件拒绝。
+配置加载测试使用明确的合成 readiness 及临时签名密钥，只验证构造与准入，
+不声称新的配置 compiler 已完成真实候选编译或 HCU 执行。
+既有 PostgreSQL HTTP/派发/构建链仍使用原测试 compiler。
+
+远程测试打包须包含 `config/m2/nmz36-formal-readiness-v1.yaml`：新增准入夹具依赖此文件，
+仅打包 `config/targets` 会导致测试准备阶段失败，不能将此错误归因于运行时准入。
+
+验证结果：本地编译器/信任/运行时/签名/Profile 准入组合 45 passed；
+Linux/Python 3.10/PostgreSQL 组合 81 passed（44.84 秒）；Ruff 通过。
+远程包包含本轮工作区增量，不是之前 HEAD 的纯净快照。
+Windows 新进程导入须显式设置本仓库 `src` 为 PYTHONPATH，避免命中其他 checkout
+的已安装包；在该设置下完成独立进程导入检查。

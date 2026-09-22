@@ -48,6 +48,29 @@ class FormalDeploymentRuntime:
         self.management = replace(management, dispatch_reader=self.dispatcher)
 
     @classmethod
+    def from_configuration(
+        cls, repository: PostgresRepository, *, deployment_root: Path,
+        compiler_path: Path, trust_path: Path, capabilities_path: Path,
+        candidate_family_verifier, expected_source_commit: str, object_store,
+        enabled: bool = False, clock=None,
+    ) -> "FormalDeploymentRuntime":
+        """Rebuild compiler and runtime through original signed Profile admission."""
+        from hcuopt.deployment.formal_compiler import load_formal_compiler
+        from hcuopt.deployment.formal_trust import FormalPublicTrust
+
+        trust = FormalPublicTrust.from_file(deployment_root=deployment_root, path=trust_path)
+        compiler = load_formal_compiler(
+            deployment_root=deployment_root, path=compiler_path, trust=trust,
+            candidate_family_verifier=candidate_family_verifier,
+            expected_source_commit=expected_source_commit, clock=clock,
+        )
+        coordinator = trust.coordinator(compiler, object_store=object_store, clock=clock)
+        management = FormalStartManagement.from_file(
+            coordinator, deployment_root=deployment_root, path=capabilities_path,
+        )
+        return cls(repository, management, enabled=enabled)
+
+    @classmethod
     def from_deployment_files(
         cls, repository: PostgresRepository, *, compiler, object_store,
         deployment_root: Path, trust_path: Path, capabilities_path: Path,
