@@ -54,9 +54,9 @@ def _directory(root: Path, value: str) -> Path:
     return cursor
 
 
-def build_formal_service(
+def load_formal_service_runtime(
     *, deployment_root: Path, configuration_path: Path, database_url: str,
-    expected_source_commit: str, clock=None,
+    expected_source_commit: str, clock=None, enabled: bool = False,
 ):
     """Read local packages and schema before exposing the narrow HTTP surface.
 
@@ -87,17 +87,28 @@ def build_formal_service(
         trust_path=deployment_root / config.trust_path,
         capabilities_path=deployment_root / config.capabilities_path,
         candidate_family_verifier=verifier, expected_source_commit=expected_source_commit,
-        object_store=objects, clock=clock,
+        object_store=objects, clock=clock, enabled=enabled,
     )
     compiler = runtime.management.coordinator.compiler
     verifier.verify(compiler.candidate_family_manifest_store.read_manifest(
         source_family_hash=compiler.authorization.source_family_hash,
     ))
-    app = runtime.console(
-        static_root=directories["static_root"], browser_origin=f"http://127.0.0.1:{config.port}",
-    )
     if not inspect_formal_schema(database_url)["schema_checks_passed"]:
         raise ValueError("Formal service database requires a separate reviewed migration")
+    return runtime, config, directories["static_root"]
+
+
+def build_formal_service(
+    *, deployment_root: Path, configuration_path: Path, database_url: str,
+    expected_source_commit: str, clock=None,
+):
+    runtime, config, static_root = load_formal_service_runtime(
+        deployment_root=deployment_root, configuration_path=configuration_path,
+        database_url=database_url, expected_source_commit=expected_source_commit, clock=clock,
+    )
+    app = runtime.console(
+        static_root=static_root, browser_origin=f"http://127.0.0.1:{config.port}",
+    )
     app.state.formal_runtime = runtime
     return app, config.port
 

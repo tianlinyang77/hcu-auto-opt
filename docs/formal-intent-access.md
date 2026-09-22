@@ -294,3 +294,50 @@ dispatch/claim/预算与各阶段；Correctness 物理 adapter、Performance、�
 结果重放、HTTP 启动及故障拒绝。远程源码包含本轮增量，不是之前 HEAD 的纯净快照。
 旧故障夹具曾传空 Hotspot，在新增数据库复核下被正确阻止；现改用隔离库中的实际记录，
 保留故障注入目的，没有放宽生产校验。
+
+### 有界 CPU 构建驱动与命令入口（2026-09-22）
+
+`FormalBuildDriver` 串联原有操作：显式 `start` 创建 dispatch 并一次性领取；
+`build_family` 只遍历签名 Intent 内的候选，通过注册 Worker 检查、独立 Build Job、
+预算预留、数据库输入加载、真实 Overlay 构建和结果发布。第一项失败就停止后续候选。
+它不扩大 Family、资源窗口或总预算，也不自动冻结 Family 或进入正确性/性能阶段。
+
+Worker 须事先按部署流程注册；驱动器不改写他人的 Worker 注册。
+领取凭据须私密保管；`start` 的响应丢失不能仅凭 Worker 名字取回凭据或自动再领取。
+同一 Job 的 reservation/ledger 使用确定性 ID 和原 Job 时间，重放不创建第二份预算。
+改变已有预留金额会被原预算接口拒绝，不静默覆盖。
+`wall_seconds_per_candidate` 是预算预留而不是进程终止计时器；当前 claim 最长 300 秒，
+无续租机制，超过窗口不得自动再领或冒充完成。此驱动适用于有界 CPU Overlay 构建，
+不是长时间重编译或 HCU 调度循环。
+
+显式命令入口消费**已有领取凭据**，不在失败后重新 start：
+
+```bash
+python -m hcuopt.deployment.formal_build_command \
+  --deployment-root /srv/hcuopt/formal \
+  --configuration service.json \
+  --invocation private-build-invocation.json \
+  --source-commit <independently-pinned-release-commit>
+```
+
+沿用管理服务的配置加载、源码 Commit、签名与只读 schema 检查；此命令显式启用
+构建 runtime，但不启动 HTTP 服务或 HCU Worker。`HCUOPT_DATABASE_URL` 由环境注入。
+invocation JSON 契约为 `formal-build-invocation-v1`，字段是 `intent_id`、`worker_id`、
+`claim_token`、`wall_seconds_per_candidate`、`artifact_root`、`cache_root`、`output_root`。
+三个目录须已存在且处于管理员控制的部署根内，不允许越界或链接；文件上限 16 KiB。
+领取 token 不放在命令行、报告或示例中。POSIX 文件要求仅 owner 可访问；Windows
+须由部署方设置等效 ACL。管理员也须保护父目录，不能将网页上传内容作为此文件。
+
+成功输出仅含 Intent、候选及 Artifact Hash，固定 `hcu_accessed=false` 和
+`automatic_release_allowed=false`。失败返回非零和脱敏错误码，禁止自动重试；
+已经完成的前序候选及预算保留在数据库，不能把一次失败理解成整批没有发生任何写入。
+
+新增测试覆盖完整两候选真实 Git/Overlay 构建、重复调用、原预算金额不可变、停止、
+错误领取凭据、未注册 Worker、预算不足和无效数字；命令调用真实 runtime 的重放
+及脱敏输出也纳入测试。该命令联验对配置加载函数使用测试替换；配置加载准入另有
+测试，尚不能称为生产配置到 HCU 的一体化验收。
+
+最终验证：本地 71 passed / 1 skipped（Windows 不执行 POSIX 权限位检查）；
+Linux/Python 3.10/PostgreSQL 115 passed（63.93 秒），Ruff 与独立 CLI 加载检查通过。
+包含首个候选完成后停止的测试：保留一个成功 Job/Artifact，不创建第二个构建 Job。
+远程测试包包含本轮工作区增量。没有生产库迁移、真实模型调用、HCU 执行或自动发布。
