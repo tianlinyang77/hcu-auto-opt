@@ -15,7 +15,10 @@ from hcuopt.deployment import formal_correctness_handoff as module
 from hcuopt.deployment.formal_correctness_driver import FormalCorrectnessDriver
 from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
 from hcuopt.domain.errors import Conflict
+from hcuopt.measurement.m2_formal_receipt import M2FormalPhaseExecutionReceiptStore
 from hcuopt.orchestrator.search_round import artifact_family_hash
+from hcuopt.storage.formal_phase_journal import PostgresFormalPhaseJournal
+from hcuopt.storage.formal_search_materials import PostgresFormalSearchBatchMaterialReader
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
 from tests.integration.test_formal_real_builder_postgres import (
     build_member,
@@ -173,3 +176,17 @@ def test_handoff_still_rejects_duplicate_current_round_audit(handoff_case):
         })
     with pytest.raises(Conflict, match="duplicate audit records"):
         driver.handoff_family(entries=entries)
+
+
+def test_search_reader_refuses_to_close_before_each_correct_member_has_receipt(
+    handoff_case, tmp_path,
+):
+    """A correctness handoff alone must never masquerade as performance evidence."""
+    driver, entries = handoff_case
+    driver.handoff_family(entries=entries)
+    reader = PostgresFormalSearchBatchMaterialReader(PostgresFormalPhaseJournal(
+        driver.runtime.claims, driver.intent_id, driver.worker_id, driver.claim_token,
+        M2FormalPhaseExecutionReceiptStore(tmp_path / "formal-search-receipts"),
+    ))
+    with pytest.raises(Conflict, match="terminal Search receipt"):
+        reader.load()
