@@ -105,6 +105,26 @@ def test_phase_factory_shares_claims_reader_and_receipt_store(tmp_path):
         runtime.phase_consumer(intent_id=None, worker_id="x", claim_token=None, adapter=object())
 
 
+def test_search_factory_shares_claims_and_stays_disabled(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    reader = SimpleNamespace(load=lambda: None)
+    consumer = runtime.search_consumer(
+        intent_id=None,
+        worker_id="search-worker",
+        claim_token=None,
+        material_reader=reader,
+        verifier=object(),
+        publisher=object(),
+    )
+    assert consumer.claims is runtime.claims
+    assert consumer.repository is runtime.repository
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(
+            closed_by="test", closed_at=None, idempotency_key="search-runtime-test"
+        )
+
+
 @pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
 def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
     management, repo, payload = setup_management(tmp_path)

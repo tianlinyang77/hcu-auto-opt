@@ -108,3 +108,13 @@ D verifier 重读证据，由 restart effects 计算 Search 排名，发布新�
 CPU 测试已覆盖“原始证据文件 → 实际 D 校验器 → Search 排名 → Barrier 保存调用”，
 共 22 passed，Ruff 通过。证据文件来自测试夹具，不是新的 BW20 测量。
 数据库材料加载器与后台消费者仍未接入此桥接；本增量不表示实机闭环完成。
+
+### Claim-bound Search Consumer 增量
+
+新增 `FormalSearchConsumer` 并通过 `FormalDeploymentRuntime.search_consumer()` 组合。它不
+申请 HCU 或执行 B；只在同一个已领取、未停止的 Formal claim 中，读取部署侧批次材料，
+调用 D 和现有 Barrier 事务。D 计算前后均复核 claim，且 Browser/API 不传入候选、测量
+结果或签署内容。
+
+目前批次材料读取器仍是部署注入接口，尚未接 PostgreSQL receipt/correctness 回读实现，
+所以这不是已经启用的后台服务。该路径的单元回归 21 passed；没有新增实机测量。
