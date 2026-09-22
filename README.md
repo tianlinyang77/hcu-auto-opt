@@ -2,12 +2,23 @@
 
 面向 HCU 推理工作负载的自动性能优化平台。系统从真实 Workload 出发，发现瓶颈、生成候选、隔离构建、可信评测，并把可复现证据交给人工签核。
 
+## 首次 MVP 交付入口（2026-09-22）
+
+本次按 **单候选真实 Agent 优化闭环** 收口，已完成 BW20 真实候选验证与人工签署，
+以及服务级验证的正式 D 裁决和签署。局部微基准耗时降低约 16.60%；服务级为
+`inconclusive`，不宣称服务加速或自动发布。
+
+**[交付说明、真实证据与三分钟演示](docs/mvp-single-candidate-delivery.md)** ·
+[打开已签署结果页](docs/endpoint-console.md)。多候选 Formal 是后续增强，不阻塞此次单候选交付。
+
+以下 M1/M2 分阶段说明保留架构历史；其中 M2a HOLD 指多候选准入，不能理解为真实单候选 Agent 从未运行。
+
 仓库已经完成 F1 Framework Smoke、Formal Stage 0 和 **M1 单人工 Candidate 可信闭环**。首个真实业务 Candidate 已完成 Build、正确性、可信测量、独立裁决和人工证据接受；完整记录见 [M1 nmz36 Formal 与签核](docs/evidence/m1-formal-nmz36-20260825.md)。Formal Stage 0 的模式仍是 `DEGRADED_MANUAL_INTAKE`，`automatic_release_allowed=false`；M1 的完成不开放 Agent 搜索、自动发布或生产灰度。
 
 当前工作已完成 M2a 无 HCU Scripted Search/Holdout/轮次 Barrier 和只读操作面，正在执行
 [M2a Formal 就绪审计](docs/m2a-formal-readiness.md)。当前审计结论为 `HOLD`：真实执行路径、
 2 成员业务 Candidate Family、四方 review 和独立 HCU 窗口授权尚未完成。不得创建真实多
-Candidate Formal Task；M2a Formal 完整闭环前也不进入 M2b Candidate Generator。
+Candidate Formal Task。该限制针对多候选 Formal 搜索；已有受限单候选 Agent 路径及验收见上方交付入口。
 
 首个实测目标已经冻结为 SGLang 0.5.12、`HYGON-AI/sglang-das` 固定 Commit 和指定 DTK 26.04 镜像；精确版本、运行拓扑及待解除阻塞见 [nmz36 Target Lock](config/targets/nmz36-sglang-0.5.12.yaml)。Target Lock 使用镜像 digest 与完整源码 Commit，禁止用同名 Tag、`latest` 或其他 0.5.12 镜像替换。
 

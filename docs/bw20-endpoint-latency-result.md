@@ -1,5 +1,9 @@
 # BW20 SGLang 端点延迟采集：完整 8/8 结果
 
+> 历史采集报告。后续 Campaign 已完成正式 D 裁决及人工签署；2026-09-22 实时回查为
+> completed / accepted，正式结论仍为 inconclusive。见 [当前交付入口](mvp-single-candidate-delivery.md)。
+> 下方“无正式 D 裁决”仅描述 9 月 17 日采集当时，不覆盖后续状态。
+
 - 日期：2026-09-17
 - Campaign：`endpoint-latency-20260917-v2`
 - 状态：**8/8 完成，探索性结论为 `inconclusive`**
