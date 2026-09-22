@@ -3,6 +3,24 @@
 2026-09-22 收口。交付名称为 **HCU 自动优化系统：单候选受控验证版**。
 本页是首次 MVP 的范围与演示入口；多候选 Formal 调度是后续增强，不再作为本次交付前提。
 
+## 已合入代码的交付基线
+
+演示源码固定为 main Commit `3c1fc64e335d7501b92fdba773549bdcd84c20c5`。
+已从该 Commit 的独立干净 Worktree 完成前端构建、7 项 Console 后端及 3 项 Campaign 前端测试，
+并在 4196 页面回查 completed / accepted / inconclusive 与下述正式 Result Hash。
+这条展示路径不依赖尚未合入的 PR #168/#169；不必合入多候选工程才能查看已有验收。
+
+本地交付包包含固定源码 ZIP、同版本预构建前端 ZIP 和 DELIVERY.md，不包含 node_modules、
+本机私有配置、数据库或模型凭据。接收方仍需 Python 依赖、VPN/SSH 和已部署的远端 API。
+
+| 交付文件 | SHA256 |
+| --- | --- |
+| source-3c1fc64.zip | `594e6a9b98ed9cf70f8e952a4a36e4312c75f8e50562faa9f854b83a5bf6e327` |
+| frontend-3c1fc64.zip | `6a18faf25df35feb2a1013a3c4d33516e82bb1cda827d67c9c827a6916621c3e` |
+
+源码归档核对包含 CLI 与历史实机证据说明，不包含 `.git`、`.codex` 和 node_modules 目录。
+前端预构建只省去接收方的 Node 构建步骤，不是独立离线运行优化系统的安装包。
+
 ## 一句话总结
 
 已完成一个真实 Agent 候选的生成、构建、HCU 正确性与性能验证、独立裁决和人工签署；
