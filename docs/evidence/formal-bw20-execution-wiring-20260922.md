@@ -1,5 +1,7 @@
 # Formal BW20 执行接线与当前边界
 
+后续更新：用户授权推进后，源库已实际升级至 32，见 [源库升级记录](formal-bw20-source-upgrade-20260922.md)。下方版本 26 是本次接线时的历史核查，不再是最新部署状态；真实授权配置及实机整链验收仍未完成。
+
 ## 本次接线
 
 - `FormalCorrectnessDriver.execute_bw20_prepared` 从已领取 Job 的持久化材料读取 Target，构建真实 BW20 producer 与独立 D 校验器，沿原 correctness journal 回写。不能输入任意 Target 或借用其他 driver 的租约。
