@@ -58,6 +58,29 @@ def test_runtime_rejects_truthy_string_enable(tmp_path):
         FormalDeploymentRuntime(repo, management, enabled="false")
 
 
+def test_runtime_worker_factories_share_claims_and_stay_disabled(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    consumer = runtime.build_consumer(
+        intent_id=None, worker_id="builder", claim_token=None,
+        builder=SimpleNamespace(enabled=True),
+    )
+    assert consumer.journal.claims is runtime.claims
+    assert consumer.store.claims is runtime.claims
+    assert not consumer.enabled
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(reservation_id=None, output_dir=tmp_path)
+    foreign = SimpleNamespace(lease=SimpleNamespace(jobs=SimpleNamespace(claims=object())))
+    with pytest.raises(Conflict, match="another runtime"):
+        runtime.correctness_consumer(journal=foreign, adapter=None)
+    with pytest.raises(Conflict, match="disabled"):
+        runtime.local_build_consumer(
+            intent_id=None, worker_id="builder", claim_token=None,
+            artifact_root=tmp_path / "not-created", cache_root=tmp_path / "no-cache",
+        )
+    assert not (tmp_path / "not-created").exists()
+
+
 @pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
 def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
     management, repo, payload = setup_management(tmp_path)

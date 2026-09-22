@@ -26,6 +26,39 @@ class FormalBuildConsumer:
             raise Conflict("Formal build publication and journal must share claim authority")
         self.journal, self.builder, self.store, self.enabled = journal, builder, store, enabled
 
+    def execute_current_once(self, *, reservation_id, output_dir: Path):
+        """Deployment path: callers identify a reservation, not mutable build inputs."""
+        from hcuopt.storage.formal_build_materials import PostgresFormalBuildMaterialReader
+
+        if not self.enabled or not self.builder.enabled or not self.store.enabled:
+            raise Conflict("Formal build consumer is disabled")
+        repo = self.journal.claims.dispatcher.repository
+        with repo.connection() as conn:
+            previous = conn.execute(
+                "SELECT * FROM formal_build_journal WHERE intent_id = %s AND reservation_id = %s",
+                (self.journal.intent_id, reservation_id),
+            ).fetchone()
+        if previous is not None:
+            args = (previous["candidate_id"], reservation_id, previous["input_hash"])
+            row, acquired = self.journal.begin(*args)
+            if acquired or row["state"] != "result_recorded":
+                raise Conflict("Formal build is uncertain; recovery required, no retry")
+            return self._publish_recorded(args, row)
+        materials = PostgresFormalBuildMaterialReader(self.journal).load(reservation_id)
+        return self.execute_once(reservation_id=reservation_id, output_dir=output_dir, **materials)
+
+    def _publish_recorded(self, args, row):
+        result = FormalCandidateBuildResult(
+            ManualCandidateBuildResult.model_validate(row["result"]["build"]),
+            RoundCandidateBuildTerminal.model_validate(row["result"]["terminal"]),
+        )
+        self.journal.settle_recorded_result(*args)
+        self.store.record(
+            self.journal.intent_id, self.journal.worker_id, self.journal.claim_token, result,
+        )
+        self.journal.complete_published_job(*args)
+        return result
+
     def execute_once(self, *, reservation_id, round_authority, member, baseline,
                      hotspot, hotspot_intake_hash: str, output_dir: Path):
         """Persist output before publication; never rerun an uncertain build.
@@ -89,6 +122,16 @@ class FormalBuildConsumer:
                         for key, value in baseline.model_dump(mode="python").items()
                     ):
                         raise Conflict("Formal build Baseline differs from durable parent")
+                    current_hotspot = conn.execute(
+                        "SELECT * FROM hotspots WHERE hotspot_id = %s FOR SHARE",
+                        (round_authority.hotspot_id,),
+                    ).fetchone()
+                    if (current_hotspot is None
+                            or current_hotspot["baseline_epoch_id"]
+                            != round_authority.baseline_epoch_id
+                            or current_hotspot["evidence"] != dict(hotspot)
+                            or current_hotspot["intake_hash"] != hotspot_intake_hash):
+                        raise Conflict("Formal build Hotspot differs from durable intake")
                 started = time.monotonic()
                 result = self.builder.build_member(
                     round_authority=round_authority, member=member, baseline=baseline,
@@ -96,7 +139,7 @@ class FormalBuildConsumer:
                 )
                 wall_seconds = time.monotonic() - started
                 journal.record_result(*args, result, wall_seconds=wall_seconds)
-            except Exception:
+            except BaseException:
                 journal.mark_unknown(*args)
                 raise
         # Settlement errors retain the immutable output and usage for retry.

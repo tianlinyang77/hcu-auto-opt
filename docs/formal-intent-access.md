@@ -258,3 +258,39 @@ Uvicorn 临时本机端口，验证 HTTP 页面、跨站拦截、没有自动创
 
 本轮验证：本地组合 52 passed；Linux/Python 3.10/PostgreSQL 组合 89 passed
 （46.64 秒）；Ruff 通过。远程测试包包含本轮工作区增量。
+
+### Worker 统一接线与数据库构建输入（2026-09-22）
+
+统一 runtime 增加三项显式部署接口：
+
+- `build_consumer(...)`：将既有 Builder 绑定到同一 runtime 的 claims、journal 和发布存储。
+- `local_build_consumer(...)`：复用已准入 compiler 的候选包根目录、白名单和 Store 身份，
+  自动装配 GitSourceManager、Overlay Builder、LocalArtifactStore 和 Build Cache。
+  目标 Profile 与 Store 身份不一致拒绝；禁用 runtime 在创建目录前拒绝。
+- `correctness_consumer(...)`：接入既有 D Worker adapter，但拒绝来自其他 runtime 的租约链。
+
+构建调用方现在只须传既有 `reservation_id` 和部署输出目录给
+`execute_current_once(...)`；候选、Round、冻结 Baseline、Hotspot 及其 Intake Hash
+由 `PostgresFormalBuildMaterialReader` 根据 Intent/Job/预算关联读取，不能由 HTTP
+请求临时拼装。原有 `execute_once` 也在真正调用 Builder 前复核 Hotspot 与数据库一致。
+
+重复调用时读取原 journal 的 input Hash 和已落盘结果，只重做预算结算及发布，
+不从已更新为 built 的候选状态伪造原始构建输入，也不再次运行 Builder。
+该重放模式忽略新的输出目录：返回的是原制品，不复制或重建到新目录。
+构建中的 KeyboardInterrupt 等中断标记为需要恢复；没有确定结果就拒绝自动重试。
+
+真实 Git/Overlay/PostgreSQL 测试已改用 `runtime.local_build_consumer` 和数据库输入入口，
+覆盖两份候选制品、只读内容、源码 Hash、Worktree 清理、一次结算、重复调用。
+附加测试覆盖错误预算/领取者、热点篡改拒绝、构建中断不重跑以及跨 runtime 接线拒绝。
+测试源代码、授权和设备证据仍是夹具，不构成真实 HCU 正确性或性能结论。
+
+边界：这些工厂不注册 Worker、不领取任务、不申请或扩大预算、不启动后台循环。
+服务 CLI 仍为管理入口，未隐式启用执行。生产驱动器还须在已批准资源窗口内串联
+dispatch/claim/预算与各阶段；Correctness 物理 adapter、Performance、裁决和最终签核
+不能因 CPU 构建联验成功而视为完成。
+
+本轮最终回归：本地相关组合 36 passed，Linux/Python 3.10/PostgreSQL 组合
+94 passed（52.87 秒），Ruff 通过；后者包含真实 Git/Overlay 构建、数据库材料加载、
+结果重放、HTTP 启动及故障拒绝。远程源码包含本轮增量，不是之前 HEAD 的纯净快照。
+旧故障夹具曾传空 Hotspot，在新增数据库复核下被正确阻止；现改用隔离库中的实际记录，
+保留故障注入目的，没有放宽生产校验。

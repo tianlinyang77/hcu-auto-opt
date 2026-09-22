@@ -15,14 +15,8 @@ import pytest
 from psycopg.errors import RaiseException
 from psycopg.types.json import Jsonb
 
-from hcuopt.adapters.build_cache import LocalBuildCache
-from hcuopt.adapters.formal_candidate_builder import FormalRoundCandidateBuilder
 from hcuopt.adapters.git_source import GitSourceManager
-from hcuopt.adapters.local_artifact_store import LocalArtifactStore
-from hcuopt.adapters.manual_candidate import (
-    CandidateSourcePackageStore,
-    ManualOverlayCandidateBuilder,
-)
+from hcuopt.api.formal_start_management import FormalStartManagement
 from hcuopt.contracts.m2 import (
     ArtifactFamilyFreezeRequest,
     BudgetUsage,
@@ -32,12 +26,11 @@ from hcuopt.contracts.m2 import (
 )
 from hcuopt.contracts.platform_v1 import AdapterProvenance
 from hcuopt.contracts.v1 import ManualCorrectnessResult, WorkerRegister
+from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
 from hcuopt.domain.errors import Conflict
 from hcuopt.orchestrator.search_round import artifact_family_hash
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
-from hcuopt.storage.formal_build import PostgresFormalBuildStore
 from hcuopt.storage.formal_build_jobs import PostgresFormalBuildJobs
-from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
 from hcuopt.storage.formal_claim import PostgresFormalClaimStore
 from hcuopt.storage.formal_correctness_jobs import PostgresFormalCorrectnessJobs
 from hcuopt.storage.formal_correctness_journal import PostgresFormalCorrectnessJournal
@@ -45,7 +38,6 @@ from hcuopt.storage.formal_correctness_lease import PostgresFormalCorrectnessLea
 from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
 from hcuopt.storage.formal_correctness_recovery import PostgresFormalCorrectnessRecovery
 from hcuopt.targets import target_fingerprint
-from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
 from tests.integration import test_formal_dispatch_postgres as dispatch_tests
 from tests.integration.test_formal_dispatch_postgres import dispatch_case  # noqa: F401
 from tests.integration.test_formal_start_management_postgres import isolated_dsn  # noqa: F401
@@ -455,7 +447,6 @@ def build_member(repo, claims, intent_id, token, real_sources, request, candidat
         member = RoundCandidate.model_validate(
             {key: row[key] for key in RoundCandidate.model_fields}
         )
-        hotspot = conn.execute("SELECT * FROM hotspots").fetchone()
     repo.register_worker(WorkerRegister(
         worker_id="real-test-builder", worker_type="build", adapter_profile=round_.adapter_profile,
     ))
@@ -474,28 +465,20 @@ def build_member(repo, claims, intent_id, token, real_sources, request, candidat
         raw_usage_evidence_hash=member.source_package_hash,
         idempotency_key=f"real-build-ledger:{job['job_id']}", created_at=datetime.now(timezone.utc),
     ))
-    # The real source package root used by the compiler/verifier is the fixture's packages folder.
-    package_root = request.getfixturevalue("tmp_path") / "packages"
-    output, profile = real_sources["output"], real_sources["profile"]
-    builder = FormalRoundCandidateBuilder(ManualOverlayCandidateBuilder(
-        real_sources["manager"], CandidateSourcePackageStore(
-            package_root, profile=profile, allowed_overlay_roots=("sglang",),
-            approved_mount_targets={plans.REPLACEMENT_POINT: plans.MOUNT_TARGET},
-        ), LocalArtifactStore(output / "artifacts", profile), LocalBuildCache(output / "cache"),
-        profile=profile,
-    ), store_id=member.source_package_store_id, store_hash=member.source_package_store_hash,
-        enabled=True)
-    consumer = FormalBuildConsumer(
-        PostgresFormalBuildJournal(claims, intent_id, "real-test-builder", token), builder,
-        PostgresFormalBuildStore(claims, enabled=True), enabled=True,
+    output = real_sources["output"]
+    runtime = FormalDeploymentRuntime(
+        repo, FormalStartManagement(claims.dispatcher.coordinator, ()), enabled=True,
     )
-    kwargs = dict(
-        reservation_id=reservation.reservation_id, round_authority=round_, member=member,
-        baseline=real_sources["baseline"], hotspot=hotspot["evidence"],
-        hotspot_intake_hash=hotspot["intake_hash"], output_dir=output,
+    consumer = runtime.local_build_consumer(
+        intent_id=intent_id, worker_id="real-test-builder", claim_token=token,
+        artifact_root=output / "artifacts", cache_root=output / "cache",
     )
-    result = consumer.execute_once(**kwargs)
-    assert consumer.execute_once(**kwargs) == result
+    result = consumer.execute_current_once(
+        reservation_id=reservation.reservation_id, output_dir=output,
+    )
+    assert consumer.execute_current_once(
+        reservation_id=reservation.reservation_id, output_dir=output,
+    ) == result
     artifact = file_uri_to_path(result.build.artifact.uri)
     assert artifact.read_bytes() == real_sources["contents"][index]
     assert result.build.artifact.content_hash == "sha256:" + hashlib.sha256(

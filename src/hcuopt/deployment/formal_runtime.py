@@ -47,6 +47,70 @@ class FormalDeploymentRuntime:
         self.claims = PostgresFormalClaimStore(self.dispatcher, enabled=enabled)
         self.management = replace(management, dispatch_reader=self.dispatcher)
 
+    def build_consumer(self, *, intent_id, worker_id, claim_token, builder):
+        """Bind a reviewed builder to this runtime; never grant or acquire a claim."""
+        from hcuopt.storage.formal_build import PostgresFormalBuildStore
+        from hcuopt.storage.formal_build_journal import PostgresFormalBuildJournal
+        from hcuopt.workers.formal_build_consumer import FormalBuildConsumer
+
+        return FormalBuildConsumer(
+            PostgresFormalBuildJournal(self.claims, intent_id, worker_id, claim_token),
+            builder, PostgresFormalBuildStore(self.claims, enabled=self.dispatcher.enabled),
+            enabled=self.dispatcher.enabled,
+        )
+
+    def correctness_consumer(self, *, journal, adapter):
+        """Bind D's adapter only to this runtime's exact lease/claim chain."""
+        from hcuopt.workers.formal_correctness_consumer import FormalCorrectnessConsumer
+
+        if journal.lease.jobs.claims is not self.claims:
+            raise Conflict("Formal correctness journal belongs to another runtime")
+        return FormalCorrectnessConsumer(journal, adapter, enabled=self.dispatcher.enabled)
+
+    def local_build_consumer(
+        self, *, intent_id, worker_id, claim_token, artifact_root: Path, cache_root: Path,
+    ):
+        """Explicit CPU builder factory using the admitted compiler's package policy.
+
+        May initialize deployment-owned artifact/cache directories. Does not
+        register a Worker, acquire a claim, reserve budget or perform a build.
+        """
+        if not self.dispatcher.enabled or not self.claims.enabled:
+            raise Conflict("Formal local build runtime is disabled")
+        from hcuopt.adapters.build_cache import LocalBuildCache
+        from hcuopt.adapters.formal_candidate_builder import FormalRoundCandidateBuilder
+        from hcuopt.adapters.git_source import GitSourceManager
+        from hcuopt.adapters.local_artifact_store import LocalArtifactStore
+        from hcuopt.adapters.manual_candidate import (
+            CandidateSourcePackageStore,
+            ManualOverlayCandidateBuilder,
+        )
+        from hcuopt.domain.enums import SearchRoundRunMode
+
+        compiler = self.management.coordinator.compiler
+        target = compiler.profiles.require(
+            compiler.authorization.profiles.target_profile, SearchRoundRunMode.FORMAL,
+        ).authority_refs
+        verifier = compiler.candidate_family_verifier
+        if (verifier.store_id != target.candidate_package_store_id
+                or verifier.store_hash != target.candidate_package_store_hash):
+            raise Conflict("Formal build package Store differs from admitted target")
+        packages = verifier.source_packages
+        profile = target.adapter_profile
+        builder = FormalRoundCandidateBuilder(ManualOverlayCandidateBuilder(
+            GitSourceManager(profile),
+            CandidateSourcePackageStore(
+                packages.root, profile=profile,
+                allowed_overlay_roots=packages.allowed_overlay_roots,
+                approved_mount_targets=packages.approved_mount_targets,
+            ),
+            LocalArtifactStore(artifact_root, profile), LocalBuildCache(cache_root),
+            profile=profile,
+        ), store_id=verifier.store_id, store_hash=verifier.store_hash, enabled=True)
+        return self.build_consumer(
+            intent_id=intent_id, worker_id=worker_id, claim_token=claim_token, builder=builder,
+        )
+
     @classmethod
     def from_configuration(
         cls, repository: PostgresRepository, *, deployment_root: Path,
