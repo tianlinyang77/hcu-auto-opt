@@ -78,6 +78,35 @@ class FormalCorrectnessDriver:
             journal=journal, adapter=adapter,
         ).execute_current_once(output_dir=output_dir)
 
+    def execute_bw20_prepared(self, *, journal, source_root: Path,
+                              trusted_evidence_root: Path, output_dir: Path):
+        """Use the real BW20 producer and D verifier, not the generic M1 Job lane.
+
+        The target comes from the claimed Job's durable materials. No target,
+        lease, profile or authority is synthesized by this entry point.
+        """
+        from hcuopt.contracts.platform_v1 import TargetSpec
+        from hcuopt.deployment.bw20_m1_correctness_worker import (
+            BW20M1IdleGuard,
+            build_bw20_m1_correctness_registry,
+        )
+        from hcuopt.storage.formal_correctness_materials import (
+            PostgresFormalCorrectnessMaterialReader,
+        )
+
+        if not self.runtime.dispatcher.enabled or journal.lease is not self.lease:
+            raise Conflict("Formal BW20 execution is disabled or journal is foreign")
+        journal.lease.assert_live(journal.job_id, **journal.owner)
+        _, _, payload = PostgresFormalCorrectnessMaterialReader(journal).load()
+        registry = build_bw20_m1_correctness_registry(
+            target=TargetSpec.model_validate(payload["target"]), source_root=source_root,
+            trusted_evidence_root=trusted_evidence_root, output_dir=output_dir,
+            guard=BW20M1IdleGuard(), formal=True,
+        )
+        return self.execute_prepared(
+            journal=journal, adapter=registry.require("kernel_correctness"), output_dir=output_dir,
+        )
+
     def execute_candidate(self, *, candidate_id, executor_id: str, wall_seconds: float,
                           adapter, output_dir: Path):
         """One candidate, no retry loop. Known/unknown outcomes use existing recovery.

@@ -81,6 +81,30 @@ def test_runtime_worker_factories_share_claims_and_stay_disabled(tmp_path):
     assert not (tmp_path / "not-created").exists()
 
 
+def test_phase_factory_shares_claims_reader_and_receipt_store(tmp_path):
+    from tests.unit.test_formal_execution_checkpoint import setup
+
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    (tmp_path / "phase").mkdir()
+    adapter, harness, _, _ = setup(tmp_path / "phase")
+    consumer = runtime.phase_consumer(
+        intent_id=None, worker_id="phase-worker", claim_token=None, adapter=adapter,
+    )
+    assert consumer.journal.claims is runtime.claims
+    assert consumer.material_reader.journal is consumer.journal
+    assert consumer.journal.receipt_store is adapter.receipt_store
+    assert not consumer.enabled
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(
+            candidate_id=None, authorization_id=None, resolved_plan_hash="unused",
+            reservation=None, deployment={}, output_dir=tmp_path,
+        )
+    assert not harness.payloads
+    with pytest.raises(TypeError, match="registered"):
+        runtime.phase_consumer(intent_id=None, worker_id="x", claim_token=None, adapter=object())
+
+
 @pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
 def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
     management, repo, payload = setup_management(tmp_path)

@@ -70,3 +70,45 @@ def test_foreign_journal_cannot_enter_consumer(tmp_path):
         driver.execute_prepared(journal=SimpleNamespace(lease=object()), adapter=adapter,
                                 output_dir=tmp_path)
     runtime.correctness_consumer.assert_not_called()
+
+
+@pytest.mark.parametrize("disabled", [True, False])
+def test_bw20_entry_rejects_before_loading_or_hardware(tmp_path, disabled):
+    driver, runtime, _ = fixture(tmp_path)
+    runtime.dispatcher.enabled = not disabled
+    journal = SimpleNamespace(lease=driver.lease if disabled else object())
+    with pytest.raises(Conflict, match="disabled or journal is foreign"):
+        driver.execute_bw20_prepared(
+            journal=journal, source_root=tmp_path,
+            trusted_evidence_root=tmp_path, output_dir=tmp_path,
+        )
+    runtime.correctness_consumer.assert_not_called()
+
+
+def test_bw20_entry_uses_durable_target_and_formal_producer(monkeypatch, tmp_path):
+    from hcuopt.contracts.platform_v1 import TargetSpec
+    from hcuopt.deployment import bw20_m1_correctness_worker as bw20
+    from hcuopt.storage.formal_correctness_materials import PostgresFormalCorrectnessMaterialReader
+
+    driver, runtime, adapter = fixture(tmp_path)
+    driver.lease.assert_live = Mock()
+    journal = SimpleNamespace(lease=driver.lease, job_id="job", owner={})
+    target_payload = {"explicit": "database-fixture"}
+    load = Mock(return_value=(None, None, {"target": target_payload}))
+    monkeypatch.setattr(PostgresFormalCorrectnessMaterialReader, "load", load)
+    target = object()
+    validate = Mock(return_value=target)
+    monkeypatch.setattr(TargetSpec, "model_validate", validate)
+    registry = SimpleNamespace(require=Mock(return_value=adapter))
+    factory = Mock(return_value=registry)
+    monkeypatch.setattr(bw20, "build_bw20_m1_correctness_registry", factory)
+    assert driver.execute_bw20_prepared(
+        journal=journal, source_root=tmp_path, trusted_evidence_root=tmp_path,
+        output_dir=tmp_path,
+    ) == "explicit-test-result"
+    driver.lease.assert_live.assert_called_once_with("job")
+    validate.assert_called_once_with(target_payload)
+    assert factory.call_args.kwargs["formal"] is True
+    assert factory.call_args.kwargs["target"] is target
+    registry.require.assert_called_once_with("kernel_correctness")
+    runtime.correctness_consumer.assert_called_once_with(journal=journal, adapter=adapter)

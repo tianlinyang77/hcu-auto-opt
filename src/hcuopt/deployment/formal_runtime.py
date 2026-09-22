@@ -111,6 +111,27 @@ class FormalDeploymentRuntime:
             intent_id=intent_id, worker_id=worker_id, claim_token=claim_token, builder=builder,
         )
 
+    def phase_consumer(self, *, intent_id, worker_id, claim_token, adapter):
+        """Bind B's registered phase runner to durable reads and receipt writeback.
+
+        Does not reserve a phase, acquire a device, or turn a receipt into D's
+        acceptance verdict. The adapter keeps its original authority checks.
+        """
+        from hcuopt.measurement.m2_formal_runner import M2FormalPhaseExecutionAdapter
+        from hcuopt.storage.formal_phase_journal import PostgresFormalPhaseJournal
+        from hcuopt.storage.formal_phase_materials import PostgresFormalPhaseMaterialReader
+        from hcuopt.workers.formal_phase_consumer import FormalPhaseConsumer
+
+        if not isinstance(adapter, M2FormalPhaseExecutionAdapter):
+            raise TypeError("Formal phase requires B's registered execution adapter")
+        journal = PostgresFormalPhaseJournal(
+            self.claims, intent_id, worker_id, claim_token, adapter.receipt_store,
+        )
+        return FormalPhaseConsumer(
+            journal, adapter, enabled=self.dispatcher.enabled,
+            material_reader=PostgresFormalPhaseMaterialReader(journal),
+        )
+
     @classmethod
     def from_configuration(
         cls, repository: PostgresRepository, *, deployment_root: Path,
