@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
 import { useEffect, useMemo, useState } from "react";
-import { adjudicationResult, agentOrigin, credibleThresholdStatus, formatEvidencePercent, freezeManualSignoff, loadManualCandidateSummary, measurementFacts, signoffMatches, submitManualSignoff } from "./manual-candidate.js";
+import { adjudicationResult, agentOrigin, credibleThresholdStatus, formatEvidencePercent, freezeManualSignoff, historicalSignedOriginGap, loadManualCandidateSummary, measurementFacts, signoffMatches, submitManualSignoff } from "./manual-candidate.js";
 import "./framework-smoke.css";
 
 const stateLabel = (value) => ({ awaiting_signoff: "等待人工签核", completed: "已批准", rejected: "已拒绝", accepted: "已接受" }[value] || value);
@@ -124,7 +124,9 @@ export function ManualCandidateInspection({ taskId }) {
       </section><section className="smoke-panel"><h2>证据身份链</h2><dl>{identityRows(summary, result).map(([label, value]) =>
         <div key={label} className="m1-id-row"><dt>{label}</dt><dd className="smoke-id">{value || "—"}</dd></div>)}</dl></section></div>
       {origin && <section className="smoke-panel"><h2>Agent 来源与审核链</h2>
-        {!origin.valid && <p className="smoke-error" role="alert">{origin.reason}；BW20 M1 不允许批准。</p>}
+        {!origin.valid && (historicalSignedOriginGap(summary, origin)
+          ? <p className="smoke-boundary">这条历史签核早于 Agent 来源事件字段；当前摘要没有完整的 Agent 来源链。历史决定保留，新任务仍须提供来源证据。</p>
+          : <p className="smoke-error" role="alert">{origin.reason}；BW20 M1 不允许批准。</p>)}
         {origin.valid && <dl>
           <div className="m1-id-row"><dt>Generation Run</dt><dd className="smoke-id">{origin.generation_run_id}</dd></div>
           <div className="m1-id-row"><dt>Proposal / Review</dt><dd className="smoke-id">{origin.proposal_id} / {origin.review_id}</dd></div>

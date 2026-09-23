@@ -67,7 +67,8 @@ export function agentOrigin(summary) {
   const events = (summary.events || []).filter((event) =>
     event.event_type === "manual_candidate_agent_origin_recorded" &&
     event.details?.candidate_id === summary.candidate?.candidate_id);
-  if (events.length !== 1) return { valid: false, reason: "Agent 来源记录缺失或重复" };
+  if (events.length === 0) return { valid: false, reasonCode: "missing", reason: "Agent 来源记录缺失" };
+  if (events.length !== 1) return { valid: false, reasonCode: "duplicate", reason: "Agent 来源记录重复" };
   const origin = events[0].details;
   const sha256 = /^sha256:[0-9a-f]{64}$/;
   const requiredHashes = [
@@ -91,8 +92,16 @@ export function agentOrigin(summary) {
       .every((value) => typeof value === "string" && value.length > 0);
   return valid ? { valid: true, ...origin } : {
     valid: false,
+    reasonCode: "invalid",
     reason: "Agent 来源与当前 Candidate、Source Hash 或证据哈希不匹配",
   };
+}
+
+export function historicalSignedOriginGap(summary, origin = agentOrigin(summary)) {
+  return origin?.reasonCode === "missing" &&
+    summary?.signoff?.decision === "approved" &&
+    summary?.task?.state === "completed" &&
+    summary?.candidate?.state === "accepted";
 }
 
 export function freezeManualSignoff(summary, fields, idempotencyKey) {

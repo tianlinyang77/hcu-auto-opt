@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { adjudicationResult, agentOrigin, credibleThresholdStatus, formatEvidencePercent, freezeManualSignoff, loadManualCandidateSummary, measurementFacts, signoffMatches, submitManualSignoff } from "../src/manual-candidate.js";
+import { adjudicationResult, agentOrigin, credibleThresholdStatus, formatEvidencePercent, freezeManualSignoff, historicalSignedOriginGap, loadManualCandidateSummary, measurementFacts, signoffMatches, submitManualSignoff } from "../src/manual-candidate.js";
 
 const task = "73f6f07d-14ed-5614-a8e5-75e77c4356f0";
 const candidate = "bbcdc4f0-0369-54d0-b4cd-57763203c272";
@@ -84,6 +84,28 @@ test("BW20 approval requires exactly one hash-bound Agent origin event", () => {
   assert.equal(freezeManualSignoff(drifted,
     { decision: "rejected", actor: "reviewer", reason: "reject missing provenance" },
     "stable-key-origin-reject").payload.decision, "rejected");
+});
+
+test("only an already approved historical task treats a missing origin as a legacy gap", () => {
+  const historical = summary();
+  historical.task.adapter_profile = "bw20-m1-manual-v1";
+  historical.task.state = "completed";
+  historical.candidate.state = "accepted";
+  historical.signoff = { decision: "approved" };
+  assert.equal(historicalSignedOriginGap(historical), true);
+
+  const pending = structuredClone(historical);
+  pending.task.state = "awaiting_signoff";
+  pending.candidate.state = "awaiting_signoff";
+  pending.signoff = null;
+  assert.equal(historicalSignedOriginGap(pending), false);
+
+  const duplicate = structuredClone(historical);
+  duplicate.events = Array.from({ length: 2 }, () => ({
+    event_type: "manual_candidate_agent_origin_recorded",
+    details: { candidate_id: candidate },
+  }));
+  assert.equal(historicalSignedOriginGap(duplicate), false);
 });
 
 test("submits one frozen request and verifies the database receipt", async () => {
