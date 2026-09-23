@@ -10,6 +10,10 @@ rather than a reason to retry or invent a failure result.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import stat
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -22,6 +26,8 @@ from hcuopt.contracts.m2_formal_execution_v1 import (
 from hcuopt.domain.enums import RoundCandidateState, RoundPhase
 from hcuopt.domain.errors import Conflict
 from hcuopt.evaluation.m2_models import BarrierMemberResult
+from hcuopt.measurement.evidence import canonical_json_bytes
+from hcuopt.source_hash import file_uri_to_path
 from hcuopt.storage.formal_phase_journal import PostgresFormalPhaseJournal
 from hcuopt.workers.formal_search_consumer import FormalSearchBatchMaterials
 
@@ -140,11 +146,54 @@ class PostgresFormalSearchBatchMaterialReader:
                     or request.binding.candidate_id != member.candidate_id
                     or request.binding.round_candidate_id != member.round_candidate_id
                     or request.binding.phase is not RoundPhase.SEARCH
+                    or request.binding.task_id != round_authority.task_id
+                    or request.binding.candidate_family_hash
+                    != round_authority.candidate_family_hash
+                    or request.binding.artifact_family_hash
+                    != round_authority.artifact_family_hash
+                    or request.binding.phase_plan_hash != round_authority.search_plan_hash
+                    or request.binding.authority_context_hash != context.context_hash
+                    or request.binding.artifact_id != member.artifact_id
+                    or request.binding.artifact_hash != member.artifact_hash
                     or record.binding != request.binding
                     or record.usage_evidence_hash is None
                     or record.cleanup_evidence_hash is None
                 ):
                     raise Conflict("Formal Search receipt differs from durable phase bindings")
+                usage = _read_hashed_json(
+                    record.usage_evidence_uri, record.usage_evidence_hash
+                )
+                cleanup = _read_hashed_json(
+                    record.cleanup_evidence_uri, record.cleanup_evidence_hash
+                )
+                _verify_phase_evidence_payloads(request, record, usage, cleanup)
+                reservation_id = request.reservation.reservation_id
+                budget_rows = connection.execute(
+                    "SELECT * FROM round_budget_ledger WHERE reservation_id = %s "
+                    "AND entry_type = 'settle' FOR SHARE",
+                    (reservation_id,),
+                ).fetchall()
+                reservation = connection.execute(
+                    "SELECT * FROM round_budget_reservations "
+                    "WHERE reservation_id = %s FOR SHARE",
+                    (reservation_id,),
+                ).fetchone()
+                if (
+                    len(budget_rows) != 1
+                    or reservation is None
+                    or reservation["state"] != "settled"
+                    or reservation["round_id"] != round_authority.round_id
+                    or reservation["candidate_id"] != member.candidate_id
+                    or reservation["phase"] != RoundPhase.SEARCH.value
+                    or budget_rows[0]["raw_usage_evidence_hash"]
+                    != record.usage_evidence_hash
+                    or budget_rows[0]["actual"] != usage["actual"]
+                    or budget_rows[0]["lease_held_seconds"]
+                    != record.lease_held_seconds
+                    or budget_rows[0]["harness_active_seconds"]
+                    != record.harness_active_seconds
+                ):
+                    raise Conflict("Formal Search budget evidence differs from settled ledger")
                 if record.status == "succeeded":
                     reference = record.measurement_ref
                     if reference is None:
@@ -242,3 +291,71 @@ class PostgresFormalSearchBatchMaterialReader:
 
 
 __all__ = ["PostgresFormalSearchBatchMaterialReader"]
+
+
+def _read_hashed_json(uri: str | None, expected_hash: str) -> dict:
+    if not uri:
+        raise Conflict("Formal phase receipt has no evidence URI")
+    path = file_uri_to_path(uri)
+    try:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or not 0 < before.st_size <= 2 * 1024 * 1024
+        ):
+            raise Conflict("Formal phase evidence is not a bounded regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise Conflict("Formal phase evidence changed during open")
+            encoded = stream.read(2 * 1024 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+        if (
+            len(encoded) > 2 * 1024 * 1024
+            or (after.st_size, after.st_mtime_ns)
+            != (before.st_size, before.st_mtime_ns)
+            or "sha256:" + hashlib.sha256(encoded).hexdigest() != expected_hash
+        ):
+            raise Conflict("Formal phase evidence Hash or identity changed")
+        value = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        if isinstance(error, Conflict):
+            raise
+        raise Conflict("Formal phase evidence cannot be read") from error
+    if not isinstance(value, dict) or canonical_json_bytes(value) != encoded:
+        raise Conflict("Formal phase evidence is not a canonical JSON object")
+    return value
+
+
+def _verify_phase_evidence_payloads(request, record, usage: dict, cleanup: dict) -> None:
+    binding = request.binding
+    if (
+        usage.get("schema_version") != "m2a-formal-phase-budget-usage-v1"
+        or usage.get("round_id") != str(binding.round_id)
+        or usage.get("candidate_id") != str(binding.candidate_id)
+        or usage.get("phase") != binding.phase.value
+        or usage.get("reservation_id") != str(request.reservation.reservation_id)
+        or usage.get("status") != record.status
+        or usage.get("planned") != request.reservation.planned.model_dump(mode="json")
+        or usage.get("actual") != record.actual.model_dump(mode="json")
+        or usage.get("lease_held_seconds") != record.lease_held_seconds
+        or usage.get("harness_active_seconds") != record.harness_active_seconds
+        or usage.get("error_code") != record.error_code
+        or usage.get("synthetic") is not False
+        or usage.get("producer_verdict") is not None
+        or usage.get("performance_conclusion") != "not_measured"
+    ):
+        raise Conflict("Formal phase budget evidence differs from its execution receipt")
+    if (
+        cleanup.get("schema_version") != "m2a-formal-phase-cleanup-v1"
+        or cleanup.get("binding") != binding.model_dump(mode="json")
+        or cleanup.get("status") != record.status
+        or cleanup.get("cleanup_status") != record.cleanup_status
+        or cleanup.get("cleanup_evidence") != record.cleanup_evidence
+        or cleanup.get("synthetic") is not False
+        or cleanup.get("automatic_release_allowed") is not False
+    ):
+        raise Conflict("Formal phase cleanup evidence differs from its execution receipt")
