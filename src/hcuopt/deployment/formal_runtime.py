@@ -165,7 +165,9 @@ class FormalDeploymentRuntime:
             journal = PostgresFormalPhaseJournal(
                 self.claims, intent_id, worker_id, claim_token, receipt_store
             )
-            material_reader = PostgresFormalSearchBatchMaterialReader(journal)
+            material_reader = PostgresFormalSearchBatchMaterialReader(
+                journal, publisher=publisher,
+            )
         return FormalSearchConsumer(
             self.claims,
             intent_id=intent_id,

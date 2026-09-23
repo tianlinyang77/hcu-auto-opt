@@ -37,13 +37,16 @@ class _CorrectnessFact:
     verdict: str
     raw_evidence_hash: str
     verification_artifact_hash: str
+    job_id: UUID
+    input_hash: str
 
 
 class PostgresFormalSearchBatchMaterialReader:
     """Build one complete Search family from durable, independently written facts."""
 
-    def __init__(self, journal: PostgresFormalPhaseJournal) -> None:
+    def __init__(self, journal: PostgresFormalPhaseJournal, publisher=None) -> None:
         self.journal = journal
+        self.publisher = publisher
 
     def load(self) -> FormalSearchBatchMaterials:
         journal = self.journal
@@ -103,6 +106,10 @@ class PostgresFormalSearchBatchMaterialReader:
             ):
                 raise Conflict("Formal Search family differs from the claimed Intent")
             correctness = self._correctness_facts(connection, round_authority)
+            if set(correctness) != {member.candidate_id for member in members}:
+                raise Conflict(
+                    "Formal correctness handoff differs from the frozen Candidate Family"
+                )
             phase_rows = connection.execute(
                 "SELECT * FROM formal_phase_journal WHERE intent_id = %s AND phase = 'search' "
                 "ORDER BY candidate_id FOR SHARE",
@@ -120,12 +127,20 @@ class PostgresFormalSearchBatchMaterialReader:
                 if fact is None:
                     raise Conflict("Formal Search requires a completed correctness handoff")
                 if fact.verdict != "correct":
-                    result_members.append(self._correctness_failed(member, fact))
+                    if member.state is not RoundCandidateState.CORRECTNESS_FAILED:
+                        raise Conflict(
+                            "Formal failed correctness differs from frozen Candidate state"
+                        )
+                    result_members.append(
+                        self._correctness_failed(connection, member, fact, round_authority)
+                    )
                     if member.candidate_id in phases:
                         raise Conflict(
                             "Incorrect Formal candidate must not have a Search measurement"
                         )
                     continue
+                if member.state is not RoundCandidateState.CORRECTNESS_PASSED:
+                    raise Conflict("Formal passed correctness differs from frozen Candidate state")
                 phase = phases.get(member.candidate_id)
                 if (
                     phase is None
@@ -237,18 +252,100 @@ class PostgresFormalSearchBatchMaterialReader:
             references=tuple(references),
         )
 
-    @staticmethod
-    def _correctness_failed(member: RoundCandidate, fact: _CorrectnessFact) -> BarrierMemberResult:
+    def _correctness_failed(
+        self, connection, member: RoundCandidate, fact: _CorrectnessFact,
+        round_authority: SearchRound,
+    ) -> BarrierMemberResult:
+        if fact.verdict not in {"incorrect", "invalid"} or self.publisher is None:
+            raise Conflict("Formal correctness failure lacks publishable durable evidence")
         if member.artifact_id is None or member.artifact_hash is None:
             raise Conflict("Formal correctness failure lacks its built Artifact")
+        jobs = connection.execute(
+            "SELECT result, state FROM jobs WHERE job_id = %s FOR SHARE", (fact.job_id,),
+        ).fetchone()
+        events = connection.execute(
+            "SELECT event_type, details FROM job_events WHERE job_id = %s AND event_type IN "
+            "('formal_correctness_result', 'formal_correctness_released') FOR SHARE",
+            (fact.job_id,),
+        ).fetchall()
+        by_type = {row["event_type"]: row["details"] for row in events}
+        reservation = connection.execute(
+            "SELECT * FROM round_budget_reservations WHERE job_id = %s AND attempt = 1 FOR SHARE",
+            (fact.job_id,),
+        ).fetchone()
+        if (
+            jobs is None or jobs["state"] != "succeeded"
+            or len(events) != 2
+            or set(by_type) != {"formal_correctness_result", "formal_correctness_released"}
+            or reservation is None or reservation["state"] != "settled"
+            or reservation["round_id"] != round_authority.round_id
+            or reservation["candidate_id"] != member.candidate_id
+            or reservation["phase"] != RoundPhase.CORRECTNESS.value
+        ):
+            raise Conflict("Formal incorrectness requires a completed and settled Job")
+        details = by_type["formal_correctness_result"]
+        released = by_type["formal_correctness_released"]
+        result = details.get("result")
+        if (
+            not isinstance(result, dict)
+            or jobs["result"] != details
+            or details.get("input_hash") != fact.input_hash
+            or released.get("input_hash") != fact.input_hash
+            or result.get("verdict") != fact.verdict
+            or result.get("raw_evidence_hash") != fact.raw_evidence_hash
+            or result.get("verification_artifact_hash") != fact.verification_artifact_hash
+            or not isinstance(result.get("cleanup_evidence"), dict)
+        ):
+            raise Conflict("Formal incorrectness evidence differs from its handoff")
+        settlement = connection.execute(
+            "SELECT * FROM round_budget_ledger WHERE reservation_id = %s "
+            "AND entry_type = 'settle' FOR SHARE",
+            (reservation["reservation_id"],),
+        ).fetchall()
+        if len(settlement) != 1:
+            raise Conflict("Formal incorrectness has no unique budget settlement")
+        usage_payload = {
+            "job_id": str(fact.job_id),
+            "reservation_id": str(reservation["reservation_id"]),
+            "recorded": details,
+            "released": released,
+        }
+        usage_hash = "sha256:" + hashlib.sha256(canonical_json_bytes(usage_payload)).hexdigest()
+        if usage_hash != settlement[0]["raw_usage_evidence_hash"]:
+            raise Conflict("Formal correctness usage Hash differs from its settled ledger")
+        usage_artifact = self.publisher.publish(usage_payload)
+        cleanup_payload = {
+            "schema_version": "m2a-formal-correctness-cleanup-v1",
+            "round_id": str(round_authority.round_id),
+            "job_id": str(fact.job_id),
+            "candidate_id": str(member.candidate_id),
+            "cleanup_evidence": result.get("cleanup_evidence"),
+            "release": released,
+            "synthetic": False,
+            "automatic_release_allowed": False,
+        }
+        cleanup_artifact = self.publisher.publish(cleanup_payload)
+        failure_payload = {
+            "schema_version": "m2a-formal-correctness-failure-v1",
+            "round_id": str(round_authority.round_id),
+            "candidate_id": str(member.candidate_id),
+            "verdict": fact.verdict,
+            "raw_evidence_hash": fact.raw_evidence_hash,
+            "verification_artifact_hash": fact.verification_artifact_hash,
+            "synthetic": False,
+            "automatic_release_allowed": False,
+        }
+        failure_artifact = self.publisher.publish(failure_payload)
         return BarrierMemberResult(
             round_candidate_id=member.round_candidate_id,
             candidate_id=member.candidate_id,
             candidate_state=RoundCandidateState.CORRECTNESS_FAILED,
             artifact_id=member.artifact_id,
             artifact_hash=member.artifact_hash,
-            failure_evidence_hash=fact.verification_artifact_hash,
-            budget_usage_evidence_hash=fact.raw_evidence_hash,
+            correctness_evidence_hash=fact.verification_artifact_hash,
+            failure_evidence_hash=failure_artifact.sha256,
+            budget_usage_evidence_hash=usage_artifact.sha256,
+            cleanup_evidence_hash=cleanup_artifact.sha256,
             synthetic=False,
         )
 
@@ -281,6 +378,8 @@ class PostgresFormalSearchBatchMaterialReader:
                     verdict=item["verdict"],
                     raw_evidence_hash=item["raw_evidence_hash"],
                     verification_artifact_hash=item["verification_artifact_hash"],
+                    job_id=UUID(item["job_id"]),
+                    input_hash=item["input_hash"],
                 )
             except KeyError as error:
                 raise Conflict("Formal correctness handoff lacks immutable evidence") from error
