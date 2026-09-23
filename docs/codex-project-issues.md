@@ -519,3 +519,15 @@
 - Do not repeat: 不要放宽 busy、VRAM、频率或进程守卫；不要续接失败 campaign 的剩余组，
   也不要把延迟恢复后的空闲状态用于改写旧失败 Run。
 - Last updated: 2026-09-17
+
+# BW20 Agent 传输失败不能按网络可达推定请求未发生
+
+- Scope: project-local
+- Symptom: 新单候选 Run 的 CPU 容器 Attempt `66c7a009-92f0-554f-961a-dcf15d92448a` 结算为 `failed/provider_transport_error`，无 Proposal。
+- Evidence: 正式 Runner 收据记录约 22.28 秒、`cleanup_status=verified`；无凭据 HTTPS 探针返回预期 401。前一 Run 因宿主机可见 `/dev/kfd` 被安全守卫阻止，已正式 reconcile 为 failed。
+- Cause: 本次传输错误的具体网络/服务端原因未知；401 只证明无凭据连接路径可达，不能证明有凭据的请求未到达或未计费。
+- Proven workaround: 保留请求 ID、Attempt 和收据原样；先向模型服务端对账请求/计费与故障，再经新的预算和授权创建新轮次。不得重放已有 `started` Attempt。
+- Validation: 两份后续备份的 SHA256 与格式已核验；本轮没有 Proposal，因此没有进行审核、Candidate 晋级或 HCU 测量。
+- Applies to: BW20 `c2b0eba` 单候选 Agent 新轮次及以后类似的不确定传输结果。
+- Do not repeat: 不要以无凭据 401 或 `provider_transport_error` 为由声称“模型没有调用”，也不要自动补跑第三次付费请求。
+- Last updated: 2026-09-23
