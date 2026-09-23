@@ -116,5 +116,5 @@ Campaign 3 项定向测试通过。本次只读恢复展示，没有重跑优化
 - 新增的 BW20 Agent→M1 来源事件、M1 页面展示和服务端批准校验已在独立的 `feat/mvp-single-candidate-closeout` 分支实现，基于 `origin/main`，不包含 PR #169 的 Formal 提交。
 - 干净主分支基线验证：Web 54 passed；Agent 晋级/来源校验 5 passed、PostgreSQL 用例本机 1 skipped；Ruff、ESLint、前端生产构建通过。PostgreSQL 来源联验在 nmz2 的临时 CPU 容器与随机数据库中 6 passed，覆盖事件幂等、Source Hash 绑定及缺少来源时拒绝批准；容器 `devices=[]`，数据库、容器和暂存源码均已自动清理。
 - Windows 全量 unit：2031 passed、47 skipped、17 failed（494 秒）；16 项是当前 Windows symlink 权限限制，1 项 Formal readiness 测试期望 32 个 evidence、实际为 30，属于暂停的 Formal 范围。本结果不是全量绿色。
-- 尚未完成：提交/推送及代码评审、部署环境真实 API 联页、部署数据库及证据持久化/恢复演练，以及最新代码的一次新鲜 BW20/HCU 7 Agent→M1 实机运行与签署。
+- 代码已提交并推送到独立分支，Draft PR [#170](https://github.com/tianlinyang77/hcu-auto-opt/pull/170) 已创建；尚待评审。部署环境真实 API 联页、部署数据库及证据持久化/恢复演练，以及最新代码的一次新鲜 BW20/HCU 7 Agent→M1 实机运行与签署仍未完成。
 - 不把 2026-09-16 已签历史候选冒充为最新工作树验收；不声明服务级加速。本轮只运行了隔离 PostgreSQL CPU 联验，未运行 HCU。
