@@ -1,12 +1,12 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
-"""Reuse M1 D's raw-evidence verifiers for Formal Search; no new statistics engine."""
+"""Reuse M1 D's raw-evidence verifiers for Formal Search and Holdout phases."""
 
 from dataclasses import dataclass
 from typing import Protocol
 
 from hcuopt.contracts.m2 import RoundCandidate, SearchRound
-from hcuopt.domain.enums import RoundPhase
+from hcuopt.domain.enums import RoundCandidateState, RoundPhase, SearchRoundState
 from hcuopt.domain.errors import Conflict
 from hcuopt.evaluation.m1_protocol import M1HotspotCorrectnessSpec
 from hcuopt.evaluation.m1_verifier import (
@@ -38,6 +38,8 @@ class FormalSearchMaterialLoader(Protocol):
 
 
 class FormalSearchVerifier:
+    """Independently verify one Search or Holdout measurement reference."""
+
     def __init__(
         self,
         loader: FormalSearchMaterialLoader,
@@ -52,21 +54,48 @@ class FormalSearchVerifier:
         material = self.loader.load(reference)
         authority, member = material.round_authority, material.member
         context, correctness = material.performance_context, material.correctness_context
+        if reference.phase is RoundPhase.SEARCH:
+            allowed_round_states = {
+                SearchRoundState.SEARCH_MEASURING,
+                SearchRoundState.SEARCH_BARRIER,
+            }
+            allowed_member_states = {
+                RoundCandidateState.CORRECTNESS_PASSED,
+                RoundCandidateState.SEARCH_MEASURED,
+            }
+            phase_plan_hash = authority.search_plan_hash
+        else:
+            allowed_round_states = {
+                SearchRoundState.HOLDOUT_MEASURING,
+                SearchRoundState.HOLDOUT_BARRIER,
+            }
+            allowed_member_states = {
+                RoundCandidateState.SEARCH_MEASURED,
+                RoundCandidateState.HOLDOUT_MEASURED,
+            }
+            phase_plan_hash = authority.holdout_plan_hash
         if (
             authority.run_mode != "formal"
-            or reference.phase is not RoundPhase.SEARCH
-            or authority.state.value not in {"search_measuring", "search_barrier"}
+            or authority.state not in allowed_round_states
             or authority.round_id != reference.round_id
             or member.round_id != authority.round_id
             or member.round_candidate_id != reference.round_candidate_id
             or member.candidate_id != reference.candidate_id
             or member.candidate_kind != "business"
-            or member.state.value not in {"correctness_passed", "search_measured"}
+            or member.state not in allowed_member_states
             or reference.candidate_family_hash != authority.candidate_family_hash
             or reference.artifact_family_hash != authority.artifact_family_hash
-            or reference.phase_plan_hash != authority.search_plan_hash
+            or reference.phase_plan_hash != phase_plan_hash
+            or (
+                reference.phase is RoundPhase.HOLDOUT
+                and (
+                    reference.holdout_family_hash != authority.holdout_family_hash
+                    or reference.holdout_reveal_evidence_hash
+                    != authority.holdout_reveal_evidence_hash
+                )
+            )
         ):
-            raise Conflict("Formal Search reference differs from durable Round/member")
+            raise Conflict("Formal phase reference differs from durable Round/member")
         for name in (
             "task_id",
             "baseline_epoch_id",
