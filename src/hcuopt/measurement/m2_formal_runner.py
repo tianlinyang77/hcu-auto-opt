@@ -87,9 +87,7 @@ class M2FormalTargetLockRefreshProbe(Protocol):
 class M2FormalExecutionAuthorityReader(Protocol):
     """Deployment-owned re-read boundary for the exact A1 and A2a objects."""
 
-    def load_authorization(
-        self, authorization_id: UUID
-    ) -> FormalProfileWindowAuthorization: ...
+    def load_authorization(self, authorization_id: UUID) -> FormalProfileWindowAuthorization: ...
 
     def load_resolved_plan(self, resolved_plan_hash: str) -> FormalResolvedRoundPlan: ...
 
@@ -183,13 +181,15 @@ class M2FormalPhaseExecutionAdapter:
         member: RoundCandidate,
         request: M2FormalPhaseExecutionRequest,
         output_dir: Path,
+        execution_checkpoint: Callable[[M2FormalPhaseExecutionRequest], None] | None = None,
     ) -> M2FormalPhaseExecutionOutcome:
+        if execution_checkpoint is not None:
+            execution_checkpoint(request)
         now = self.clock()
         request_hash = m2_formal_phase_execution_request_hash(request)
         if (
             self.adapter_profile.profile_id != request.binding.adapter_profile
-            or self.adapter_profile.profile_version
-            != request.binding.adapter_profile_version
+            or self.adapter_profile.profile_version != request.binding.adapter_profile_version
             or self.adapter_profile.profile_hash != request.binding.adapter_profile_hash
             or self.provenance.profile != self.adapter_profile.profile_id
             or self.provenance.adapter_version != self.adapter_profile.profile_version
@@ -228,7 +228,11 @@ class M2FormalPhaseExecutionAdapter:
         failure: Exception | None = None
         cleanup_evidence: dict[str, Any] | None = None
         actual_sample_count = 0
+        harness_started = False
         try:
+            if execution_checkpoint is not None:
+                execution_checkpoint(request)
+            harness_started = True
             result = ManualPerformanceEvidenceResult.model_validate(
                 self.harness.run_manual_performance(
                     self._harness_payload(
@@ -244,6 +248,8 @@ class M2FormalPhaseExecutionAdapter:
             cleanup_evidence = dict(result.cleanup_evidence)
             actual_sample_count = result.measurement.sample_count
             self._validate_harness_result(round_authority, member, request, result)
+            if execution_checkpoint is not None:
+                execution_checkpoint(request)
         except Exception as exc:
             failure = exc
             if isinstance(exc, M2FormalHarnessFailure):
@@ -287,6 +293,7 @@ class M2FormalPhaseExecutionAdapter:
                 )
 
         elapsed = max(0.0, (finished_ns - started_ns) / 1_000_000_000)
+        harness_elapsed = elapsed if harness_started else 0.0
         actual = self._actual_usage(
             request.binding.phase,
             actual_sample_count,
@@ -314,7 +321,7 @@ class M2FormalPhaseExecutionAdapter:
             finished_at=finished_at,
             actual=actual,
             lease_held_seconds=elapsed,
-            harness_active_seconds=elapsed,
+            harness_active_seconds=harness_elapsed,
             measurement_ref=measurement_ref,
             sample_count=actual_sample_count,
             cleanup_evidence=cleanup_evidence,
@@ -338,6 +345,19 @@ class M2FormalPhaseExecutionAdapter:
                 }
             )
 
+        cleanup_uri, cleanup_hash = self._write_payload(
+            output_dir / "cleanup" / "terminal",
+            request.reservation.reservation_id,
+            {
+                "schema_version": "m2a-formal-phase-cleanup-v1",
+                "binding": request.binding.model_dump(mode="json"),
+                "status": record.status,
+                "cleanup_status": record.cleanup_status,
+                "cleanup_evidence": cleanup_evidence,
+                "synthetic": False,
+                "automatic_release_allowed": False,
+            },
+        )
         usage_uri, usage_hash = self._write_payload(
             output_dir / "budget" / "usage",
             request.reservation.reservation_id,
@@ -351,12 +371,20 @@ class M2FormalPhaseExecutionAdapter:
                 "planned": request.reservation.planned.model_dump(mode="json"),
                 "actual": actual.model_dump(mode="json"),
                 "lease_held_seconds": elapsed,
-                "harness_active_seconds": elapsed,
+                "harness_active_seconds": harness_elapsed,
                 "error_code": record.error_code,
                 "synthetic": False,
                 "producer_verdict": None,
                 "performance_conclusion": "not_measured",
             },
+        )
+        record = record.model_copy(
+            update={
+                "usage_evidence_uri": usage_uri,
+                "usage_evidence_hash": usage_hash,
+                "cleanup_evidence_uri": cleanup_uri,
+                "cleanup_evidence_hash": cleanup_hash,
+            }
         )
         settled = self.budget_authority.finalize(
             RoundBudgetFinalizeRequest(
@@ -365,12 +393,13 @@ class M2FormalPhaseExecutionAdapter:
                     entry_type=RoundBudgetEntryType.SETTLE,
                     actual=actual,
                     lease_held_seconds=elapsed,
-                    harness_active_seconds=elapsed,
+                    harness_active_seconds=harness_elapsed,
                     raw_usage_evidence_hash=usage_hash,
                 )
             )
         )
         receipt_ref = self.receipt_store.publish(record)
+        self.receipt_store.load_for_request(receipt_ref, request)
         if failure is not None:
             raise M2FormalExecutionFailure(str(failure), receipt_ref=receipt_ref) from failure
         return M2FormalPhaseExecutionOutcome(
@@ -446,9 +475,7 @@ class M2FormalPhaseExecutionAdapter:
                     "expired Formal Lease recovery failed closed"
                 ) from error
             if not self._cleanup_is_healthy(recovery, binding):
-                raise MeasurementSafetyError(
-                    "expired Formal Lease did not recover its resource"
-                )
+                raise MeasurementSafetyError("expired Formal Lease did not recover its resource")
             raise MeasurementSafetyError("Formal execution Lease expired and was recovered")
         if not (binding.window.starts_at <= now < binding.window.expires_at):
             raise MeasurementSafetyError("Formal execution is outside its approved window")
@@ -491,9 +518,7 @@ class M2FormalPhaseExecutionAdapter:
             or refresh.lease_id != binding.lease_id
             or refresh.fencing_token != binding.fencing_token
         ):
-            raise MeasurementSafetyError(
-                "Target Lock refresh and Formal execution bindings differ"
-            )
+            raise MeasurementSafetyError("Target Lock refresh and Formal execution bindings differ")
         if (
             refresh.synthetic
             or refresh.status != "matched"
@@ -614,8 +639,7 @@ class M2FormalPhaseExecutionAdapter:
             or resolved_member.source_package_store_hash != member.source_package_store_hash
             or resolved_member.source_package_ref.candidate_source_hash
             != member.candidate_source_hash
-            or resolved_member.source_package_ref.source_package_hash
-            != member.source_package_hash
+            or resolved_member.source_package_ref.source_package_hash != member.source_package_hash
             or resolved_member.source_package_ref.manifest_hash != member.source_manifest_hash
             or resolved_member.baseline_source_hash != member.baseline_source_hash
             or resolved_member.hotspot_id != round_authority.hotspot_id

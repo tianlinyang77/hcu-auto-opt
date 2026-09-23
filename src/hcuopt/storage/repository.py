@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -603,10 +603,12 @@ class PostgresRepository(
         target: TargetOperatorProfileRefs,
         workload: WorkloadOperatorProfileRefs,
         candidate_family: BusinessCandidateFamilyManifest,
+        *,
+        connection: Connection[dict[str, Any]] | None = None,
     ) -> FormalOperatorAuthoritySnapshot:
         """Reread one exact non-synthetic Authority selected by a frozen Family."""
 
-        with self.connection() as connection:
+        with (self.connection() if connection is None else nullcontext(connection)) as connection:
             row = connection.execute(
                 """
                 SELECT
@@ -1444,6 +1446,12 @@ class PostgresRepository(
             if row is None:
                 raise NotFound(f"Formal StartIntent not found: {intent_id}")
             if row["state"] in {"cancelled", "failed"}:
+                return self._formal_start_intent(row)
+            if connection.execute(
+                "SELECT 1 FROM formal_round_dispatches WHERE intent_id = %s", (intent_id,)
+            ).fetchone() is not None:
+                # Intent is historical once dispatched; do not rewrite its ready
+                # state when a later reconciliation sees an expired window.
                 return self._formal_start_intent(row)
             row = connection.execute(
                 """
@@ -6524,6 +6532,7 @@ class PostgresRepository(
         expected = {
             "task_id": request.task_id,
             "job_type": request.job_type.value,
+            "execution_lane": "general",
             "accepted_worker_type": request.accepted_worker_type.value,
             "adapter_profile": request.adapter_profile,
             "lease_scope": request.lease_scope.value,
@@ -6548,6 +6557,7 @@ class PostgresRepository(
                 """
                 SELECT * FROM jobs
                 WHERE state = 'queued'
+                  AND execution_lane = 'general'
                   AND available_at <= now()
                   AND accepted_worker_type = %s
                   AND (adapter_profile IS NULL OR adapter_profile = %s)
@@ -6726,6 +6736,8 @@ class PostgresRepository(
         ).fetchone()
         if job is None:
             raise NotFound(f"job not found: {job_id}")
+        if job.get("execution_lane", "general") != "general":
+            raise Conflict("Formal Job requires its dedicated execution owner")
         if job["state"] != JobState.RUNNING.value or job["claim_token"] != claim_token:
             raise StaleClaimToken("claim token is stale or job is not running")
         if job["resource_id"] is not None:
@@ -6799,6 +6811,8 @@ class PostgresRepository(
             ).fetchone()
             if existing is None:
                 raise NotFound(f"job not found: {job_id}")
+            if existing.get("execution_lane", "general") != "general":
+                raise Conflict("Formal Job requires its dedicated completion path")
             if existing["state"] == JobState.SUCCEEDED.value:
                 if existing["claim_token"] != claim_token:
                     raise StaleClaimToken("completion replay used a stale claim token")
@@ -7122,6 +7136,7 @@ class PostgresRepository(
                 WHERE task_id IN (
                     SELECT task_id FROM jobs
                     WHERE state = 'running'
+                      AND execution_lane = 'general'
                       AND heartbeat_at <= now() - make_interval(secs => %s)
                 )
                 ORDER BY task_id
@@ -7133,6 +7148,7 @@ class PostgresRepository(
                 """
                 SELECT * FROM jobs
                 WHERE state = 'running'
+                  AND execution_lane = 'general'
                   AND heartbeat_at <= now() - make_interval(secs => %s)
                 ORDER BY heartbeat_at
                 FOR UPDATE SKIP LOCKED
@@ -8985,6 +9001,7 @@ class PostgresRepository(
                 SELECT job.* FROM jobs AS job
                 JOIN tasks AS task ON task.task_id = job.task_id
                 WHERE job.state = 'succeeded'
+                  AND job.execution_lane = 'general'
                   AND job.workflow_advanced_at IS NULL
                   {workflow_filter}
                 ORDER BY job.finished_at

@@ -343,6 +343,46 @@ class FormalStartCoordinator:
             checked_at=now,
         )
 
+    def validate_for_dispatch(
+        self,
+        intent: FormalStartIntentView,
+        repository: FormalStartRepository,
+    ) -> tuple[
+        FormalRoundPlanPreviewView,
+        FormalExecutionStartAuthority,
+        FormalEvaluationStartAuthority,
+    ]:
+        """Deployment-only reread; no writes and no execution permission by itself.
+
+        A later transaction must compare the Intent version and recheck the
+        database authorities and time. Never expose this as a client assertion.
+        """
+        now = self._now()
+        self._require_verifiers()
+        self._require_local_intent(intent)
+        if intent.state != "ready_for_round_creation" or not intent.authority_ready:
+            raise OperatorFormalStartAuthorityInvalid("Formal Intent is not ready")
+        preview = self._load_preview(intent.preview_id)
+        self._validate_intent_preview(intent, preview, now=now)
+        checked = self.compiler.revalidate(preview, repository, allowed_round_id=intent.round_id)
+        if checked.resolved_plan_hash != intent.resolved_plan_hash or any(
+            item.status == "block" and item.code != "formal_start_authority_not_bound"
+            for item in checked.checks
+        ):
+            raise OperatorPlanHashMismatch("Formal dispatch inputs are no longer ready")
+        execution = FormalExecutionStartAuthority.model_validate(
+            self.object_store.load_execution_authority(intent.execution_authority_hash)
+            .model_dump(mode="json")
+        )
+        evaluation = FormalEvaluationStartAuthority.model_validate(
+            self.object_store.load_evaluation_authority(intent.evaluation_authority_hash)
+            .model_dump(mode="json")
+        )
+        self._verify_execution_authority(intent, preview, execution, now=now)
+        self._verify_evaluation_authority(intent, preview, evaluation, now=now)
+        self._require_authority_role_separation(intent, execution, evaluation, preview)
+        return preview, execution, evaluation
+
     def _verify_execution_authority(
         self,
         intent: FormalStartIntentView,

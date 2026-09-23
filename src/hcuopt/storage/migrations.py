@@ -27,6 +27,12 @@ MIGRATIONS = {
     24: "0024_endpoint_campaign_control_plane.sql",
     25: "0025_endpoint_adjudication_jobs.sql",
     26: "0026_endpoint_campaign_signoff.sql",
+    27: "0027_formal_round_dispatch.sql",
+    28: "0028_formal_dispatch_claim.sql",
+    29: "0029_formal_dispatch_stop.sql",
+    30: "0030_formal_phase_journal.sql",
+    31: "0031_formal_build_journal.sql",
+    32: "0032_formal_job_lane.sql",
 }
 
 

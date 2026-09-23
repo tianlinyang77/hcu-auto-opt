@@ -382,6 +382,10 @@ class M2FormalPhaseExecutionRecord(FrozenFormalExecutionModel):
     lease_held_seconds: float = Field(ge=0)
     harness_active_seconds: float = Field(ge=0)
     measurement_ref: RoundMeasurementRef | None = None
+    usage_evidence_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    usage_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    cleanup_evidence_uri: str | None = Field(default=None, min_length=1, max_length=4000)
+    cleanup_evidence_hash: str | None = Field(default=None, pattern=SHA256_PATTERN)
     sample_count: int = Field(default=0, ge=0, le=10_000_000)
     cleanup_evidence: dict[str, Any] | None = None
     cleanup_status: Literal["verified", "failed"]
@@ -443,6 +447,14 @@ class M2FormalPhaseExecutionRecord(FrozenFormalExecutionModel):
             raise ValueError("failed Formal execution requires a termination reason")
         if self.cleanup_evidence is None:
             raise ValueError("Formal execution requires a terminal cleanup receipt")
+        if (self.usage_evidence_uri is None) != (self.usage_evidence_hash is None):
+            raise ValueError(
+                "Formal execution usage evidence URI and Hash must be written together"
+            )
+        if (self.cleanup_evidence_uri is None) != (self.cleanup_evidence_hash is None):
+            raise ValueError(
+                "Formal execution cleanup evidence URI and Hash must be written together"
+            )
         if (self.status == "cleanup_failed") != (self.cleanup_status == "failed"):
             raise ValueError("cleanup failure status must match its cleanup receipt")
         if self.measurement_ref is not None:

@@ -22,6 +22,7 @@ from hcuopt.measurement.m2_formal_receipt import (
     _publish_once,
     _read_regular,
 )
+from hcuopt.operator.formal_plans import formal_operator_resolved_plan_hash
 
 MAX_FORMAL_START_AUTHORITY_BYTES = 512 * 1024
 
@@ -30,6 +31,51 @@ class DeploymentFormalStartPreviewStore(Protocol):
     """The existing deployment Preview Store; this Store never duplicates it."""
 
     def load_preview(self, preview_id: UUID) -> FormalRoundPlanPreviewView: ...
+
+
+class FileFormalStartPreviewStore:
+    """Administrator-owned immutable Preview snapshots, not a public upload API.
+
+    Expired previews remain readable for audit; coordinator checks expiration
+    and revalidates live authority before use. Storage does not grant execution.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = _prepare_no_follow_directory(root)
+
+    def _path(self, preview_id: UUID) -> Path:
+        # UUID parsing prevents a caller-controlled ID from becoming a path.
+        return self.root / "previews" / str(UUID(str(preview_id))) / "preview.json"
+
+    @staticmethod
+    def _validate(value: FormalRoundPlanPreviewView) -> FormalRoundPlanPreviewView:
+        parsed = FormalRoundPlanPreviewView.model_validate(value.model_dump(mode="json"))
+        if formal_operator_resolved_plan_hash(parsed.resolved_plan) != parsed.resolved_plan_hash:
+            raise SourceArtifactError("Formal Preview plan Hash does not match content")
+        return parsed
+
+    def publish_preview(self, preview: FormalRoundPlanPreviewView) -> FormalRoundPlanPreviewView:
+        value = self._validate(preview)
+        payload = canonical_json_bytes(value)
+        if len(payload) > MAX_FORMAL_START_AUTHORITY_BYTES:
+            raise SourceArtifactError("Formal Preview exceeds its size limit")
+        _publish_once(self.root, self._path(value.preview_id), payload)
+        return self.load_preview(value.preview_id)
+
+    def load_preview(self, preview_id: UUID) -> FormalRoundPlanPreviewView:
+        path = self._path(preview_id)
+        if not path.exists():
+            _raise_if_missing_path_is_redirected(self.root, path)
+            raise NotFound("Formal Preview is not published")
+        try:
+            value = self._validate(FormalRoundPlanPreviewView.model_validate_json(
+                _read_regular(self.root, path, MAX_FORMAL_START_AUTHORITY_BYTES),
+            ))
+            if value.preview_id != UUID(str(preview_id)):
+                raise ValueError("Preview identity mismatch")
+            return value
+        except (ValidationError, ValueError, TypeError) as error:
+            raise SourceArtifactError("Formal Preview snapshot is invalid") from error
 
 
 AuthorityT = TypeVar(

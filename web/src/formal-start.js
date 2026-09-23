@@ -24,7 +24,7 @@ async function request(path, token, options, fetchImpl) {
   try {
     response = await fetchImpl(path, { ...options, credentials: "omit", redirect: "error", cache: "no-store",
       headers: { Authorization: `Bearer ${token}`, ...(options.body ? { "Content-Type": "application/json" } : {}) } });
-  } catch { throw new Error("网络失败，提交结果可能未知。请使用同一凭据和原请求重试。"); }
+  } catch { throw new Error(options.method === "GET" ? "状态读取失败，请稍后重试。" : "网络失败，提交结果可能未知。请使用同一凭据和原请求重试。"); }
   if (!response.ok) throw new Error(response.status === 403 ? "凭据无效、已撤销或已过期。" :
     response.status === 409 ? "授权或请求发生冲突，请核对原意图，不要另建请求。" :
     "正式管理入口不可用或请求被拒绝；不会转用演练入口。");
@@ -50,4 +50,70 @@ export async function submitFormalIntent(submission, token, fetchImpl = fetch) {
     throw new Error("回执身份或执行边界不匹配，不能视为受理成功。");
   }
   return receipt;
+}
+
+export const FORMAL_CANDIDATE_STATES = {
+  intake_accepted: "已接收，等待构建", building: "构建中", build_failed: "构建失败",
+  built: "制品已归档，尚未通过正确性验证", correctness_failed: "正确性验证失败",
+  correctness_passed: "正确性已通过，等待性能评测", search_failed: "搜索评测失败",
+  search_measured: "搜索样本已记录，尚非收益结论", not_promoted: "未进入留出集验证",
+  holdout_failed: "留出集评测失败", holdout_measured: "留出集样本已记录，等待裁决",
+  invalid: "候选无效",
+};
+
+export const FORMAL_RECOVERY_STATES = {
+  not_invoked: "尚无执行记录", invocation_unresolved: "执行状态待核实，禁止重试",
+  unknown_requires_manual_recovery: "结果未知，需人工核查资源",
+  result_ready: "结果已留存，等待部署侧收尾", settlement_pending: "已记录释放，等待补账",
+  completed: "执行与结算已完成（不等于候选接受）",
+  inconsistent: "记录不一致，暂停处理", ownership_or_budget_conflict: "资源归属或预算冲突",
+};
+
+export async function loadFormalRecovery(submission, receipt, token, fetchImpl = fetch) {
+  const frozen = freezeFormalSubmission(submission);
+  const status = await request("/v1/operator/formal-correctness-recovery", token, { method: "GET" }, fetchImpl);
+  const report = status?.report;
+  if (!status || status.schema_version !== "formal-recovery-observation-v1" ||
+      status.intent_id !== receipt.intent_id || status.round_id !== receipt.round_id ||
+      status.resolved_plan_hash !== frozen.resolved_plan_hash ||
+      Object.keys(frozen.expected_service_identity).some((key) => status.service_identity?.[key] !== frozen.expected_service_identity[key]) ||
+      status.web_reconciliation_allowed !== false ||
+      !report || report.schema_version !== "formal-correctness-recovery-v1" ||
+      !UUID.test(report.job_id) || !HASH.test(report.snapshot_hash) || !HASH.test(report.input_hash) ||
+      !Object.hasOwn(FORMAL_RECOVERY_STATES, report.status) ||
+      report.execution_retry_allowed !== false || report.automatic_release_allowed !== false ||
+      typeof report.resource_id !== "string" || typeof report.resource_state !== "string" ||
+      typeof report.budget_state !== "string" || typeof report.resource_owned_by_attempt !== "boolean" ||
+      typeof report.recorded_result !== "boolean" || typeof report.release_recorded !== "boolean" ||
+      report.reconciliation_allowed !== ["result_ready", "settlement_pending", "completed"].includes(report.status) ||
+      !Array.isArray(report.required_manual_checks) || report.required_manual_checks.some((item) => typeof item !== "string")) {
+    throw new Error("执行核查记录与原请求不匹配，不能据此恢复或释放资源。");
+  }
+  return status;
+}
+
+export async function loadFormalDispatch(submission, receipt, token, fetchImpl = fetch) {
+  const frozen = freezeFormalSubmission(submission);
+  const status = await request("/v1/operator/formal-round-dispatch", token, { method: "GET" }, fetchImpl);
+  if (!status || status.schema_version !== "formal-dispatch-status-v1" ||
+      status.intent_id !== receipt.intent_id || !UUID.test(status.round_id) ||
+      status.round_id !== receipt.round_id || status.resolved_plan_hash !== frozen.resolved_plan_hash ||
+      Object.keys(frozen.expected_service_identity).some((key) => status.service_identity?.[key] !== frozen.expected_service_identity[key]) ||
+      !["not_created", "queued", "cancelled", "claimed", "recovery_required", "stop_requested"].includes(status.state) ||
+      status.execution_consumer_enabled !== false || status.automatic_release_allowed !== false) {
+    throw new Error("派发状态与原请求不匹配，不能推断执行进度。");
+  }
+  if (status.candidates !== undefined) {
+    const candidates = status.candidates;
+    if (!Array.isArray(candidates) || candidates.length > 4 || candidates.some((item) =>
+      !item || !UUID.test(item.candidate_id) || !UUID.test(item.round_candidate_id) ||
+      !Object.hasOwn(FORMAL_CANDIDATE_STATES, item.state) ||
+      ((item.artifact_id == null) !== (item.artifact_hash == null)) ||
+      (item.artifact_id != null && (!UUID.test(item.artifact_id) || !/^sha256:[a-f0-9]{64}$/.test(item.artifact_hash)))) ||
+      new Set(candidates.map((item) => item.candidate_id)).size !== candidates.length ||
+      new Set(candidates.map((item) => item.round_candidate_id)).size !== candidates.length) {
+      throw new Error("候选进度格式不匹配，不能推断执行进度。");
+    }
+  }
+  return status;
 }

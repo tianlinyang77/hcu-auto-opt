@@ -1,0 +1,171 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
+
+from hcuopt.deployment.formal_runtime import FormalDeploymentRuntime
+from hcuopt.domain.errors import Conflict
+from tests.unit.formal_signed_fixture import setup_signed_management as setup_management
+from tests.unit.test_formal_start_management_api import TOKEN
+
+
+def test_runtime_composes_console_without_implicit_dispatch(tmp_path):
+    management, repo, payload = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    assert runtime.dispatcher.repository is repo
+    assert runtime.claims.dispatcher is runtime.dispatcher
+    assert not runtime.dispatcher.enabled and not runtime.claims.enabled
+    root = tmp_path / "web"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("fixture", encoding="utf-8")
+    app = runtime.console(static_root=root, browser_origin="http://127.0.0.1:4198")
+    with TestClient(app, base_url="http://127.0.0.1:4198") as client:
+        result = client.post(
+            "/v1/operator/formal-start-intents", json=payload,
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert result.status_code == 200
+        assert result.json()["hcu_accessed"] is False
+        assert client.get("/v1/operator/formal-round-dispatch").status_code == 403
+        assert client.post("/v1/operator/formal-round-dispatch").status_code == 405
+        assert client.get("/v1/operator/formal-correctness-recovery").status_code == 404
+        assert client.get("/v1/jobs").status_code == 404
+    assert len(repo.intents) == 1
+
+
+@pytest.mark.parametrize("field", ["dispatch_reader", "recovery_reader"])
+def test_runtime_rejects_prebound_readers(tmp_path, field):
+    management, repo, _ = setup_management(tmp_path)
+    with pytest.raises(Conflict, match="unbound"):
+        FormalDeploymentRuntime(repo, replace(management, **{field: object()}))
+
+
+def test_runtime_rejects_foreign_recovery_journal_before_serving(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    foreign = SimpleNamespace(lease=SimpleNamespace(jobs=SimpleNamespace(claims=object())))
+    with pytest.raises(Conflict, match="another runtime"):
+        runtime.console(static_root=tmp_path, browser_origin="http://127.0.0.1:4198",
+                        correctness_journal=foreign)
+
+
+def test_runtime_rejects_truthy_string_enable(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    with pytest.raises(ValueError, match="boolean"):
+        FormalDeploymentRuntime(repo, management, enabled="false")
+
+
+def test_runtime_worker_factories_share_claims_and_stay_disabled(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    consumer = runtime.build_consumer(
+        intent_id=None, worker_id="builder", claim_token=None,
+        builder=SimpleNamespace(enabled=True),
+    )
+    assert consumer.journal.claims is runtime.claims
+    assert consumer.store.claims is runtime.claims
+    assert not consumer.enabled
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(reservation_id=None, output_dir=tmp_path)
+    foreign = SimpleNamespace(lease=SimpleNamespace(jobs=SimpleNamespace(claims=object())))
+    with pytest.raises(Conflict, match="another runtime"):
+        runtime.correctness_consumer(journal=foreign, adapter=None)
+    with pytest.raises(Conflict, match="disabled"):
+        runtime.local_build_consumer(
+            intent_id=None, worker_id="builder", claim_token=None,
+            artifact_root=tmp_path / "not-created", cache_root=tmp_path / "no-cache",
+        )
+    assert not (tmp_path / "not-created").exists()
+
+
+def test_phase_factory_shares_claims_reader_and_receipt_store(tmp_path):
+    from tests.unit.test_formal_execution_checkpoint import setup
+
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    (tmp_path / "phase").mkdir()
+    adapter, harness, _, _ = setup(tmp_path / "phase")
+    consumer = runtime.phase_consumer(
+        intent_id=None, worker_id="phase-worker", claim_token=None, adapter=adapter,
+    )
+    assert consumer.journal.claims is runtime.claims
+    assert consumer.material_reader.journal is consumer.journal
+    assert consumer.journal.receipt_store is adapter.receipt_store
+    assert not consumer.enabled
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(
+            candidate_id=None, authorization_id=None, resolved_plan_hash="unused",
+            reservation=None, deployment={}, output_dir=tmp_path,
+        )
+    assert not harness.payloads
+    with pytest.raises(TypeError, match="registered"):
+        runtime.phase_consumer(intent_id=None, worker_id="x", claim_token=None, adapter=object())
+
+
+def test_search_factory_shares_claims_and_stays_disabled(tmp_path):
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    reader = SimpleNamespace(load=lambda: None)
+    consumer = runtime.search_consumer(
+        intent_id=None,
+        worker_id="search-worker",
+        claim_token=None,
+        material_reader=reader,
+        verifier=object(),
+        publisher=object(),
+    )
+    assert consumer.claims is runtime.claims
+    assert consumer.repository is runtime.repository
+    with pytest.raises(Conflict, match="disabled"):
+        consumer.execute_current_once(
+            closed_by="test", closed_at=None, idempotency_key="search-runtime-test"
+        )
+
+
+def test_search_factory_builds_its_durable_reader(tmp_path):
+    from hcuopt.measurement.m2_formal_receipt import M2FormalPhaseExecutionReceiptStore
+    from hcuopt.storage.formal_search_materials import PostgresFormalSearchBatchMaterialReader
+
+    management, repo, _ = setup_management(tmp_path)
+    runtime = FormalDeploymentRuntime(repo, management)
+    store = M2FormalPhaseExecutionReceiptStore(tmp_path / "search-receipts")
+    consumer = runtime.search_consumer(
+        intent_id=None,
+        worker_id="search-worker",
+        claim_token=None,
+        receipt_store=store,
+        verifier=object(),
+        publisher=object(),
+    )
+    assert isinstance(consumer.material_reader, PostgresFormalSearchBatchMaterialReader)
+    assert consumer.material_reader.journal.claims is runtime.claims
+    assert consumer.material_reader.journal.receipt_store is store
+
+
+@pytest.mark.parametrize("role", ["actor", "execution", "evaluation"])
+def test_signed_runtime_rejects_tampered_signature(tmp_path, role):
+    management, repo, payload = setup_management(tmp_path)
+    if role == "actor":
+        capability = management.capabilities[0]
+        management = replace(management, capabilities=(replace(
+            capability, assertion=capability.assertion.model_copy(update={"signature": "A" * 88}),
+        ),))
+    else:
+        store = management.coordinator.object_store
+        authority = getattr(store, role)
+        setattr(store, role, authority.model_copy(update={"signature": "A" * 88}))
+    runtime = FormalDeploymentRuntime(repo, management)
+    root = tmp_path / "signed-web"
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text("fixture", encoding="utf-8")
+    with TestClient(runtime.console(static_root=root, browser_origin="http://127.0.0.1:4198"),
+                    base_url="http://127.0.0.1:4198") as client:
+        response = client.post("/v1/operator/formal-start-intents", json=payload,
+                               headers={"Authorization": f"Bearer {TOKEN}"})
+    assert response.status_code != 200 or response.json()["state"] != "ready_for_round_creation"
+    assert all(intent.state != "ready_for_round_creation" for intent in repo.intents.values())
+    if role == "actor":
+        assert not repo.intents

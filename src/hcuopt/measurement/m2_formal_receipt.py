@@ -12,8 +12,10 @@ from hcuopt.contracts.m2_formal_execution_v1 import (
     M2FormalPhaseExecutionReceipt,
     M2FormalPhaseExecutionReceiptRef,
     M2FormalPhaseExecutionRecord,
+    M2FormalPhaseExecutionRequest,
     m2_formal_execution_receipt_hash,
     m2_formal_execution_receipt_id_for,
+    m2_formal_phase_execution_request_hash,
 )
 from hcuopt.domain.errors import SourceArtifactError
 from hcuopt.measurement.evidence import canonical_json_bytes
@@ -188,6 +190,25 @@ class M2FormalPhaseExecutionReceiptStore:
             or binding.get("content_hash") != reference.content_hash
         ):
             raise SourceArtifactError("Formal Receipt ID was rebound to other content")
+        return receipt
+
+    def load_for_request(
+        self,
+        reference: M2FormalPhaseExecutionReceiptRef,
+        request: M2FormalPhaseExecutionRequest,
+    ) -> M2FormalPhaseExecutionReceipt:
+        """Read immutable bytes and bind the entire phase/Attempt/Lease/Fence.
+
+        A valid failed receipt remains a failure; this never releases a resource
+        or treats cleanup_status alone as proof of current device health.
+        """
+        receipt = self.load(reference)
+        execution = receipt.execution
+        if (
+            execution.binding != request.binding
+            or execution.request_hash != m2_formal_phase_execution_request_hash(request)
+        ):
+            raise SourceArtifactError("Formal execution receipt differs from expected request")
         return receipt
 
 

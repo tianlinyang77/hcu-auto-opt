@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -22,6 +23,10 @@ from hcuopt.domain.enums import (
     RoundTerminalReason,
     SearchRoundRunMode,
     SearchRoundState,
+)
+from hcuopt.evaluation.endpoint_selection import (
+    FormalSearchSelectionInput,
+    select_endpoint_candidate,
 )
 from hcuopt.evaluation.evidence_reader import EvidenceReadError
 from hcuopt.evaluation.m2_formal_authority import FormalHoldoutRevealPersistence
@@ -370,6 +375,35 @@ def build_formal_round_evidence(
         "scope_warning": "not a model, service, or end-to-end performance conclusion",
         "automatic_release_allowed": False,
     }
+    # Historical summaries retain their original meaning and Hash. Only the
+    # explicit new Search schema enables service selection, inside signed evidence.
+    search_entry = next(
+        entry for entry in _flatten_entries(index.entries)
+        if entry.role == "search/input-summary"
+    )
+    search_bytes = evidence_reader.read_raw_bytes(search_entry.uri, search_entry.sha256)
+    if _bytes_hash(search_bytes) != search_barrier.input_summary_hash:
+        raise M2RoundEvidenceError("search_selection_hash_mismatch", "Search summary changed")
+    try:
+        search_document = json.loads(search_bytes)
+    except (ValueError, UnicodeDecodeError):
+        search_document = None  # Legacy opaque evidence cannot select an Endpoint winner.
+    if isinstance(search_document, dict) and (
+        search_document.get("schema_version") == "formal-search-selection-v1"
+    ):
+        try:
+            selected = select_endpoint_candidate(
+                FormalSearchSelectionInput.model_validate_json(search_bytes),
+                search_barrier, multiple_comparison,
+            )
+        except ValueError as exc:
+            raise M2RoundEvidenceError("endpoint_selection_invalid", str(exc)) from exc
+        summary["endpoint_selection"] = {
+            "rule": "frozen_search_rank_after_batch_d_v1",
+            "search_input_hash": search_barrier.input_summary_hash,
+            "selected_candidate_id": str(selected) if selected else None,
+            "status": "selected" if selected else "not_applicable",
+        }
     values = {
         "round_id": round_authority.round_id,
         "task_id": round_authority.task_id,

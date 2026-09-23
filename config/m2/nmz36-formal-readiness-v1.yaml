@@ -106,7 +106,7 @@ gates:
         digest_mode: text_lf
         evidence_type: protected_formal_round_finalizer
       - path: src/hcuopt/storage/repository.py
-        sha256: sha256:a269b90399ffab328d99822dc3e2c4a0f694e69a527695551dc72f9bc1506547
+        sha256: sha256:57430f00a0f33f81559ba3b7d16df62af36848abd6b429a23e1eb6de3fa57cd1
         digest_mode: text_lf
         evidence_type: formal_repository_terminal_transactions
       - path: src/hcuopt/storage/sql/0013_m2_formal_finalizer.sql
@@ -178,7 +178,7 @@ gates:
         digest_mode: text_lf
         evidence_type: isolated_formal_start_contract
       - path: src/hcuopt/operator/formal_start.py
-        sha256: sha256:fae9a15842605146b10fc070b090e2c7664334fd0724486b44bf0c41675ce2c9
+        sha256: sha256:1c092c6eef7ba11c023ebfeb24be000473ca69778397da569fdf73dfc03b66eb
         digest_mode: text_lf
         evidence_type: authority_reread_and_nonexecuting_coordinator
       - path: src/hcuopt/storage/sql/0018_m2a_formal_start_intent.sql
@@ -186,7 +186,7 @@ gates:
         digest_mode: text_lf
         evidence_type: durable_start_intent_and_append_only_events
       - path: tests/integration/test_formal_start_intent_postgres.py
-        sha256: sha256:87b4878c4876921f0270055569ca8de9d17b1c019257e40075037fb1e340c566
+        sha256: sha256:3e123c1e93144eec8971bfd1e28d2abe6f3d5d1175063416039da2d93805dcfc
         digest_mode: text_lf
         evidence_type: postgres_concurrency_idempotency_and_recovery_tests
   - code: historical_single_candidate_provenance

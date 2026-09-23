@@ -58,6 +58,8 @@
 ### S2：Intent 到正式 Round 的事务派发桥
 
 独立 Contract/ADR/迁移评审，不能偷偷扩展 S1 的返回状态。
+设计提案见 `docs/adr/0025-formal-round-dispatch.md`，实施与验收矩阵见
+`docs/plans/formal-dispatch-acceptance.md`；当前仅为 Proposed，尚无生产派发实现。
 
 - 服务端重新验证窗口、readiness 和 B/D 绑定，事务写入唯一 Round 与 durable 派发记录。
 - 不承诺消息传输“恰好一次”；采用可重试投递、唯一业务键、幂等领取和 fencing，阻止重复物理运行。

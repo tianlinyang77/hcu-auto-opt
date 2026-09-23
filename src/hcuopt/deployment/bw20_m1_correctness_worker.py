@@ -35,6 +35,23 @@ class BW20M1AllocatorCorrectnessEvidenceProducer(Nmz36M1AllocatorCorrectnessEvid
     """Reuse the generic allocator oracle under the explicit BW20 policy."""
 
 
+class BW20FormalCorrectnessEvidenceProducer(BW20M1AllocatorCorrectnessEvidenceProducer):
+    """Formal bypasses the generic Worker, so enforce its preflight here too."""
+
+    def produce_manual_correctness_evidence(self, payload, context, hotspot, output_dir):
+        from hcuopt.domain.enums import LeaseScope
+
+        job = BW20_M1_POLICY.require_job_context(payload, LeaseScope.SHARED)
+        assert_live = job.get("assert_live_lease")
+        if not callable(assert_live):
+            raise ExecutionSafetyError("Formal BW20 correctness requires a live lease callback")
+        assert_live()
+        self.cleaner.guard(job["resource_id"])
+        # Telemetry takes time. Recheck stop/expiry before any producer side effect.
+        assert_live()
+        return super().produce_manual_correctness_evidence(payload, context, hotspot, output_dir)
+
+
 _EXPECTED_RENDER_MINOR = 135
 _EXPECTED_KFD_GPU_ID = 3004
 
@@ -223,7 +240,10 @@ def build_bw20_m1_correctness_registry(
     trusted_evidence_root: Path,
     output_dir: Path,
     guard: BW20M1IdleGuard,
+    formal: bool = False,
 ) -> AdapterRegistry:
+    if type(formal) is not bool:
+        raise ValueError("Formal correctness switch must be a boolean")
     BW20_M1_POLICY.validate_target(target)
     source = source_root.resolve(strict=True)
     trusted = trusted_evidence_root.resolve(strict=True)
@@ -241,7 +261,9 @@ def build_bw20_m1_correctness_registry(
     protocol = load_registered_m1_protocol()
     cleaner = BW20M1CorrectnessCleaner(target, guard)
     output_access = BW20M1OutputAccess(output)
-    producer: M1CorrectnessEvidenceProducer = BW20M1AllocatorCorrectnessEvidenceProducer(
+    producer_type = (BW20FormalCorrectnessEvidenceProducer if formal
+                     else BW20M1AllocatorCorrectnessEvidenceProducer)
+    producer: M1CorrectnessEvidenceProducer = producer_type(
         target=target,
         source_root=source,
         protocol=protocol,

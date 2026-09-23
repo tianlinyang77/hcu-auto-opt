@@ -55,6 +55,8 @@ jobs:
           tests/unit/test_formal_start_management_api.py
           tests/unit/test_formal_intent_access.py
           tests/unit/test_formal_intent_console.py
+          tests/unit/test_formal_dispatch.py
+          tests/unit/test_formal_dispatch_status_api.py
           tests/unit/test_agent_proposal_verifier.py
           tests/unit/test_agent_generation_read_model_api.py
           tests/unit/test_agent_cli.py

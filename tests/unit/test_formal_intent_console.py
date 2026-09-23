@@ -46,6 +46,7 @@ def test_console_only_exposes_preparation_and_submission(tmp_path):  # type: ign
             "/v1/leases",
             "/docs",
             "/openapi.json",
+            "/v1/operator/formal-round-dispatch",
         ):
             for method in ("GET", "POST", "DELETE"):
                 blocked = client.request(method, path, headers=headers)

@@ -331,9 +331,7 @@ def _register_execution_authority(
             "candidate_id": uuid5(member.candidate_id, "second-formal-candidate"),
             "source_package_ref": candidate.source_package_ref.model_copy(
                 update={
-                    "candidate_source_hash": _hash(
-                        f"second-candidate-{member.candidate_id}"
-                    ),
+                    "candidate_source_hash": _hash(f"second-candidate-{member.candidate_id}"),
                     "source_package_hash": _hash(f"second-package-{member.candidate_id}"),
                     "manifest_hash": _hash(f"second-manifest-{member.candidate_id}"),
                 }
@@ -705,8 +703,7 @@ def _adapter(
         authority_reader=authority_reader or AuthorityReader(),
         authorization_verifier=authorization_verifier or AuthorizationVerifier(),
         isolation_authority=(
-            registry
-            or SqliteM2FormalPhaseIsolationAuthority(tmp_path / "formal-isolation.sqlite3")
+            registry or SqliteM2FormalPhaseIsolationAuthority(tmp_path / "formal-isolation.sqlite3")
         ),
         lease_is_live=live,
         target_lock_is_live=target_lock,
@@ -755,6 +752,8 @@ def test_execution_authority_hash_binds_fence_and_topology() -> None:
     assert m2_formal_phase_execution_request_hash(changed) != (
         m2_formal_phase_execution_request_hash(request)
     )
+
+
 def test_formal_search_executes_through_unique_harness_and_settles(tmp_path: Path) -> None:
     round_authority = _round(RoundPhase.SEARCH)
     authority = _authority(round_authority)
@@ -775,24 +774,32 @@ def test_formal_search_executes_through_unique_harness_and_settles(tmp_path: Pat
     assert receipt.execution.status == "succeeded"
     assert receipt.execution.binding.phase is RoundPhase.SEARCH
     assert receipt.execution.measurement_ref is not None
-    assert receipt.execution.measurement_ref.baseline_sample_set_hash == (
-        harness.result.measurement.summary["baseline_sample_set_hash"]
+    assert (
+        receipt.execution.measurement_ref.baseline_sample_set_hash
+        == (harness.result.measurement.summary["baseline_sample_set_hash"])
     )
-    assert receipt.execution.measurement_ref.process_identity_set_hash == (
-        harness.result.measurement.summary["process_identity_set_hash"]
+    assert (
+        receipt.execution.measurement_ref.process_identity_set_hash
+        == (harness.result.measurement.summary["process_identity_set_hash"])
     )
-    assert receipt.execution.measurement_ref.cache_namespace_set_hash == (
-        harness.result.measurement.summary["cache_namespace_set_hash"]
+    assert (
+        receipt.execution.measurement_ref.cache_namespace_set_hash
+        == (harness.result.measurement.summary["cache_namespace_set_hash"])
     )
+    assert receipt.execution.usage_evidence_uri
+    assert receipt.execution.usage_evidence_hash
+    assert receipt.execution.cleanup_evidence_uri
+    assert receipt.execution.cleanup_evidence_hash
+    assert receipt.execution.usage_evidence_hash != receipt.execution.cleanup_evidence_hash
+    assert Path(receipt.execution.usage_evidence_uri.removeprefix("file:///")).is_file()
+    assert Path(receipt.execution.cleanup_evidence_uri.removeprefix("file:///")).is_file()
     assert receipt.performance_conclusion == "not_measured"
     assert receipt.synthetic is False
     assert harness.payloads[0]["host_id"] == "nmz36"
     assert harness.payloads[0]["resource_id"] == "hcu-7"
     assert harness.payloads[0]["numa_node"] == 7
     assert harness.payloads[0]["cpu_affinity"] == "112-127"
-    assert harness.payloads[0]["target_lock_refresh_hash"] == _refresh(
-        request.binding
-    ).report_hash
+    assert harness.payloads[0]["target_lock_refresh_hash"] == _refresh(request.binding).report_hash
     assert budget.finalizes[0].ledger_entry.entry_type is RoundBudgetEntryType.SETTLE
     assert budget.finalizes[0].ledger_entry.actual.search_samples == 8
 
@@ -897,9 +904,7 @@ def test_holdout_cannot_reuse_search_measurement_identity(tmp_path: Path) -> Non
             tmp_path,
             Harness(reused),
             RecordingBudget(),
-            registry=SqliteM2FormalPhaseIsolationAuthority(
-                tmp_path / "phase-isolation.sqlite3"
-            ),
+            registry=SqliteM2FormalPhaseIsolationAuthority(tmp_path / "phase-isolation.sqlite3"),
         ).run(
             round_authority=holdout_round,
             formal_authority=authority,
@@ -1106,9 +1111,7 @@ def test_execution_crossing_renewal_deadline_fails_closed(tmp_path: Path) -> Non
             )
         }
     )
-    request = request.model_copy(
-        update={"binding": binding, "reservation": reservation}
-    )
+    request = request.model_copy(update={"binding": binding, "reservation": reservation})
     budget = RecordingBudget()
 
     with pytest.raises(M2FormalExecutionFailure) as captured:
