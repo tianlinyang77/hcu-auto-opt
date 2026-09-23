@@ -116,5 +116,13 @@ Campaign 3 项定向测试通过。本次只读恢复展示，没有重跑优化
 - 新增的 BW20 Agent→M1 来源事件、M1 页面展示和服务端批准校验已在独立的 `feat/mvp-single-candidate-closeout` 分支实现，基于 `origin/main`，不包含 PR #169 的 Formal 提交。
 - 干净主分支基线验证：Web 54 passed；Agent 晋级/来源校验 5 passed、PostgreSQL 用例本机 1 skipped；Ruff、ESLint、前端生产构建通过。PostgreSQL 来源联验在 nmz2 的临时 CPU 容器与随机数据库中 6 passed，覆盖事件幂等、Source Hash 绑定及缺少来源时拒绝批准；容器 `devices=[]`，数据库、容器和暂存源码均已自动清理。
 - Windows 全量 unit：2031 passed、47 skipped、17 failed（494 秒）；16 项是当前 Windows symlink 权限限制，1 项 Formal readiness 测试期望 32 个 evidence、实际为 30，属于暂停的 Formal 范围。本结果不是全量绿色。
-- 代码已提交并推送到独立分支，Draft PR [#170](https://github.com/tianlinyang77/hcu-auto-opt/pull/170) 已创建；尚待评审。部署环境真实 API 联页、部署数据库及证据持久化/恢复演练，以及最新代码的一次新鲜 BW20/HCU 7 Agent→M1 实机运行与签署仍未完成。
+- 来源绑定代码已通过 [#170](https://github.com/tianlinyang77/hcu-auto-opt/pull/170) 合入 main，Commit `e12aac0e31abc28ce9b971a2b86268038024b5c4`。最新代码的一次新鲜 BW20/HCU 7 Agent→M1 实机运行与签署仍未完成。
+
+## 2026-09-23 BW20 部署联验补记
+
+- 在 BW20 的独立目录部署 `e12aac0` 源码，固定归档 SHA256 为 `a2caf9c31585d0dc3b8651218713337f84bdfc96068e4fb639069fb528886d3a`；Linux/Python 3.10 的 Agent 晋级及来源校验定向测试 5 passed。
+- 对现有主库做 PostgreSQL 自定义格式备份，SHA256 为 `ea5d30b81cecaf1d08c9d4f873bdc6a834478c1d7c105cf2693886a7a3203a91`。在独立的卷挂载实例恢复并重启；迁移/Task/Candidate/事件/签核/Agent Run 行数分别为 `32/29/2/113/1/10`，与原库一致。原库仍在运行，未切换写流量。证据目录的长期备份与恢复尚待完成。
+- 用最新源码和恢复库启动了限于本机回环地址的短时 API，真实 HTTP 读取历史 M1 Task `73f6f07d-14ed-5614-a8e5-75e77c4356f0`，返回 `completed/accepted`；前端经隧道读取并显示原有 D 结论、测量字段与签核。历史 Task 没有新版本 Agent 来源事件，因此不能当作来源绑定正向验收。
+- 联页发现历史已签 Task 被错误显示为当前来源校验失败；本次修订把它标为历史字段缺口，待签任务的来源缺失/重复/漂移仍按原规则拒绝批准。前端 55 项测试、ESLint、生产构建通过。
+- 本次没有启动 HCU Worker、重新调用模型、复测性能或重签旧 Task。新候选的完整当期实机链路仍是最小 MVP 的最后一项验收。
 - 不把 2026-09-16 已签历史候选冒充为最新工作树验收；不声明服务级加速。本轮只运行了隔离 PostgreSQL CPU 联验，未运行 HCU。
