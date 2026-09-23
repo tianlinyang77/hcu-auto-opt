@@ -138,3 +138,11 @@ Campaign 3 项定向测试通过。本次只读恢复展示，没有重跑优化
 - 新库在两次失败后备份为 BW20 私有目录 `mvp-persistence-20260923/backups/hcuopt-post-agent-c2b0eba.dump`，SHA256 `e9ef157b58c703756e39cfbf1652fefe5bdf42025b2d3e437c1ee7c54278a83f`；Agent 输入与收据归档 `agent-evidence-c2b0eba.tar.gz`，SHA256 `5f6fb1d8554907ca3afd28eeb55f6f43f132fc0ac07a7d16b7d1278147e765f7`。两份归档已做格式读取核验，仍在同一主机磁盘，不能代替异地备份。模型凭据不在 Git、交付包或本页中。
 
 **本次收口判定：**历史单候选案例可演示、代码及历史读取兼容；最新 main 的全新 Agent→候选→HCU 正确性/性能→签署链路**未验收**。正式交付可以如实称为“固定案例的受控验证版”，不能称“新任务一键跑通”或“服务级已加速”。
+
+## 2026-09-23 一次获准的快速重试与交付
+
+- 用户授权后，以新幂等身份创建 Task `f758c2b7-19ce-5d3d-bec4-5d9a7ca3c413`、Hotspot `4fe69229-42a8-5d70-912d-7ef0aba47da2`、Baseline Epoch `f9710af8-713a-504e-a1b8-d02cf4d5671b` 和 Run `26a5bc7a-902d-50b2-a15e-2e6543df1029`。复用锁定的干净 SGLang Baseline，未重放旧 Attempt。
+- 无 HCU 映射的 CPU 容器只执行了 1 次真实 DeepSeek Messages 请求：Attempt `7cbbca3c-efe0-5017-95e1-8de2d1c23afd` 成功、清理 `verified`；预算账本记录 1 个 Proposal、8,855 tokens、约 4.66 秒执行用时。Run 为 `awaiting_review`，只读 D 预审返回 `ready_for_review`，不是正式正确性或性能结论。
+- Proposal `06709d2e-720c-519a-a315-76ed451014c4` 的 Patch Hash 为 `sha256:eab676137a875194bbf2dc6e90814997b25001d0eb80a829b6d435cd7458585b`，只改 `PagedTokenToKVPoolAllocator.free`。**代码预审建议拒绝晋级**：冻结的 4,090/4,091 个 token 输入各覆盖 64 页，页号包含大量相邻重复值；新分支要求页号严格递增，两个目标 case 均无法命中，反而增加一次比较归约和设备到主机同步。提案声称避免 `torch.cat` 和原位除法，但实际补丁仍调用 `torch.cat`、使用非原位 `//`。此判断基于冻结参考输入与补丁静态检查，不是实机性能测量。
+- 尚未以人类审核人的名义提交正式 Proposal 决定，也未创建 Candidate、启动 HCU Worker 或签署 Task。预审资料可从 Run 的受控检查入口读取；`automatic_release_allowed=false`。不能为了展示完整流程而把此明显不适合目标输入的提案强行晋级。
+- 重试后独立 PostgreSQL 备份 `mvp-persistence-20260923/backups/hcuopt-post-retry-c2b0eba.dump` 的 SHA256 为 `cd03e53dedb2ef26effa2a7d49471aece18c4f4160331f45053e44d5887fe724`；包含输入、Patch、收据和预审材料的归档 `agent-evidence-post-retry-c2b0eba.tar.gz` 的 SHA256 为 `48b77cf772bfe7a174ba5c56a01fd7f2d24f59ce4ed7f539f20f5e1d23ff621c`。两者已做格式读取核验，仍在同一主机私有目录，未做异地备份。

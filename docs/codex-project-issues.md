@@ -531,3 +531,15 @@
 - Applies to: BW20 `c2b0eba` 单候选 Agent 新轮次及以后类似的不确定传输结果。
 - Do not repeat: 不要以无凭据 401 或 `provider_transport_error` 为由声称“模型没有调用”，也不要自动补跑第三次付费请求。
 - Last updated: 2026-09-23
+
+# Agent 提案必须对照冻结输入核实快路径可达
+
+- Scope: project-local
+- Symptom: BW20 重试 Run `26a5bc7a-902d-50b2-a15e-2e6543df1029` 成功生成一个语法上可定位的 Proposal，但其“严格递增页号”快路径在两个 4,090/4,091 token 目标 case 均不可达。
+- Evidence: 冻结参考生成器给出每个目标 case 64 个唯一页号、相邻页号重复；静态补丁仍包含 `torch.cat` 与非原位 `//`，与提案宣称的优化不一致。只读 D 预审仅认定 `ready_for_review`，不提供性能结论。
+- Cause: 模型把“page-contiguous token indices”推断为“每页只有一个、页号严格递增的输入”；高层摘要没有列出目标 case 的实际页号重复模式。原因属于提案与冻结输入不匹配，不能用模型文字替代检查。
+- Proven workaround: 审核时先用冻结参考 case 检查优化分支是否可达，并逐项比对提案文字与实际 diff；不合格时不晋级。后续生成输入应明确提供目标样例特征与失败条件，但不得改写既有 Run 的输入。
+- Validation: 本机只读构造 4,090/4,091 case，严格递增判定均为 false；本轮未创建 Candidate 或启动 HCU。
+- Applies to: BW20 allocator-free Agent 提案审核及以后类似的单热点生成。
+- Do not repeat: 不要把模型自述的“免 unique/免 cat”当成代码事实，也不要为凑完整链路批准无效快路径。
+- Last updated: 2026-09-23
