@@ -157,6 +157,41 @@ from hcuopt.storage.migrations import migration_plan
 from hcuopt.targets import target_fingerprint
 
 
+def require_bw20_agent_origin_for_approval(
+    *,
+    adapter_profile: str | None,
+    decision: ManualCandidateDecision,
+    events: list[Mapping[str, Any]],
+    candidate_id: UUID,
+    candidate_source_hash: str,
+) -> None:
+    """Reject BW20 approvals unless one persisted Agent origin binds the Candidate."""
+
+    if (
+        decision is not ManualCandidateDecision.APPROVED
+        or adapter_profile != "bw20-m1-manual-v1"
+    ):
+        return
+    origins = [
+        event["details"]
+        for event in events
+        if event.get("event_type") == "manual_candidate_agent_origin_recorded"
+        and isinstance(event.get("details"), Mapping)
+        and event["details"].get("candidate_id") == str(candidate_id)
+    ]
+    if (
+        len(origins) != 1
+        or origins[0].get("schema_version") != "bw20-agent-m1-origin-v1"
+        or origins[0].get("candidate_source_hash") != candidate_source_hash
+        or origins[0].get("decision") != "approved"
+        or origins[0].get("synthetic") is not False
+        or origins[0].get("automatic_release_allowed") is not False
+    ):
+        raise Conflict(
+            "BW20 M1 approval requires one Agent origin bound to this Candidate Source Hash"
+        )
+
+
 class PostgresRepository(
     FormalEvidenceAcceptanceRepositoryMixin,
     AgentGenerationRepositoryMixin,
@@ -8346,6 +8381,111 @@ class PostgresRepository(
         assert row is not None
         return row
 
+    def record_manual_candidate_agent_origin(
+        self, task_id: UUID, details: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist one idempotent, hash-bound Agent-to-M1 provenance event."""
+
+        event_type = "manual_candidate_agent_origin_recorded"
+        try:
+            candidate_id = UUID(str(details.get("candidate_id", "")))
+        except ValueError as error:
+            raise Conflict("M1 Agent origin event has an invalid Candidate identity") from error
+        required_hashes = (
+            "candidate_source_hash",
+            "source_package_hash",
+            "manifest_hash",
+            "patch_hash",
+            "review_record_hash",
+            "proposal_review_evidence_hash",
+            "generation_review_evidence_hash",
+        )
+        required_ids = ("generation_run_id", "proposal_id", "review_id")
+        required_uris = (
+            "proposal_review_evidence_uri",
+            "generation_review_evidence_uri",
+        )
+        if (
+            details.get("schema_version") != "bw20-agent-m1-origin-v1"
+            or details.get("candidate_id") != str(candidate_id)
+            or details.get("synthetic") is not False
+            or details.get("decision") != "approved"
+            or details.get("automatic_release_allowed") is not False
+            or any(not isinstance(details.get(name), str) for name in required_ids)
+            or any(
+                not isinstance(details.get(name), str) or not details[name].strip()
+                for name in required_uris
+            )
+            or any(not isinstance(details.get(name), str) for name in required_hashes)
+            or any(
+                re.fullmatch(SHA256_PATTERN, details[name]) is None
+                for name in required_hashes
+            )
+        ):
+            raise Conflict("M1 Agent origin event is incomplete or malformed")
+        for name in required_ids:
+            try:
+                UUID(details[name])
+            except ValueError as error:
+                raise Conflict("M1 Agent origin event has an invalid identity") from error
+
+        with self.connection() as connection:
+            task = connection.execute(
+                """
+                SELECT task_id, workflow_type, adapter_profile
+                FROM tasks WHERE task_id = %s FOR UPDATE
+                """,
+                (task_id,),
+            ).fetchone()
+            if (
+                task is None
+                or task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value
+                or task["adapter_profile"] != "bw20-m1-manual-v1"
+            ):
+                raise Conflict("Agent origin is only accepted for a BW20 M1 task")
+            candidate = connection.execute(
+                """
+                SELECT candidate.task_id, candidate.source_hash, task.workflow_type
+                FROM candidates AS candidate
+                JOIN tasks AS task ON task.task_id = candidate.task_id
+                WHERE candidate.candidate_id = %s
+                FOR UPDATE OF candidate
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if (
+                candidate is None
+                or candidate["task_id"] != task_id
+                or candidate["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value
+                or candidate["source_hash"] != details["candidate_source_hash"]
+            ):
+                raise Conflict("M1 Agent origin does not bind the registered Candidate")
+            existing = connection.execute(
+                """
+                SELECT * FROM task_events
+                WHERE task_id = %s
+                  AND event_type = %s
+                  AND details->>'candidate_id' = %s
+                FOR UPDATE
+                """,
+                (task_id, event_type, str(candidate_id)),
+            ).fetchall()
+            if len(existing) > 1:
+                raise Conflict("M1 Candidate has duplicate Agent origin events")
+            if existing:
+                if existing[0]["details"] != details:
+                    raise Conflict("M1 Agent origin changed after it was recorded")
+                return existing[0]
+            row = connection.execute(
+                """
+                INSERT INTO task_events (task_id, event_type, details)
+                VALUES (%s, %s, %s) RETURNING *
+                """,
+                (task_id, event_type, Jsonb(details)),
+            ).fetchone()
+        assert row is not None
+        return row
+
     def manual_candidate_summary(self, task_id: UUID) -> dict[str, Any]:
         task = self.get_task(task_id)
         if task["workflow_type"] != WorkflowType.MANUAL_CANDIDATE.value:
@@ -8447,6 +8587,27 @@ class PostgresRepository(
                 if any(replay[name] != value for name, value in expected.items()):
                     raise Conflict("signoff idempotency_key was reused with different inputs")
                 return replay
+            origins = []
+            if (
+                request.decision is ManualCandidateDecision.APPROVED
+                and task["adapter_profile"] == "bw20-m1-manual-v1"
+            ):
+                origins = connection.execute(
+                    """
+                    SELECT event_type, details FROM task_events
+                    WHERE task_id = %s
+                      AND event_type = 'manual_candidate_agent_origin_recorded'
+                    ORDER BY created_at, event_id
+                    """,
+                    (task_id,),
+                ).fetchall()
+            require_bw20_agent_origin_for_approval(
+                adapter_profile=task["adapter_profile"],
+                decision=request.decision,
+                events=origins,
+                candidate_id=candidate["candidate_id"],
+                candidate_source_hash=candidate["source_hash"],
+            )
             # A concurrent identical request may have committed while this request
             # waited for the task row lock. Re-read before checking terminal state.
             replay = connection.execute(
