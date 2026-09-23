@@ -21,6 +21,7 @@ from hcuopt.adapters.agent_promotion import (
     ProposalReviewAuthority,
 )
 from hcuopt.adapters.git_source import GitSourceManager
+from hcuopt.agent.identity import candidate_proposal_review_record_hash
 from hcuopt.agent.messages_worker import MessagesGenerationWorker
 from hcuopt.contracts.platform_v1 import SourceSnapshot
 from hcuopt.contracts.v1 import ManualCandidateCreate
@@ -138,6 +139,8 @@ def promote(
     )
     if UUID(str(row["candidate_id"])) != candidate_id:
         raise RuntimeError("registered BW20 Agent Candidate identity drifted")
+    if row["source_hash"] != prepared.source_package_ref.candidate_source_hash:
+        raise RuntimeError("registered BW20 Agent Candidate Source Hash drifted")
 
     summary = {
         "schema_version": "bw20-agent-m1-generation-review-v1",
@@ -162,6 +165,28 @@ def promote(
         review_evidence_hash=review_evidence.content_hash,
         now=completed_at,
     )
+    origin_event = repository.record_manual_candidate_agent_origin(
+        task_id,
+        {
+            "schema_version": "bw20-agent-m1-origin-v1",
+            "generation_run_id": str(generation_run_id),
+            "proposal_id": str(proposal_id),
+            "review_id": str(review_id),
+            "review_record_hash": candidate_proposal_review_record_hash(prepared.review),
+            "proposal_review_evidence_uri": prepared.review.review_evidence_uri,
+            "proposal_review_evidence_hash": prepared.review.review_evidence_hash,
+            "generation_review_evidence_uri": review_evidence.uri,
+            "generation_review_evidence_hash": review_evidence.content_hash,
+            "patch_hash": prepared.review.patch_hash,
+            "candidate_id": str(candidate_id),
+            "candidate_source_hash": prepared.source_package_ref.candidate_source_hash,
+            "source_package_hash": prepared.source_package_ref.source_package_hash,
+            "manifest_hash": prepared.source_package_ref.manifest_hash,
+            "decision": "approved",
+            "synthetic": False,
+            "automatic_release_allowed": False,
+        },
+    )
     worktrees = candidate_output_dir / "worktrees"
     if worktrees.exists() and any(worktrees.iterdir()):
         raise RuntimeError("BW20 Agent Candidate Worktree cleanup is incomplete")
@@ -178,6 +203,7 @@ def promote(
         "manifest_hash": prepared.source_package_ref.manifest_hash,
         "review_evidence_uri": review_evidence.uri,
         "review_evidence_hash": review_evidence.content_hash,
+        "agent_origin_event_id": origin_event["event_id"],
         "worktree_cleanup": "verified",
         "hcu_accessed": False,
         "performance_conclusion": "not_measured",

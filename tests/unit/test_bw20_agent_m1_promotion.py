@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from hcuopt.contracts.agent_v1 import CandidateProposalReviewRecord
 from hcuopt.contracts.m2 import CandidateSourcePackageRef
 from hcuopt.contracts.platform_v1 import SourceSnapshot
 from hcuopt.deployment import bw20_agent_m1_promotion as deployment
@@ -81,11 +82,34 @@ def test_promotion_registers_one_package_and_preserves_safety_holds(
         manifest_hash=_hash("d"),
         manifest_schema_version="m1-candidate-source-v1",
     )
+    review = CandidateProposalReviewRecord(
+        review_id=review_id,
+        idempotency_key="review-idempotency-key",
+        proposal_id=proposal_id,
+        proposal_hash=_hash("1"),
+        request_id=uuid4(),
+        request_hash=_hash("2"),
+        generation_run_id=run_id,
+        patch_uri="file:///patch.diff",
+        patch_hash=_hash("3"),
+        normalized_patch_hash=_hash("4"),
+        baseline_epoch_id=baseline_epoch_id,
+        baseline_source_hash=baseline_hash,
+        hotspot_id=hotspot_id,
+        replacement_point=deployment.ALLOCATOR_REPLACEMENT_POINT,
+        decision="approved",
+        reviewer="reviewer",
+        reason="bounded proposal accepted for M1 build",
+        review_evidence_uri="file:///proposal-review.json",
+        review_evidence_hash=_hash("5"),
+        reviewed_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+    )
     prepared = SimpleNamespace(
         resolved=SimpleNamespace(
             proposal=SimpleNamespace(optimization_intent="use adjacent page runs")
         ),
         source_package_ref=package_ref,
+        review=review,
     )
     published: list[bytes] = []
 
@@ -104,6 +128,7 @@ def test_promotion_registers_one_package_and_preserves_safety_holds(
             return {
                 "candidate_id": deployment.candidate_id_for("candidate-key"),
                 "state": "manual_building",
+                "source_hash": candidate.source_hash,
             }
 
         def complete_generation_review(self, value, **kwargs):  # type: ignore[no-untyped-def]
@@ -111,6 +136,16 @@ def test_promotion_registers_one_package_and_preserves_safety_holds(
             assert kwargs["review_evidence_hash"] == _hash("e")
             assert kwargs["now"] == datetime(2026, 9, 15, tzinfo=timezone.utc)
             return SimpleNamespace(state="completed")
+
+        def record_manual_candidate_agent_origin(self, value, details):  # type: ignore[no-untyped-def]
+            assert value == task_id
+            assert details["candidate_id"] == str(deployment.candidate_id_for("candidate-key"))
+            assert details["candidate_source_hash"] == package_ref.candidate_source_hash
+            assert details["review_record_hash"] == (
+                deployment.candidate_proposal_review_record_hash(review)
+            )
+            self.origin = details
+            return {"event_id": uuid4()}
 
     repository = Repository()
 
@@ -174,6 +209,8 @@ def test_promotion_registers_one_package_and_preserves_safety_holds(
     assert result["hcu_accessed"] is False
     assert result["performance_conclusion"] == "not_measured"
     assert result["automatic_release_allowed"] is False
+    assert result["agent_origin_event_id"]
+    assert repository.origin["decision"] == "approved"
     summary = json.loads(published[0])
     assert summary["decision"] == "approved_for_m1_candidate_build"
     assert summary["candidate_created"] is True
