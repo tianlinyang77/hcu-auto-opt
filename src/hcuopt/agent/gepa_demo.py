@@ -9,13 +9,16 @@ or access an HCU itself.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
+from hcuopt.measurement.evidence import EvidenceArtifact, write_evidence
 
 MAX_GEPA_METRIC_CALLS = 8
 MAX_SCRIPTED_CASES = 4
@@ -69,8 +72,11 @@ class OptimizeAnything(Protocol):
 @dataclass(frozen=True, slots=True)
 class GepaScriptedDemoResult:
     optimizer_result: Any
+    seed_policy_hash: str
     metric_calls: int
     generation_runs: int
+    max_metric_calls: int
+    evaluations: tuple[Mapping[str, Any], ...]
 
 
 def score_verified_generation(read_model: AgentGenerationReadModel) -> float:
@@ -167,15 +173,19 @@ def run_gepa_scripted_demo(
 
     metric_calls = 0
     metric_calls_lock = Lock()
+    evaluation_records: list[Mapping[str, Any]] = []
+    used_generation_run_ids: set[str] = set()
 
     def evaluate(policy: str) -> tuple[float, Mapping[str, Any]]:
         nonlocal metric_calls
         with metric_calls_lock:
             metric_calls += 1
-            if metric_calls > max_metric_calls:
+            call_number = metric_calls
+            if call_number > max_metric_calls:
                 raise GepaDemoError("GEPA exceeded the configured metric-call budget")
         if not isinstance(policy, str) or not policy.strip():
             return 0.0, {"failure": "empty_policy"}
+        policy_hash = "sha256:" + hashlib.sha256(policy.encode("utf-8")).hexdigest()
 
         observations: list[dict[str, Any]] = []
         scores: list[float] = []
@@ -187,24 +197,44 @@ def run_gepa_scripted_demo(
                 or str(model.baseline_epoch_id) != case.baseline_epoch_id
                 or model.replacement_point != case.replacement_point
                 or model.knowledge_hash != result.expected_knowledge_hash
-                or len(model.input_digest) != 71
-                or not model.input_digest.startswith("sha256:")
+                or not _is_sha256(model.input_digest)
+                or not _is_sha256(model.knowledge_hash)
+                or not _is_sha256(result.expected_knowledge_hash)
             ):
                 raise GepaDemoError("D Read Model does not bind this policy evaluation")
+            run_id = str(model.generation_run_id)
+            with metric_calls_lock:
+                if run_id in used_generation_run_ids:
+                    raise GepaDemoError(
+                        "each Scripted policy evaluation must use a fresh Generation Run"
+                    )
+                used_generation_run_ids.add(run_id)
             score = score_verified_generation(model)
             if not math.isfinite(score):
                 raise GepaDemoError("verified Scripted score must be finite")
             scores.append(score)
-            observations.append(_feedback(case, result))
+            observations.append(
+                {"score": score, "evidence": _feedback(case, result)}
+            )
 
         score = sum(scores) / len(scores)
-        return score, {
+        feedback = {
             "verified_scripted_episodes": observations,
             "score_definition": "mean D-verified kept-proposal yield; not performance",
             "hcu_accessed": False,
             "holdout_accessed": False,
             "performance_conclusion": "not_measured",
         }
+        with metric_calls_lock:
+            evaluation_records.append(
+                {
+                    "call_number": call_number,
+                    "policy_hash": policy_hash,
+                    "score": score,
+                    **feedback,
+                }
+            )
+        return score, feedback
 
     optimizer_result = optimize_anything(
         seed_candidate=seed_policy,
@@ -219,8 +249,50 @@ def run_gepa_scripted_demo(
     )
     return GepaScriptedDemoResult(
         optimizer_result=optimizer_result,
+        seed_policy_hash="sha256:" + hashlib.sha256(seed_policy.encode("utf-8")).hexdigest(),
         metric_calls=metric_calls,
         generation_runs=metric_calls * len(fixed_cases),
+        max_metric_calls=max_metric_calls,
+        evaluations=tuple(
+            sorted(evaluation_records, key=lambda item: int(item["call_number"]))
+        ),
+    )
+
+
+def _is_sha256(value: str) -> bool:
+    return (
+        len(value) == 71
+        and value.startswith("sha256:")
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def write_gepa_demo_evidence(
+    path: Path,
+    result: GepaScriptedDemoResult,
+    *,
+    optimizer_identity: str,
+) -> EvidenceArtifact:
+    """Persist deterministic, immutable GEPA evaluation receipts without policy text."""
+
+    if not optimizer_identity or optimizer_identity.strip() != optimizer_identity:
+        raise GepaDemoError("optimizer identity must be non-empty normalized text")
+    return write_evidence(
+        path,
+        {
+            "schema_version": "hcuopt-gepa-scripted-evidence-v1",
+            "optimizer_identity": optimizer_identity,
+            "seed_policy_hash": result.seed_policy_hash,
+            "metric_calls": result.metric_calls,
+            "max_metric_calls": result.max_metric_calls,
+            "generation_runs": result.generation_runs,
+            "evaluations": list(result.evaluations),
+            "synthetic": True,
+            "environment": "scripted_dev_only",
+            "performance_conclusion": "not_measured",
+            "formal_intake_allowed": False,
+            "automatic_release_allowed": False,
+        },
     )
 
 
@@ -236,4 +308,5 @@ __all__ = [
     "OptimizeAnything",
     "run_gepa_scripted_demo",
     "score_verified_generation",
+    "write_gepa_demo_evidence",
 ]

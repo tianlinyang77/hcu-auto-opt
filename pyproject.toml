@@ -24,6 +24,9 @@ dev = [
   "pytest>=8.3",
   "ruff>=0.9",
 ]
+gepa-demo = [
+  "gepa==0.1.4",
+]
 
 [project.scripts]
 hcuopt = "hcuopt.cli:main"

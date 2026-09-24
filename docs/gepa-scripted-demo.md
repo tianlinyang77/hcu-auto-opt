@@ -44,8 +44,9 @@ share an evaluation budget, so any increase in metric calls must be explicitly
 rebounded in both the wrapper and the existing Generation Plan budgets.
 
 The wrapper is deliberately dependency-injected so importing hcu-auto-opt does
-not install or require GEPA. In an isolated Python 3.10+ demo environment, pin
-GEPA to 0.1.4 and configure its reflection model. The current GEPA API exposes
+not install or require GEPA. In an isolated Python 3.10+ demo environment, install
+the pinned optional dependency with `pip install -e '.[gepa-demo]'` and configure
+its reflection model. The current GEPA API exposes
 `optimize_anything`, `GEPAConfig`, `EngineConfig`, and `ReflectionConfig`; the
 example below follows the official API shape:
 
@@ -71,7 +72,28 @@ result = run_gepa_scripted_demo(
     config=config,
     max_metric_calls=4,
 )
+evidence = write_gepa_demo_evidence(
+    output_dir / "gepa-evaluations.json",
+    result,
+    optimizer_identity="gepa/0.1.4",
+)
 ```
+
+The evidence writer is hash-verifiable/immutable and records only policy
+Hashes, evaluator scores, D evidence references, and the fixed Scripted safety
+fields. It does not serialize the selected policy text or GEPA's opaque result.
+If a human selects a policy, record its SHA-256 in the separate review record.
+
+The optional integration test runs the actual GEPA 0.1.4 engine with a bounded
+custom proposer and constructed D Read Models, without an LLM API key:
+
+```bash
+pip install -e '.[dev,gepa-demo]'
+python -m pytest -q tests/integration/test_gepa_optimize_anything.py
+```
+
+This is an engine/API smoke test only. It does not prove a production Agent/Apex
+run; that still requires the deployment-specific evaluator callback above.
 
 Do not connect the demo to a real HCU target. `max_metric_calls` must match the
 wrapper cap; with `N` fixed cases, the hard maximum is `max_metric_calls * N`
@@ -97,8 +119,9 @@ fitness callback and are not implied by a high Scripted score.
 ## Current implementation boundary
 
 `hcuopt.agent.gepa_demo` implements bounded orchestration, D Read Model binding,
-scoring, and redacted feedback. Deployment-specific creation of immutable
-Knowledge Snapshots and scripted Generation Runs is intentionally injected via
-`case_evaluator`; the branch does not add a new generation API or invoke a model
-or HCU from D. A runnable service adapter needs the approved Agent/Apex Scripted
-profile and its existing Store/PostgreSQL configuration.
+scoring, redacted feedback, and immutable evaluation receipts. Deployment-specific
+creation of immutable Knowledge Snapshots and scripted Generation Runs is
+intentionally injected via `case_evaluator`; the branch does not add a new
+generation API or invoke a model or HCU from D. A runnable service adapter needs
+the approved Agent/Apex Scripted profile and its existing Store/PostgreSQL
+configuration.
