@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "operator": "sglang_paged_kv_cache_write",
+  "math": "For each valid token t, head h and channel d, write K[t,h,d] to Kcache[loc[t]//64,h,loc[t]%64,d] and V[t,h,d] to Vcache[loc[t]//64,h,d,loc[t]%64], preserving all other cache cells.",
+  "scope": {
+    "forward": true,
+    "backward": false,
+    "integration": "SGLang Python/Triton startup Overlay under hcu-auto-opt M1"
+  },
+  "target": {
+    "device": "gfx936",
+    "product": "BW20 HCU 7 target-lock identifier"
+  },
+  "inputs": [
+    "loc: int64[N], nonnegative distinct valid cache slot IDs",
+    "cache_k/cache_v: BF16[N,H,D], arbitrary observed input strides",
+    "Kcache: BF16[P,H,64,D]; Vcache: BF16[P,H,D,64]"
+  ],
+  "outputs": [
+    "Kcache and Vcache mutated in place, with untouched cells preserved"
+  ],
+  "shapes": [
+    {
+      "shape_id": "observed_prefill",
+      "dims": {
+        "N": 128,
+        "H": 2,
+        "D": 64,
+        "P": 72279,
+        "page_size": 64
+      }
+    },
+    {
+      "shape_id": "edge_counts",
+      "dims": {
+        "N": [0, 1, 63, 64, 65],
+        "H": 2,
+        "D": 64,
+        "page_size": 64
+      }
+    }
+  ],
+  "dtype": "BF16 cache/data; int64 locations",
+  "layout": "DCU FA paged K [P,H,64,D], V [P,H,D,64]; observed input strides [1152,64,1]",
+  "acceptance": {
+    "correctness": "Independent full-cache K/V oracle including untouched cells, page boundaries, permuted distinct loc, noncontiguous inputs, and fallback behavior for unsupported capture/dtype/stream states",
+    "latency_samples": 5,
+    "memory_samples": 3,
+    "baseline": "Locked SGLang set_kv_buffer advanced-index implementation; formal verdict only through the existing B Harness and D adjudicator"
+  },
+  "hcu_launch_authorized": false
+}
