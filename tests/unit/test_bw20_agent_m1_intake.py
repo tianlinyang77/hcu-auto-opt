@@ -10,16 +10,44 @@ from uuid import NAMESPACE_URL, uuid5
 
 from hcuopt.contracts.platform_v1 import SourceSnapshot
 from hcuopt.deployment.bw20_agent_m1_intake import (
+    FROZEN_CASE_SEED,
+    FROZEN_TARGET_CASE_IDS,
     HOTSPOT_KEY,
     STAGE0_RUN_ID,
     STAGE0_TASK_ID,
     TARGET_SNAPSHOT_ID,
+    _grounded_hotspot_summary,
     bootstrap,
 )
+from hcuopt.deployment.nmz36_m1_allocator import build_m1_allocator_hotspot_spec
+from hcuopt.measurement.m1_allocator_reference import build_case, input_hash
 from hcuopt.source_hash import canonical_source_hash, file_uri_to_path
 from hcuopt.targets import load_target
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_grounded_summary_matches_frozen_target_inputs() -> None:
+    spec = build_m1_allocator_hotspot_spec("bw20-test-hotspot")
+    expectations = {item.case_id: item.input_hash for item in spec.input_expectations}
+    summary = _grounded_hotspot_summary("operator advisory")
+    assert summary.startswith("operator advisory\n\n")
+    assert "not performance measurements" in summary
+    for case_id, length, adjacent_equals in (
+        ("target-4090-direct-nosort", 4090, 4026),
+        ("target-4091-direct-nosort", 4091, 4027),
+    ):
+        assert case_id in FROZEN_TARGET_CASE_IDS
+        case = build_case(case_id, FROZEN_CASE_SEED, "ordinary")
+        assert expectations[case_id] == input_hash(case)
+        assert len(case.values) == length
+        assert len(set(case.page_ids)) == 64
+        assert sum(a == b for a, b in zip(case.page_ids, case.page_ids[1:], strict=False)) == (
+            adjacent_equals
+        )
+        assert f"{case_id}: {length} token indices, 64 unique pages" in summary
+        assert f"{adjacent_equals} adjacent equal page-id pairs" in summary
+    assert "cannot help either target case" in summary
 
 
 def _git(root: Path, *args: str) -> str:
@@ -140,6 +168,8 @@ def test_bootstrap_binds_real_authority_but_stops_before_candidate(tmp_path: Pat
     envelope = json.loads(input_path.read_text(encoding="utf-8"))
     assert envelope["context"]["performance_conclusion"] == "not_measured"
     assert envelope["context"]["formal_intake_allowed"] is False
+    assert "4026 adjacent equal page-id pairs" in envelope["context"]["hotspot_summary"]
+    assert "4027 adjacent equal page-id pairs" in envelope["context"]["hotspot_summary"]
 
 
 def test_bootstrap_creates_independent_generation_for_corrected_advisory(
@@ -201,9 +231,12 @@ def test_bootstrap_creates_independent_generation_for_corrected_advisory(
     assert repository.start.idempotency_key == generation_key
     assert repository.start.request.generation_run_id == repository.start.plan.generation_run_id
     envelope = json.loads(file_uri_to_path(result["input_uri"]).read_text(encoding="utf-8"))
-    assert envelope["context"]["hotspot_summary"] == advisory
+    assert envelope["context"]["hotspot_summary"].startswith(advisory + "\n\n")
     assert "repeated adjacent values" in envelope["context"]["hotspot_summary"]
     assert "non-monotonic" in envelope["context"]["hotspot_summary"]
+    assert "strictly increasing quotient page IDs cannot help" in envelope["context"][
+        "hotspot_summary"
+    ]
 
 
 def test_bootstrap_can_start_a_new_formal_task_after_invalid_infrastructure_evidence(

@@ -57,6 +57,7 @@ from hcuopt.measurement.evidence import (
     canonical_json_bytes,
     write_evidence_bytes,
 )
+from hcuopt.measurement.m1_allocator_reference import build_case
 from hcuopt.source_hash import file_uri_to_path
 from hcuopt.storage.repository import PostgresRepository
 
@@ -75,6 +76,11 @@ DEFAULT_HOTSPOT_SUMMARY = (
     "Historical nmz36 profiling is a transferred hypothesis; do not claim BW20 share, "
     "correctness, speedup, or general safety. Return one bounded single-file proposal."
 )
+FROZEN_TARGET_CASE_IDS = (
+    "target-4090-direct-nosort",
+    "target-4091-direct-nosort",
+)
+FROZEN_CASE_SEED = 20260825
 HISTORICAL_PROFILER_URI = (
     "file:///home/github/hcu-auto-opt-m1-runs/20260825-prefill-v7-hcu7-uncached/"
     "traces/1787646066.6493704/"
@@ -85,6 +91,32 @@ HISTORICAL_PROFILER_HASH = "sha256:17ff2c0aa23a5365ab7478f0b1cb0756d11509c135b5c
 
 def _sha256(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _grounded_hotspot_summary(operator_summary: str) -> str:
+    """Describe frozen inputs without turning fixture facts into a speedup claim."""
+    target_facts = []
+    for case_id in FROZEN_TARGET_CASE_IDS:
+        case = build_case(case_id, FROZEN_CASE_SEED, "ordinary")
+        page_ids = case.page_ids
+        target_facts.append(
+            f"{case_id}: {len(case.values)} token indices, "
+            f"{len(set(page_ids))} unique pages, "
+            f"{sum(a == b for a, b in zip(page_ids, page_ids[1:], strict=False))} "
+            "adjacent equal page-id pairs; quotient page IDs are not strictly increasing"
+        )
+    facts = (
+        "Frozen correctness-fixture facts, not performance measurements: "
+        + "; ".join(target_facts)
+        + ". Page-contiguous means contiguous token indices within each page, "
+        "not one token per page or strictly increasing quotient page IDs. "
+        "Other correctness cases include non-monotonic page order; preserve the "
+        "original torch.unique semantics for those inputs. A fast path that only "
+        "activates on strictly increasing quotient page IDs cannot help either target case. "
+        "If no source change can plausibly help the frozen target cases while preserving "
+        "all required inputs, return zero proposals."
+    )
+    return f"{operator_summary}\n\n{facts}"
 
 
 def _content_path(root: Path, kind: str, digest: str) -> Path:
@@ -347,7 +379,7 @@ def bootstrap(
         baseline=BaselineOverlaySource(snapshot=baseline, path=ALLOCATOR_RELATIVE_PATH),
         knowledge_store=knowledge_store,
         settings=settings,
-        hotspot_summary=hotspot_summary,
+        hotspot_summary=_grounded_hotspot_summary(hotspot_summary),
     )
     input_artifact = write_evidence_bytes(
         generation_root / "inputs" / str(generation_run_id) / "input.json",

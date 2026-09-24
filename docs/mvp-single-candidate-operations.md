@@ -31,6 +31,8 @@ python -m hcuopt.deployment.bw20_agent_m1_intake \
 
 保留脚本 JSON 输出中的 `task_id`、`baseline_epoch_id`、`hotspot_id`、`generation_run_id`、`input_uri/hash`。这个步骤仅建立受控输入，不创建 Candidate、不触碰 HCU，也不产生性能结论。
 
+BW20 Intake 会把冻结参考 case 的页号重复事实追加到生成输入：4,090/4,091 个 token 分别覆盖 64 页，页号并非严格递增；其他正确性 case 还含非单调页序。自定义 `--hotspot-summary-file` 只能增加操作员说明，不能移除这些事实。Agent 仍可能提出错误假设，审核时必须对照实际 Patch 和冻结输入核对快路径是否可达、提案文字是否与代码一致。修改生成输入后必须使用**新的** `generation-key` 创建新 Run；不得改写或重放已结算的 Run/Attempt。
+
 ### 2. 执行一次 Agent 尝试并检查提案
 
 按上一步返回的 `generation_run_id` 和 `input_uri` 执行一次受限 Worker：
