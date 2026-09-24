@@ -36,7 +36,11 @@ and verifies the diff. Preserve behavior for all inputs allowed by the source;
 do not assume contiguous/sorted/full-page input without evidence. Include assumptions
 and correctness risks in risk_summary. Do not emit identifiers, hashes, file URIs,
 approval, usage counters or speedups; the host owns those. If no defensible change
-exists, return {"proposals": []}. No markdown fences or commentary outside JSON."""
+exists, return {"proposals": []}. Before claiming a fast path, check that its
+condition holds for the supplied frozen target-case facts; keep advisory summaries
+separate from measured results. Match the rationale to the actual patch: never
+claim an allocation, kernel, synchronization, or operation was removed unless
+the edited code removes it. No markdown fences or commentary outside JSON."""
 
 
 class MessagesError(ValueError):

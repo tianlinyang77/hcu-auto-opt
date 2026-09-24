@@ -514,6 +514,13 @@ def test_messages_client_does_not_forward_keys_in_response():
         program.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid")
 
 
+def test_messages_system_requires_target_reachability_and_patch_claim_alignment():
+    instructions = " ".join(program.SYSTEM.split())
+    assert "condition holds for the supplied frozen target-case facts" in instructions
+    assert "Match the rationale to the actual patch" in instructions
+    assert "unless the edited code removes it" in instructions
+
+
 @pytest.mark.parametrize(
     "url",
     [
