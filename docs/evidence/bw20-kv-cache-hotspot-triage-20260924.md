@@ -35,6 +35,15 @@ For the observed BF16 paged layout and a provably distinct `loc` vector, fuse `p
 
 Correctness must compare the entire K and V cache tensors and untouched positions, not only a sorted set of indices. Include token counts 0/1/63/64/65/128, page crossings, permuted valid locations, non-contiguous K/V input strides, capture mode, dtype/storage conversion and stream ordering as applicable. The measured target shape must be frozen from an actual matching BW20 run; the Stage 0 trace alone does not establish all runtime invariants.
 
+The provisional `build_kv_write_hotspot_spec` now freezes six small, nonempty
+full-cache cases and exact input hashes. The current M1 tensor-spec contract
+forbids zero dimensions, so the zero-token case is deliberately **not** encoded
+as a fake one-token case; the GPU producer must add a separate explicit empty
+behavior check before this profile can be registered. Large observed cache size,
+non-contiguous inputs, capture/alternate streams and conversion are also not
+covered by this small CPU fixture. Passing local unit tests is not formal
+correctness or HCU acceptance.
+
 ## Integration gate before a new Agent Run
 
 The current BW20 M1 source package whitelist, Overlay mount, correctness producer, Docker performance module and workload factory are hardcoded to `PagedTokenToKVPoolAllocator.free`. Repointing only the Agent prompt would produce a Proposal that the formal Build/HCU path cannot validate. Add a separate, explicitly registered Real KV-cache M1 profile or a tested workload dispatch with the same fail-closed bindings; freeze a new correctness spec and matching measurement workload first. Only then create a new Task/Hotspot/Generation Run with fresh identities and a bounded model budget. Build → correctness → B Harness → D adjudication → human signoff remains unchanged; `automatic_release_allowed=false`.
