@@ -84,16 +84,26 @@ Hashes, evaluator scores, D evidence references, and the fixed Scripted safety
 fields. It does not serialize the selected policy text or GEPA's opaque result.
 If a human selects a policy, record its SHA-256 in the separate review record.
 
-The optional integration test runs the actual GEPA 0.1.4 engine with a bounded
-custom proposer and constructed D Read Models, without an LLM API key:
+The optional integration tests run the actual GEPA 0.1.4 engine without an LLM
+API key. One is an engine/API smoke test with constructed D Read Models; the
+PostgreSQL test additionally creates fresh Generation Runs, settles Scripted
+Runner Receipts and Proposal Batches, and invokes D's independent verifier over
+rehashable evidence files:
 
 ```bash
 pip install -e '.[dev,gepa-demo]'
-python -m pytest -q tests/integration/test_gepa_optimize_anything.py
+HCUOPT_DATABASE_URL=postgresql://... python -m pytest -q \
+  tests/integration/test_gepa_optimize_anything.py \
+  tests/integration/test_agent_generation_postgres.py::AgentGenerationPostgresTests::test_gepa_evaluations_use_fresh_postgres_runs_and_d_rehashes
 ```
 
-This is an engine/API smoke test only. It does not prove a production Agent/Apex
-run; that still requires the deployment-specific evaluator callback above.
+The PostgreSQL test verifies that a changed advisory policy gets a new
+Knowledge Snapshot and Generation Run, and that the D-verified retained
+Proposal count can improve after intent deduplication. It uses Scripted Agent
+fixtures and does not prove real model-generated Proposals, persist a terminal
+D read model (the Generation Run remains awaiting human review), or continue
+through human review, Package promotion, Family Verifier and M2a Intake. Those
+remain separate existing workflows and must not be inferred from the score.
 
 Do not connect the demo to a real HCU target. `max_metric_calls` must match the
 wrapper cap; with `N` fixed cases, the hard maximum is `max_metric_calls * N`
