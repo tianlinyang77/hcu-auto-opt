@@ -170,6 +170,14 @@ def test_bootstrap_binds_real_authority_but_stops_before_candidate(tmp_path: Pat
     assert envelope["context"]["formal_intake_allowed"] is False
     assert "4026 adjacent equal page-id pairs" in envelope["context"]["hotspot_summary"]
     assert "4027 adjacent equal page-id pairs" in envelope["context"]["hotspot_summary"]
+    prior = next(
+        item
+        for item in envelope["context"]["knowledge"]
+        if item["knowledge_id"] == "repository/hcu-auto-opt/m1-formal-bw20-20260916"
+    )
+    assert prior["authority"] == "advisory_only"
+    assert "torch.unique_consecutive(free_index // self.page_size)" in prior["content"]
+    assert "does not authorize automatic or production release" in prior["content"]
 
 
 def test_bootstrap_creates_independent_generation_for_corrected_advisory(

@@ -181,21 +181,37 @@ def _knowledge(
     generation_key: str,
     created_at: datetime,
 ) -> tuple[KnowledgeSnapshotStore, KnowledgeSnapshot]:
-    document = (source_root / "docs" / "m1-hotspot-overlay.md").resolve(strict=True)
-    payload = document.read_bytes()
-    source_hash = _sha256(payload)
+    documents = (
+        (
+            "repository/hcu-auto-opt/m1-hotspot-overlay",
+            "c7f81ac",
+            "docs/m1-hotspot-overlay.md",
+        ),
+        (
+            "repository/hcu-auto-opt/m1-formal-bw20-20260916",
+            "2026-09-16-frozen",
+            "docs/evidence/m1-formal-bw20-20260916.md",
+        ),
+    )
+    sources = []
+    payloads = {}
+    for knowledge_id, version, relative_path in documents:
+        document = (source_root / relative_path).resolve(strict=True)
+        payload = document.read_bytes()
+        sources.append(
+            {
+                "knowledge_id": knowledge_id,
+                "source_kind": "repository_document",
+                "version": version,
+                "source_uri": document.as_uri(),
+                "content_hash": _sha256(payload),
+                "license_id": "MulanPSL-2.0",
+            }
+        )
+        payloads[(knowledge_id, version)] = payload
     snapshot = KnowledgeSnapshot(
         snapshot_id=uuid5(NAMESPACE_URL, f"hcuopt:{generation_key}:knowledge:v1"),
-        sources=(
-            {
-                "knowledge_id": "repository/hcu-auto-opt/m1-hotspot-overlay",
-                "source_kind": "repository_document",
-                "version": "c7f81ac",
-                "source_uri": document.as_uri(),
-                "content_hash": source_hash,
-                "license_id": "MulanPSL-2.0",
-            },
-        ),
+        sources=tuple(sources),
         created_by="bw20-agent-m1-bootstrap",
         created_at=created_at,
     )
@@ -203,10 +219,7 @@ def _knowledge(
         generation_root / "knowledge",
         profile="bw20-agent-m1-knowledge-v1",
     )
-    store.publish(
-        snapshot,
-        {("repository/hcu-auto-opt/m1-hotspot-overlay", "c7f81ac"): payload},
-    )
+    store.publish(snapshot, payloads)
     return store, snapshot
 
 
