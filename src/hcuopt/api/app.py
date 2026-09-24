@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from hcuopt.adapters.m2_candidate import ScriptedCandidateIntake
 from hcuopt.adapters.manual_candidate import CandidateSourcePackageStore
 from hcuopt.adapters.profiles import AdapterProfileCatalog
+from hcuopt.api.formal_start_management import FormalStartManagement
 from hcuopt.contracts.agent_verification_v1 import AgentGenerationReadModel
 from hcuopt.contracts.endpoint_adjudication_v1 import (
     EndpointCampaignCreate,
@@ -248,6 +249,7 @@ def create_app(
     | None = None,
     auto_migrate: bool | None = None,
     agent_inspection_read_authorizer: Callable[[Request, UUID], bool] | None = None,
+    formal_start_management: FormalStartManagement | None = None,
 ) -> FastAPI:
     if endpoint_campaign_signoff_authorizer is None:
         from hcuopt.deployment.endpoint_campaign_signoff_identity import (
@@ -1445,6 +1447,9 @@ def create_app(
     @application.get("/v1/leases")
     def list_leases(request: Request) -> list[dict[str, Any]]:
         return repo(request).list_resources()
+
+    if formal_start_management is not None:
+        application.include_router(formal_start_management.router())
 
     return application
 

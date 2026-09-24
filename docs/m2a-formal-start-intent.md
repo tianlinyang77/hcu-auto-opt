@@ -52,6 +52,10 @@ automatic_release_allowed = false
 
 ## 调用边界
 
+默认部署仍遵循下列只读边界。ADR-0024 提出可选的非执行 HTTP 创建入口；开发实现仅在
+`create_app(formal_start_management=...)` 显式注入后注册，尚未批准生产开放。
+它不会解除 Round/HCU/自动发布禁止字段。详见 `docs/adr/0024-formal-intent-management-api.md`。
+
 Formal 写操作不暴露为 Web API。部署管理进程必须显式构造三个 production Verifier 和部署对象
 Store，然后进程内调用 `FormalStartCoordinator.create/reconcile/cancel/recover`；缺少任一个 Verifier
 会在写入数据库前失败。人工 `reconcile/cancel` 的签名 assertion 必须属于创建该 Intent 的同一
