@@ -1,0 +1,1 @@
+Rejected for M1 promotion: the added bool(torch.all(...)) synchronizes device data on the frozen target cases and contradicts the proposal risk summary; extra detection work makes the intended optimization unsupported. Source review only, not an HCU performance conclusion.

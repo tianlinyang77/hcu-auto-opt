@@ -146,3 +146,11 @@ Campaign 3 项定向测试通过。本次只读恢复展示，没有重跑优化
 - Proposal `06709d2e-720c-519a-a315-76ed451014c4` 的 Patch Hash 为 `sha256:eab676137a875194bbf2dc6e90814997b25001d0eb80a829b6d435cd7458585b`，只改 `PagedTokenToKVPoolAllocator.free`。**代码预审建议拒绝晋级**：冻结的 4,090/4,091 个 token 输入各覆盖 64 页，页号包含大量相邻重复值；新分支要求页号严格递增，两个目标 case 均无法命中，反而增加一次比较归约和设备到主机同步。提案声称避免 `torch.cat` 和原位除法，但实际补丁仍调用 `torch.cat`、使用非原位 `//`。此判断基于冻结参考输入与补丁静态检查，不是实机性能测量。
 - 尚未以人类审核人的名义提交正式 Proposal 决定，也未创建 Candidate、启动 HCU Worker 或签署 Task。预审资料可从 Run 的受控检查入口读取；`automatic_release_allowed=false`。不能为了展示完整流程而把此明显不适合目标输入的提案强行晋级。
 - 重试后独立 PostgreSQL 备份 `mvp-persistence-20260923/backups/hcuopt-post-retry-c2b0eba.dump` 的 SHA256 为 `cd03e53dedb2ef26effa2a7d49471aece18c4f4160331f45053e44d5887fe724`；包含输入、Patch、收据和预审材料的归档 `agent-evidence-post-retry-c2b0eba.tar.gz` 的 SHA256 为 `48b77cf772bfe7a174ba5c56a01fd7f2d24f59ce4ed7f539f20f5e1d23ff621c`。两者已做格式读取核验，仍在同一主机私有目录，未做异地备份。
+
+## 2026-09-24 Agent 收口与真实负面结果
+
+- #172、#173、#174 已合入；最新 main 固定为 `68f7322894c29d93e72af16651a7591e86125f28`。BW20 的新源码与 CPU-only Agent launcher 已部署，但默认 Agent launcher 和回环只读 API 仍固定在旧 `7acd9e8`，未宣称整体运行指针完成切换。
+- Run `3b47e5fe-1438-580d-a7d7-6a1db525f013` 的 Proposal `bfed8c77-66cc-58c1-ad3a-fd14f0c1471b` 已经只读 D 检查和源码审核。补丁在目标输入上增加 `bool(torch.all(...))` 的设备/主机同步，与模型风险说明矛盾；审核记录 `7b966457-9efe-55ec-b3e2-d683be317397` 因此拒绝晋级，并已按拒绝路径关闭 Run。审核材料见 `docs/evidence/bw20-agent-review-20260924-run-3b47e5fe.md`；这不是实机性能结论。
+- 新 Task `388462e4-b316-5c60-b484-a48242658833` / Run `39e83136-14dd-53d4-8530-4999a4fc2fd4` 以更明确的冻结输入和同步约束进行一次真实模型调用。Attempt `36dd542e-8977-5ba5-b609-94fe8881c7da` 正式结算为 `failed/no_model_proposals`，Run 为 `failed/no_retained_proposals`，清理 `verified`；没有候选，未重复付费请求、未启动 HCU。
+- 当期数据库和 `generation/`、`evidence/` 在 BW20 备份，并复制到本机受限目录。数据库备份 SHA256 `f8b571710350c05bf49907e7237e5ffeca166c460f1a66bc9af28d6678265906`，证据归档 SHA256 `073b3b926c17db070e45ee509449e00b6c644ffedc1ddd1315334eec4d067a1f`；临时数据库恢复核对 35 Task、17 Agent Run、34 条预算账、32 项迁移后已清理。正式异地备份系统及保管责任人仍未指定。
+- **交付边界：**现有单候选历史案例与受控 Agent 生成/拒绝/无提案链路可展示；最新 main 的全新 Agent Candidate→HCU 正确性/性能→D→人工签核没有跑通，不能声称最小 MVP 已完成该项实机验收。下一步须重新选择可安全优化的热点或明确只限冻结输入家族的实验边界，再建新 Run；不得复用旧证据冒充新验收。`automatic_release_allowed=false`。

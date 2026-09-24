@@ -543,3 +543,15 @@
 - Applies to: BW20 allocator-free Agent 提案审核及以后类似的单热点生成。
 - Do not repeat: 不要把模型自述的“免 unique/免 cat”当成代码事实，也不要为凑完整链路批准无效快路径。
 - Last updated: 2026-09-23
+
+# BW20 MVP PostgreSQL 备份角色和 Docker stdin
+
+- Scope: project-local
+- Symptom: 对 `hcuopt-mvp-db-20260923` 使用默认 `postgres` 角色导出失败；随后从宿主机重定向备份到容器里的 `pg_restore --list` 报空输入。
+- Evidence: `psql -U hcuopt -d hcuopt -Atqc "select current_user"` 返回 `hcuopt`；导出后的目标文件为 941883 字节，而不带 `-i` 的 `docker exec` 校验读到 0 字节。
+- Cause: 此实例实际数据库角色为 `hcuopt`；`docker exec` 缺少 `-i` 不转发重定向的标准输入。
+- Proven workaround: `docker exec -u postgres hcuopt-mvp-db-20260923 pg_dump -U hcuopt -Fc -d hcuopt > <明确备份路径>`；用 `docker exec -i -u postgres hcuopt-mvp-db-20260923 pg_restore --list < <同一路径>` 验证，并检查非零大小与 SHA256。
+- Validation: 2026-09-24 新备份格式校验通过，SHA256 `f8b571710350c05bf49907e7237e5ffeca166c460f1a66bc9af28d6678265906`。恢复演练仍须单独进行。
+- Applies to: BW20 新 MVP 数据库备份与恢复演练。
+- Do not repeat: 不要默认 `postgres` 数据库角色；无 `-i` 的 `pg_restore` 报空输入不能判定备份损坏。
+- Last updated: 2026-09-24
