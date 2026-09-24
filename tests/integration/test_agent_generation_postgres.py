@@ -11,11 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 
 from hcuopt.adapters.agent_generator import CandidateProposalBatchStore, ProposalPatchStore
+from hcuopt.adapters.agent_knowledge import KnowledgeSnapshotStore
 from hcuopt.adapters.agent_promotion import (
     BaselineOverlaySource,
     CandidateSourcePackagePublisher,
@@ -202,6 +203,7 @@ def _batch(
     patch_uri: str | None = None,
     patch_hash: str | None = None,
     proposal_materials: tuple[tuple[str, str, str], ...] | None = None,
+    optimization_intent_prefix: str = "remove redundant materialization",
     real_generator: bool = False,
 ) -> CandidateProposalBatch:
     materials = proposal_materials or (
@@ -235,7 +237,7 @@ def _batch(
                 "generation_run_id": attempt.generation_run_id,
                 "generator_id": attempt.generator_id,
                 "ordinal": ordinal,
-                "optimization_intent": f"remove redundant materialization {ordinal}",
+                "optimization_intent": f"{optimization_intent_prefix} {ordinal}",
                 "rationale": "The immutable trace binds the generated proposal.",
                 "risk_summary": "Independent correctness review remains mandatory.",
                 "patch_uri": material[0],
@@ -299,6 +301,7 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         output_bytes: int = 1024,
         raw_patch: bytes | None = None,
         raw_patches: tuple[bytes, ...] | None = None,
+        optimization_intent_prefix: str = "remove redundant materialization",
         runner_status: str = "succeeded",
         real_generator: bool = False,
     ) -> tuple[CandidateProposalBatch | None, tuple[RunnerExecutionReceiptRef, str | None]]:
@@ -383,6 +386,7 @@ class AgentGenerationPostgresTests(unittest.TestCase):
                 )
                 or None
             ),
+            optimization_intent_prefix=optimization_intent_prefix,
             real_generator=real_generator,
         )
         stored_batch = self.batch_store.publish(batch)
@@ -904,6 +908,210 @@ class AgentGenerationPostgresTests(unittest.TestCase):
         )
         # M2a Scripted regression remains the separate fixture-only CI path; these
         # promoted business Packages are intentionally not relabelled or consumed here.
+
+    def test_gepa_evaluations_use_fresh_postgres_runs_and_d_rehashes(self) -> None:
+        gepa = pytest.importorskip("gepa.optimize_anything")
+
+        from hcuopt.agent.gepa_demo import (
+            GepaCaseEvaluation,
+            GepaScriptedCase,
+            run_gepa_scripted_demo,
+            write_gepa_demo_evidence,
+        )
+
+        knowledge_store = KnowledgeSnapshotStore(
+            self.evidence_root / "gepa-knowledge",
+            profile="m2b-gepa-scripted-knowledge-v1",
+        )
+        run_ordinal = 0
+        case = GepaScriptedCase(
+            case_id="postgres-scripted-case",
+            target_id="postgres-scripted-agent",
+            baseline_epoch_id="51000000-0000-0000-0000-000000000003",
+            replacement_point="sglang.runtime.operator.forward",
+        )
+
+        def evaluate_policy(policy: str, _case: GepaScriptedCase) -> GepaCaseEvaluation:
+            nonlocal run_ordinal
+            run_ordinal += 1
+            policy_payload = policy.encode("utf-8")
+            knowledge_payload = policy_payload + b"\n"
+            knowledge = KnowledgeSnapshot(
+                snapshot_id=uuid4(),
+                sources=(
+                    {
+                        "knowledge_id": "gepa/advisory-policy",
+                        "source_kind": "skill",
+                        "version": f"eval-{run_ordinal}",
+                        "source_uri": f"skill:///gepa/{run_ordinal}.md",
+                        "content_hash": _payload_hash(knowledge_payload),
+                        "license_id": "MulanPSL-2.0",
+                    },
+                ),
+                created_by="gepa-postgres-scripted-test",
+                created_at=NOW,
+            )
+            knowledge_store.publish(
+                knowledge,
+                {
+                    ("gepa/advisory-policy", f"eval-{run_ordinal}"): knowledge_payload
+                },
+            )
+            start_request = _start_request(
+                f"gepa-postgres-scripted-eval-{run_ordinal}",
+                knowledge_snapshot=knowledge,
+            )
+            started = self.coordinator.start(start_request, self.repository)
+            claims = tuple(
+                self.repository.claim_generation_attempt(
+                    f"gepa-scripted-worker-{run_ordinal}-{index}",
+                    lease_seconds=10,
+                    generation_run_id=started.generation_run_id,
+                    now=NOW,
+                )
+                for index in range(2)
+            )
+            assert all(claim is not None for claim in claims)
+            assert claims[0] is not None and claims[1] is not None
+            distinct = "distinct" in policy.lower()
+            patch_a = _source_patch(1)
+            patch_b = (
+                (
+                    f"diff --git a/{BASELINE_PATH} b/{BASELINE_PATH}\n"
+                    f"--- a/{BASELINE_PATH}\n"
+                    f"+++ b/{BASELINE_PATH}\n"
+                    "@@ -1,2 +1,2 @@\n"
+                    " def forward(value):\n"
+                    "-    return value\n"
+                    "+    return value * 2\n"
+                ).encode()
+                if distinct
+                else patch_a
+            )
+            for index, (claim, patch) in enumerate(zip(claims, (patch_a, patch_b), strict=True)):
+                batch, (receipt, batch_uri) = self._settlement(
+                    claim,
+                    normalized_patch_hash=_hash("c"),
+                    raw_patch=patch,
+                    optimization_intent_prefix=(
+                        f"distinct proposal {claim.attempt.generator_id}"
+                        if distinct
+                        else "shared duplicate proposal"
+                    ),
+                )
+                assert batch is not None
+                assert batch_uri is not None
+                self.repository.settle_generation_attempt(
+                    claim.attempt.attempt_id,
+                    claim.attempt.claim_token,
+                    batch,
+                    receipt,
+                    runner_receipt_reader=self.receipt_store,
+                    batch_uri=batch_uri,
+                    now=NOW + timedelta(seconds=index + 1),
+                )
+
+            status = self.repository.generation_run_status(started.generation_run_id)
+            self.assertEqual(status.run.state, "awaiting_review")
+
+            run_root = self.evidence_root / "gepa-evaluations" / str(run_ordinal)
+
+            def publish_evidence(name: str, value: object) -> dict[str, str]:
+                encoded = canonical_json_bytes(value)
+                path = run_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(encoded)
+                return {
+                    "uri": path.resolve(strict=True).as_uri(),
+                    "content_hash": _payload_hash(encoded),
+                }
+
+            knowledge_ref = publish_evidence("knowledge.json", knowledge)
+            request_ref = publish_evidence("request.json", start_request.request)
+            plan_ref = publish_evidence("plan.json", start_request.plan)
+            status_ref = publish_evidence("status.json", status)
+            context = AgentProposalVerificationContext(
+                task_id=uuid4(),
+                target_id=case.target_id,
+                baseline_epoch_id=start_request.request.baseline_epoch_id,
+                generation_run_id=started.generation_run_id,
+                knowledge={
+                    **knowledge_ref,
+                    "identity_hash": knowledge_snapshot_hash(knowledge),
+                },
+                request={
+                    **request_ref,
+                    "identity_hash": candidate_generation_request_hash(
+                        start_request.request
+                    ),
+                },
+                plan={
+                    **plan_ref,
+                    "identity_hash": apex_generation_plan_hash(start_request.plan),
+                },
+                generation_status=status_ref,
+            )
+            verified = AgentProposalVerifier(
+                HashedEvidenceReader(self.evidence_root)
+            ).verify(context)
+            read_model = build_agent_generation_read_model(verified)
+            expected_kept = 2 if distinct else 1
+            actual_kept = sum(item.status == "kept" for item in read_model.proposals)
+            self.assertEqual(
+                actual_kept,
+                expected_kept,
+                f"Scripted policy {policy!r} produced "
+                f"{[(item.status, item.reason_code) for item in read_model.proposals]}",
+            )
+            return GepaCaseEvaluation(
+                read_model=read_model,
+                expected_knowledge_hash=knowledge_snapshot_hash(knowledge),
+            )
+
+        def deterministic_scripted_proposer(
+            candidate, _reflective_dataset, components_to_update
+        ):
+            return {
+                component: "produce distinct proposals"
+                for component in components_to_update
+            }
+
+        config = gepa.GEPAConfig(
+            engine=gepa.EngineConfig(max_metric_calls=4),
+            reflection=gepa.ReflectionConfig(
+                custom_candidate_proposer=deterministic_scripted_proposer
+            ),
+        )
+        result = run_gepa_scripted_demo(
+            seed_policy="produce duplicate proposals",
+            cases=(case,),
+            case_evaluator=evaluate_policy,
+            optimize_anything=gepa.optimize_anything,
+            config=config,
+            max_metric_calls=4,
+        )
+        artifact = write_gepa_demo_evidence(
+            self.evidence_root / "gepa-evaluations" / "run-report.json",
+            result,
+            optimizer_identity="gepa/0.1.4",
+        )
+
+        scores = [float(item["score"]) for item in result.evaluations]
+        run_ids = [
+            item["evidence"]["generation_run_id"]
+            for evaluation in result.evaluations
+            for item in evaluation["verified_scripted_episodes"]
+        ]
+        self.assertGreaterEqual(result.metric_calls, 2)
+        self.assertEqual(result.metric_calls, len(set(run_ids)))
+        self.assertGreater(max(scores), min(scores))
+        self.assertTrue(Path(artifact.uri.removeprefix("file://")).is_file())
+        self.assertTrue(
+            all(
+                item["performance_conclusion"] == "not_measured"
+                for item in result.evaluations
+            )
+        )
 
     def test_failure_retries_and_expired_claim_consumes_conservative_budget(self) -> None:
         start = self.coordinator.start(
