@@ -25,6 +25,11 @@ is clean at `dad582f28458cd0e11e0be675fbe7fcc7ab65ac1`. In that exact tree,
 has a separate K/V stream-ordering branch. Source inspection alone does **not**
 prove the observed `loc` values are unique or that the proposed fused path is
 safe under capture; those remain explicit gates before Candidate intake.
+The same baseline's paged allocator `alloc_extend` asserts `len(torch.unique(out_indices))
+== len(out_indices)` only under `SGLANG_DEBUG_MEMORY_POOL`. That is useful design
+intent, **not** a production-time guarantee; the measured input family still
+needs a recorded distinctness check, and any broader service path must retain
+the original implementation unless its invariant is established separately.
 
 For the observed BF16 paged layout and a provably distinct `loc` vector, fuse `page=loc//64`, `offset=loc%64`, and K/V cache stores in one startup-Overlay Triton implementation. Dispatch may use only host-known metadata (shape, dtype, stride, layout and capture/stream state); it must not use tensor-to-Python booleans, implicit device synchronization, or a shape check as a substitute for proving index uniqueness. Unsupported layouts, dtype conversion/scaling, capture/alternate-stream behavior, overlap, duplicate or invalid locations must retain the original path unless an independent oracle covers them. Do not mutate the locked Baseline or an existing Run.
 
